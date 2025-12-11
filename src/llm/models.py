@@ -1,59 +1,225 @@
 """
 LLM 响应数据模型定义
+
+使用 Pydantic v2 定义 LLM 调用的输入输出数据结构，
+包括 Module A (ConsensusResult) 和 Module B (ThesisProjectionResult) 的输出模型。
 """
-from dataclasses import dataclass
+from __future__ import annotations
+
 from typing import Any
 
-
-@dataclass
-class LLMResponse:
-    """LLM 原始响应封装"""
-    content: str  # 响应文本内容
-    model: str  # 使用的模型
-    usage: dict[str, int] | None = None  # Token 使用统计
-    raw_response: Any = None  # 原始响应对象
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-@dataclass
-class ConsensusResult:
+class LLMResponse(BaseModel):
+    """
+    LLM 原始响应封装
+
+    封装 LLM API 返回的原始响应，包括内容、使用统计等。
+
+    Attributes:
+        content: 响应文本内容
+        model: 使用的模型名称
+        usage: Token 使用统计
+        raw_response: 原始响应对象（用于调试）
+    """
+
+    content: str = Field(..., description="响应文本内容")
+    model: str = Field(..., description="使用的模型")
+    usage: dict[str, int] | None = Field(default=None, description="Token 使用统计")
+    raw_response: Any = Field(default=None, exclude=True, description="原始响应对象")
+
+    def get_total_tokens(self) -> int:
+        """
+        获取总 token 使用量
+
+        Returns:
+            int: 总 token 数，未知返回 0
+        """
+        if self.usage is None:
+            return 0
+        return self.usage.get("total_tokens", 0)
+
+    def get_cost_estimate(self, price_per_1k_tokens: float = 0.001) -> float:
+        """
+        估算调用成本
+
+        Args:
+            price_per_1k_tokens: 每 1000 token 的价格（美元）
+
+        Returns:
+            float: 估算成本（美元）
+        """
+        return self.get_total_tokens() / 1000 * price_per_1k_tokens
+
+
+class ConsensusResult(BaseModel):
     """
     Module A 输出：市场共识分析结果
 
-    对应 PRD 5.3 节的 JSON Schema
-    """
-    sentiment_score: int  # 市场情绪评分 (0-100)
-    implied_growth: float  # 市场隐含年化增长率 (百分数，如 5.0 表示 5%)
-    key_narrative: str  # 市场主要叙事描述
+    对应 PRD 5.3 节的 JSON Schema。
+    由 ConsensusEngine 调用 LLM 后解析生成。
 
-    def validate(self) -> bool:
+    Attributes:
+        sentiment_score: 市场情绪评分 (0-100)
+            - 0-20: 提及崩盘、危机、不可持续
+            - 21-40: 关注成本风险、汇率风险、增长不及预期
+            - 41-60: 多空平衡，价格已 Price-in
+            - 61-80: 强调增长逻辑，弱化风险
+            - 81-100: 使用"无限空间"、"新纪元"等极度乐观用语
+        implied_growth: 市场隐含年化增长率 (百分数，如 5.0 表示 5%)
+        key_narrative: 市场主要叙事描述
+
+    Example:
+        >>> result = ConsensusResult(
+        ...     sentiment_score=35,
+        ...     implied_growth=5.0,
+        ...     key_narrative="市场担忧钢价上涨侵蚀利润"
+        ... )
+    """
+
+    sentiment_score: int = Field(
+        ...,
+        ge=0,
+        le=100,
+        description="市场情绪评分 (0-100)",
+    )
+    implied_growth: float = Field(
+        ...,
+        ge=-50.0,
+        le=100.0,
+        description="市场隐含年化增长率 (百分数)",
+    )
+    key_narrative: str = Field(
+        ...,
+        min_length=1,
+        description="市场主要叙事描述",
+    )
+
+    @field_validator("key_narrative")
+    @classmethod
+    def validate_narrative(cls, v: str) -> str:
+        """清理叙事文本"""
+        return v.strip()
+
+    def get_sentiment_level(self) -> str:
         """
-        验证数据有效性
+        获取情绪级别描述
 
         Returns:
-            bool: 数据是否有效
+            str: 情绪级别 ("panic", "pessimistic", "neutral", "optimistic", "euphoric")
         """
-        return (
-            0 <= self.sentiment_score <= 100
-            and -50.0 <= self.implied_growth <= 100.0
-            and len(self.key_narrative) > 0
-        )
+        if self.sentiment_score <= 20:
+            return "panic"
+        elif self.sentiment_score <= 40:
+            return "pessimistic"
+        elif self.sentiment_score <= 60:
+            return "neutral"
+        elif self.sentiment_score <= 80:
+            return "optimistic"
+        else:
+            return "euphoric"
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        转换为字典格式
+
+        Returns:
+            dict: 包含所有字段的字典
+        """
+        return {
+            "sentiment_score": self.sentiment_score,
+            "implied_growth": self.implied_growth,
+            "key_narrative": self.key_narrative,
+        }
 
 
-@dataclass
-class ThesisProjectionResult:
+class ThesisProjectionResult(BaseModel):
     """
     Module B 输出：信念投影结果
 
-    对应 PRD 5.4 节的 JSON Schema
-    """
-    our_growth: float  # 我们预期的合理年化增长率 (百分数，如 15.0 表示 15%)
-    reasoning: str  # 推导逻辑说明
+    对应 PRD 5.4 节的 JSON Schema。
+    由 ThesisProjector 调用 LLM 后解析生成。
 
-    def validate(self) -> bool:
+    Attributes:
+        our_growth: 我们预期的合理年化增长率 (百分数，如 15.0 表示 15%)
+        reasoning: 推导逻辑说明
+
+    Example:
+        >>> result = ThesisProjectionResult(
+        ...     our_growth=15.0,
+        ...     reasoning="在全球供应链重构与高端制造国产替代的背景下..."
+        ... )
+    """
+
+    our_growth: float = Field(
+        ...,
+        ge=-50.0,
+        le=100.0,
+        description="我们预期的合理年化增长率 (百分数)",
+    )
+    reasoning: str = Field(
+        ...,
+        min_length=1,
+        description="推导逻辑说明",
+    )
+
+    @field_validator("reasoning")
+    @classmethod
+    def validate_reasoning(cls, v: str) -> str:
+        """清理推理文本"""
+        return v.strip()
+
+    def to_dict(self) -> dict[str, Any]:
         """
-        验证数据有效性
+        转换为字典格式
 
         Returns:
-            bool: 数据是否有效
+            dict: 包含所有字段的字典
         """
-        return -50.0 <= self.our_growth <= 100.0 and len(self.reasoning) > 0
+        return {
+            "our_growth": self.our_growth,
+            "reasoning": self.reasoning,
+        }
+
+
+class AuditSignal(BaseModel):
+    """
+    审计信号
+
+    封装 Gap 计算和信号判定的结果。
+
+    Attributes:
+        signal: 信号类型 ("OPPORTUNITY", "OVERHEATED", "WAIT")
+        gap: 认知差 = Our_Growth - Implied_Growth
+        confidence: 信号置信度描述
+    """
+
+    signal: str = Field(
+        ...,
+        pattern="^(OPPORTUNITY|OVERHEATED|WAIT)$",
+        description="信号类型",
+    )
+    gap: float = Field(..., description="认知差")
+    confidence: str = Field(default="medium", description="信号置信度")
+
+    @model_validator(mode="after")
+    def set_confidence(self) -> "AuditSignal":
+        """根据 gap 大小自动设置置信度"""
+        abs_gap = abs(self.gap)
+        if abs_gap >= 20:
+            self.confidence = "high"
+        elif abs_gap >= 10:
+            self.confidence = "medium"
+        else:
+            self.confidence = "low"
+        return self
+
+    def is_actionable(self) -> bool:
+        """
+        判断信号是否可操作
+
+        Returns:
+            bool: OPPORTUNITY 或 OVERHEATED 时返回 True
+        """
+        return self.signal in ("OPPORTUNITY", "OVERHEATED")
