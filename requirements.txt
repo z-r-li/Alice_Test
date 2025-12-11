@@ -1,0 +1,25 @@
+# Alice Test Dependencies
+
+# Core
+pyyaml>=6.0
+pydantic>=2.0
+
+# LLM API Client
+httpx>=0.25.0
+
+# Data Sources
+tushare>=1.2.0
+akshare>=1.10.0
+yfinance>=0.2.0
+
+# Data Processing
+pandas>=2.0
+
+# Scheduling (optional)
+apscheduler>=3.10.0
+
+# Development
+pytest>=7.0
+pytest-asyncio>=0.21.0
+black>=23.0
+mypy>=1.0
