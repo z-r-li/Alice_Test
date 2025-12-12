@@ -1,19 +1,77 @@
 """
 DeepSeek API 客户端封装
 
-职责：
-1. 封装 DeepSeek API 调用
-2. 实现重试机制
-3. JSON 响应解析与校验
+使用 OpenAI 官方 Python SDK 调用 DeepSeek API
 """
+import os
 import json
 import time
-from typing import TypeVar, Type
+from typing import Literal, TypeVar, Type
+
+from openai import OpenAI
 
 from .models import LLMResponse, ConsensusResult, ThesisProjectionResult
 from .prompts import PromptTemplates
 
 T = TypeVar("T", ConsensusResult, ThesisProjectionResult)
+
+# 默认配置
+DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_TEMPERATURE = 0
+DEFAULT_BASE_URL = "https://api.deepseek.com"
+
+
+def _get_client() -> OpenAI:
+    """获取 OpenAI 客户端实例"""
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise ValueError("环境变量 DEEPSEEK_API_KEY 未设置")
+    return OpenAI(api_key=api_key, base_url=DEFAULT_BASE_URL)
+
+
+def call_chat(
+    messages: list[dict],
+    *,
+    response_format: Literal["json", "text"] = "text",
+    model: str = DEFAULT_MODEL,
+    temperature: float = DEFAULT_TEMPERATURE,
+) -> str:
+    """
+    调用 DeepSeek Chat API
+
+    Args:
+        messages: 消息列表，格式为 [{"role": "user", "content": "..."}]
+        response_format: 响应格式，"json" 或 "text"，默认 "text"
+        model: 模型名称，默认 "deepseek-chat"
+        temperature: 温度参数，默认 0
+
+    Returns:
+        str: 模型响应内容
+
+    Raises:
+        ValueError: 环境变量未设置
+        openai.APIError: API 调用失败
+    """
+    client = _get_client()
+
+    kwargs: dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+
+    # 若 response_format="json"，启用 JSON 输出模式
+    if response_format == "json":
+        kwargs["response_format"] = {"type": "json_object"}
+
+    response = client.chat.completions.create(**kwargs)
+
+    return response.choices[0].message.content or ""
+
+
+# =============================================================================
+# 以下为兼容现有代码的类实现
+# =============================================================================
 
 
 class DeepSeekClientError(Exception):
@@ -35,9 +93,9 @@ class DeepSeekClient:
     """DeepSeek API 客户端"""
 
     DEFAULT_MODEL = "deepseek-chat"
-    DEFAULT_TEMPERATURE = 0.0  # 必须为 0，保证评分稳定
+    DEFAULT_TEMPERATURE = 0.0
     DEFAULT_MAX_TOKENS = 4096
-    MAX_RETRIES = 2  # 最大重试次数
+    MAX_RETRIES = 2
 
     def __init__(
         self,
@@ -62,7 +120,7 @@ class DeepSeekClient:
         self._temperature = temperature if temperature is not None else self.DEFAULT_TEMPERATURE
         self._max_tokens = max_tokens or self.DEFAULT_MAX_TOKENS
         self._base_url = base_url
-        # TODO: 初始化 HTTP 客户端 (httpx/requests)
+        self._client = OpenAI(api_key=api_key, base_url=base_url)
 
     def chat(
         self,
@@ -84,12 +142,28 @@ class DeepSeekClient:
         Raises:
             APICallError: API 调用失败
         """
-        # TODO: 实现 API 调用
-        # 1. 构建请求 body
-        # 2. 发送 POST 请求到 /v1/chat/completions
-        # 3. 解析响应
-        # 4. 返回 LLMResponse
-        raise NotImplementedError
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature if temperature is not None else self._temperature,
+                max_tokens=self._max_tokens,
+            )
+
+            content = response.choices[0].message.content or ""
+            usage = response.usage
+
+            return LLMResponse(
+                content=content,
+                model=response.model,
+                prompt_tokens=usage.prompt_tokens if usage else 0,
+                completion_tokens=usage.completion_tokens if usage else 0,
+            )
+        except Exception as e:
+            raise APICallError(f"API 调用失败: {e}") from e
 
     def chat_with_json_output(
         self,
@@ -118,7 +192,6 @@ class DeepSeekClient:
 
         for attempt in range(retries + 1):
             try:
-                # 重试时添加 JSON 修复提示
                 effective_system = system_prompt
                 if attempt > 0:
                     effective_system += PromptTemplates.JSON_REPAIR_SUFFIX
@@ -133,7 +206,7 @@ class DeepSeekClient:
 
             except JSONParseError as e:
                 if attempt < retries:
-                    time.sleep(1)  # 重试前等待
+                    time.sleep(1)
                     continue
                 raise
 
@@ -153,11 +226,26 @@ class DeepSeekClient:
         Raises:
             JSONParseError: 解析失败
         """
-        # TODO: 实现 JSON 解析
-        # 1. 清理 markdown 代码块标记
-        # 2. json.loads 解析
-        # 3. 构造 result_class 实例
-        raise NotImplementedError
+        try:
+            # 清理 markdown 代码块标记
+            cleaned = content.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:]
+            elif cleaned.startswith("```"):
+                cleaned = cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+
+            # 解析 JSON
+            data = json.loads(cleaned)
+
+            # 构造结果对象
+            return result_class.from_dict(data)
+        except json.JSONDecodeError as e:
+            raise JSONParseError(f"JSON 解析失败: {e}") from e
+        except Exception as e:
+            raise JSONParseError(f"结果构造失败: {e}") from e
 
     def get_consensus(
         self,
@@ -218,3 +306,27 @@ class DeepSeekClient:
             industry=industry,
         )
         return self.chat_with_json_output(system, user, ThesisProjectionResult)
+
+
+# =============================================================================
+# 测试代码
+# =============================================================================
+
+if __name__ == "__main__":
+    # 简单测试 call_chat 函数
+    messages = [
+        {"role": "system", "content": "你是一个有帮助的助手。"},
+        {"role": "user", "content": "你好，请用一句话介绍自己。"},
+    ]
+
+    print("测试 text 格式:")
+    result = call_chat(messages, response_format="text")
+    print(f"响应: {result}\n")
+
+    print("测试 json 格式:")
+    messages_json = [
+        {"role": "system", "content": "你是一个返回 JSON 格式数据的助手。"},
+        {"role": "user", "content": "请返回一个包含 name 和 greeting 字段的 JSON 对象。"},
+    ]
+    result_json = call_chat(messages_json, response_format="json")
+    print(f"响应: {result_json}")
