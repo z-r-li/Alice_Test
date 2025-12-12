@@ -1,0 +1,55 @@
+# Alice Test 配置文件示例
+# 复制此文件为 config.yaml 并填入实际配置
+
+llm_api:
+  provider: "deepseek"
+  api_key: ""  # 留空则从环境变量 DEEPSEEK_API_KEY 读取
+  model: "deepseek-chat"
+  temperature: 0  # 必须为 0，保证评分稳定
+  max_tokens: 4096
+
+data_sources:
+  quotes:
+    a_share: "tushare"  # 或 "akshare"
+    hk_us: "yfinance"
+  text:
+    research_providers:
+      - "中信证券"
+      - "华泰证券"
+      - "海通证券"
+      - "Morgan Stanley"
+      - "Goldman Sachs"
+    news_sites:
+      - "东方财富"
+      - "新浪财经"
+      - "彭博"
+      - "路透"
+    search_entrypoints:
+      - "https://example-research-site.com"
+
+targets:
+  - ticker: "601985.SH"
+    name: "中国核电"
+    thesis: >
+      AI算力需要稳定基荷电力，核电是物理刚需，
+      具备类公用事业的确定性和科技股的成长性。
+
+  - ticker: "600150.SH"
+    name: "中国船舶"
+    thesis: >
+      全球供应链重构导致造船长周期开启，
+      战略资产应按重置成本定价，而非简单的制造业PE。
+
+  - ticker: "0700.HK"
+    name: "腾讯控股"
+    thesis: >
+      国内社交和游戏基本盘稳固，海外游戏和云业务是增量，
+      回购和分红提升股东回报，估值修复空间大。
+
+scheduler:
+  cron: "0 18 * * MON-FRI"  # 每个交易日 18:00 运行
+
+gap_thresholds:
+  opportunity_gap_min: 10.0  # Gap > 10 视为机会
+  opportunity_sentiment_max: 40  # 情绪 < 40 视为悲观
+  overheated_sentiment_min: 80  # 情绪 > 80 视为过热
