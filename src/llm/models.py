@@ -57,7 +57,7 @@ class ConsensusResult(BaseModel):
     """
     Module A 输出：市场共识分析结果
 
-    对应 PRD 5.3 节的 JSON Schema。
+    对应 PRD 4.2.2 节的 JSON Schema。
     由 ConsensusEngine 调用 LLM 后解析生成。
 
     Attributes:
@@ -67,14 +67,20 @@ class ConsensusResult(BaseModel):
             - 41-60: 多空平衡，价格已 Price-in
             - 61-80: 强调增长逻辑，弱化风险
             - 81-100: 使用"无限空间"、"新纪元"等极度乐观用语
+        sentiment_label: 情绪标签 (恐慌|悲观|中性|乐观|狂热)
         implied_growth: 市场隐含年化增长率 (百分数，如 5.0 表示 5%)
-        key_narrative: 市场主要叙事描述
+        key_narrative: 市场主要叙事描述 (一句话总结)
+        key_worry: 市场主要担忧
+        key_hope: 市场主要期待
 
     Example:
         >>> result = ConsensusResult(
         ...     sentiment_score=35,
+        ...     sentiment_label="悲观",
         ...     implied_growth=5.0,
-        ...     key_narrative="市场担忧钢价上涨侵蚀利润"
+        ...     key_narrative="市场担忧钢价上涨侵蚀利润",
+        ...     key_worry="钢材成本压力",
+        ...     key_hope="新船订单增长"
         ... )
     """
 
@@ -83,6 +89,11 @@ class ConsensusResult(BaseModel):
         ge=0,
         le=100,
         description="市场情绪评分 (0-100)",
+    )
+    sentiment_label: str = Field(
+        ...,
+        pattern="^(恐慌|悲观|中性|乐观|狂热)$",
+        description="情绪标签 (恐慌|悲观|中性|乐观|狂热)",
     )
     implied_growth: float = Field(
         ...,
@@ -95,16 +106,26 @@ class ConsensusResult(BaseModel):
         min_length=1,
         description="市场主要叙事描述",
     )
+    key_worry: str = Field(
+        ...,
+        min_length=1,
+        description="市场主要担忧",
+    )
+    key_hope: str = Field(
+        ...,
+        min_length=1,
+        description="市场主要期待",
+    )
 
-    @field_validator("key_narrative")
+    @field_validator("key_narrative", "key_worry", "key_hope")
     @classmethod
-    def validate_narrative(cls, v: str) -> str:
-        """清理叙事文本"""
+    def validate_text_fields(cls, v: str) -> str:
+        """清理文本字段"""
         return v.strip()
 
     def get_sentiment_level(self) -> str:
         """
-        获取情绪级别描述
+        获取情绪级别描述 (英文)
 
         Returns:
             str: 情绪级别 ("panic", "pessimistic", "neutral", "optimistic", "euphoric")
@@ -129,8 +150,11 @@ class ConsensusResult(BaseModel):
         """
         return {
             "sentiment_score": self.sentiment_score,
+            "sentiment_label": self.sentiment_label,
             "implied_growth": self.implied_growth,
             "key_narrative": self.key_narrative,
+            "key_worry": self.key_worry,
+            "key_hope": self.key_hope,
         }
 
 
@@ -138,25 +162,38 @@ class ThesisProjectionResult(BaseModel):
     """
     Module B 输出：信念投影结果
 
-    对应 PRD 5.4 节的 JSON Schema。
+    对应 PRD 4.3.1 节的 JSON Schema。
     由 ThesisProjector 调用 LLM 后解析生成。
 
     Attributes:
+        thesis_aligned: 标的是否与用户投资信念一致
         our_growth: 我们预期的合理年化增长率 (百分数，如 15.0 表示 15%)
-        reasoning: 推导逻辑说明
+        confidence: 预测置信度 (高|中|低)
+        reasoning: 推导逻辑说明 (2-3 句解释)
 
     Example:
         >>> result = ThesisProjectionResult(
+        ...     thesis_aligned=True,
         ...     our_growth=15.0,
+        ...     confidence="高",
         ...     reasoning="在全球供应链重构与高端制造国产替代的背景下..."
         ... )
     """
 
+    thesis_aligned: bool = Field(
+        ...,
+        description="标的是否与用户投资信念一致",
+    )
     our_growth: float = Field(
         ...,
         ge=-50.0,
         le=100.0,
         description="我们预期的合理年化增长率 (百分数)",
+    )
+    confidence: str = Field(
+        ...,
+        pattern="^(高|中|低)$",
+        description="预测置信度 (高|中|低)",
     )
     reasoning: str = Field(
         ...,
@@ -178,7 +215,9 @@ class ThesisProjectionResult(BaseModel):
             dict: 包含所有字段的字典
         """
         return {
+            "thesis_aligned": self.thesis_aligned,
             "our_growth": self.our_growth,
+            "confidence": self.confidence,
             "reasoning": self.reasoning,
         }
 

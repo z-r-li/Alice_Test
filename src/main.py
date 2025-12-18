@@ -99,6 +99,7 @@ class AliceTestPipeline:
             ticker=target.ticker,
             name=target.name,
             price=raw_data.quote.price_close,
+            pe_ttm=raw_data.quote.pe_ttm,
             consensus=consensus,
             thesis_projection=thesis_projection,
         )

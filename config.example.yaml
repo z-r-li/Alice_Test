@@ -26,6 +26,19 @@ data_sources:
       - "路透"
     search_entrypoints:
       - "https://example-research-site.com"
+  # 爬虫配置（对应 PRD 5.1）
+  crawler:
+    use_llm_for_sources: true  # 是否使用 LLM 辅助生成数据源
+    trusted_sources:
+      cn:
+        - "eastmoney.com"
+        - "10jqka.com.cn"
+        - "wind.com.cn"
+      en:
+        - "bloomberg.com"
+        - "reuters.com"
+    lookback_hours: 48  # 文本回溯时间窗口（小时）
+    max_items_per_ticker: 10  # 每个标的最大文本数量
 
 targets:
   - ticker: "601985.SH"
