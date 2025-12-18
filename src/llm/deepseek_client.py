@@ -127,6 +127,7 @@ class DeepSeekClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float | None = None,
+        json_mode: bool = False,
     ) -> LLMResponse:
         """
         发送聊天请求
@@ -135,6 +136,7 @@ class DeepSeekClient:
             system_prompt: 系统提示词
             user_prompt: 用户消息
             temperature: 可选覆盖温度参数
+            json_mode: 是否启用 JSON 输出模式
 
         Returns:
             LLMResponse: 响应对象
@@ -143,15 +145,22 @@ class DeepSeekClient:
             APICallError: API 调用失败
         """
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[
+            # 构建请求参数
+            kwargs: dict = {
+                "model": self._model,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=temperature if temperature is not None else self._temperature,
-                max_tokens=self._max_tokens,
-            )
+                "temperature": temperature if temperature is not None else self._temperature,
+                "max_tokens": self._max_tokens,
+            }
+
+            # 启用 JSON 输出模式（PRD 4.2, 4.3 要求）
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+
+            response = self._client.chat.completions.create(**kwargs)
 
             content = response.choices[0].message.content or ""
             usage = response.usage
@@ -175,11 +184,14 @@ class DeepSeekClient:
         """
         发送聊天请求并解析 JSON 响应
 
+        使用 DeepSeek 的 JSON 模式确保输出格式正确（PRD 4.2, 4.3 要求）。
+        实现重试机制：失败时追加 JSON_REPAIR_SUFFIX 提示并重试。
+
         Args:
             system_prompt: 系统提示词
             user_prompt: 用户消息
             result_class: 结果数据类 (ConsensusResult 或 ThesisProjectionResult)
-            max_retries: 最大重试次数
+            max_retries: 最大重试次数，默认为 MAX_RETRIES (2)
 
         Returns:
             T: 解析后的结果对象
@@ -189,28 +201,45 @@ class DeepSeekClient:
             APICallError: API 调用失败
         """
         retries = max_retries if max_retries is not None else self.MAX_RETRIES
+        last_error: Exception | None = None
 
         for attempt in range(retries + 1):
             try:
+                # 重试时追加 JSON 修复提示（PRD 7.2 要求）
                 effective_system = system_prompt
                 if attempt > 0:
                     effective_system += PromptTemplates.JSON_REPAIR_SUFFIX
 
-                response = self.chat(effective_system, user_prompt)
+                # 启用 JSON 模式调用 API（PRD 4.2, 4.3 要求）
+                response = self.chat(
+                    effective_system,
+                    user_prompt,
+                    json_mode=True,  # 启用 response_format={"type": "json_object"}
+                )
+
+                # 解析并验证响应
                 result = self._parse_json_response(response.content, result_class)
 
                 if result.validate():
                     return result
                 else:
-                    raise JSONParseError("Response validation failed")
+                    raise JSONParseError("响应验证失败：字段值不符合约束条件")
 
             except JSONParseError as e:
+                last_error = e
                 if attempt < retries:
-                    time.sleep(1)
+                    time.sleep(1)  # 重试前等待 1 秒
                     continue
                 raise
 
-        raise JSONParseError(f"Failed to parse JSON after {retries + 1} attempts")
+            except APICallError:
+                # API 调用失败直接抛出，不重试
+                raise
+
+        # 理论上不会到达这里，但为了类型完整性
+        raise JSONParseError(
+            f"JSON 解析失败（已重试 {retries} 次）: {last_error}"
+        )
 
     def _parse_json_response(self, content: str, result_class: Type[T]) -> T:
         """

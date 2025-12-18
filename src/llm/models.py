@@ -20,13 +20,15 @@ class LLMResponse(BaseModel):
     Attributes:
         content: 响应文本内容
         model: 使用的模型名称
-        usage: Token 使用统计
+        prompt_tokens: 输入 token 数
+        completion_tokens: 输出 token 数
         raw_response: 原始响应对象（用于调试）
     """
 
     content: str = Field(..., description="响应文本内容")
     model: str = Field(..., description="使用的模型")
-    usage: dict[str, int] | None = Field(default=None, description="Token 使用统计")
+    prompt_tokens: int = Field(default=0, description="输入 token 数")
+    completion_tokens: int = Field(default=0, description="输出 token 数")
     raw_response: Any = Field(default=None, exclude=True, description="原始响应对象")
 
     def get_total_tokens(self) -> int:
@@ -34,23 +36,32 @@ class LLMResponse(BaseModel):
         获取总 token 使用量
 
         Returns:
-            int: 总 token 数，未知返回 0
+            int: 总 token 数
         """
-        if self.usage is None:
-            return 0
-        return self.usage.get("total_tokens", 0)
+        return self.prompt_tokens + self.completion_tokens
 
-    def get_cost_estimate(self, price_per_1k_tokens: float = 0.001) -> float:
+    def get_cost_estimate(
+        self,
+        input_price_per_1m: float = 0.27,
+        output_price_per_1m: float = 1.10,
+    ) -> float:
         """
-        估算调用成本
+        估算调用成本（基于 DeepSeek-Chat 定价）
+
+        DeepSeek-Chat 定价（2024）:
+        - 输入: $0.27 / 1M tokens
+        - 输出: $1.10 / 1M tokens
 
         Args:
-            price_per_1k_tokens: 每 1000 token 的价格（美元）
+            input_price_per_1m: 输入每百万 token 价格（美元）
+            output_price_per_1m: 输出每百万 token 价格（美元）
 
         Returns:
             float: 估算成本（美元）
         """
-        return self.get_total_tokens() / 1000 * price_per_1k_tokens
+        input_cost = self.prompt_tokens / 1_000_000 * input_price_per_1m
+        output_cost = self.completion_tokens / 1_000_000 * output_price_per_1m
+        return input_cost + output_cost
 
 
 class ConsensusResult(BaseModel):
@@ -157,6 +168,57 @@ class ConsensusResult(BaseModel):
             "key_hope": self.key_hope,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ConsensusResult":
+        """
+        从字典构造 ConsensusResult 对象
+
+        Args:
+            data: 包含所有必需字段的字典
+
+        Returns:
+            ConsensusResult: 构造的结果对象
+
+        Raises:
+            ValidationError: 字段验证失败
+        """
+        return cls(
+            sentiment_score=data.get("sentiment_score", 0),
+            sentiment_label=data.get("sentiment_label", "中性"),
+            implied_growth=data.get("implied_growth", 0.0),
+            key_narrative=data.get("key_narrative", ""),
+            key_worry=data.get("key_worry", ""),
+            key_hope=data.get("key_hope", ""),
+        )
+
+    def validate(self) -> bool:
+        """
+        验证结果是否有效
+
+        检查所有必需字段是否存在且有效。
+
+        Returns:
+            bool: 验证通过返回 True
+        """
+        # 检查情绪评分范围
+        if not (0 <= self.sentiment_score <= 100):
+            return False
+
+        # 检查情绪标签是否有效
+        valid_labels = {"恐慌", "悲观", "中性", "乐观", "狂热"}
+        if self.sentiment_label not in valid_labels:
+            return False
+
+        # 检查隐含增长率范围
+        if not (-50.0 <= self.implied_growth <= 100.0):
+            return False
+
+        # 检查文本字段非空
+        if not self.key_narrative or not self.key_worry or not self.key_hope:
+            return False
+
+        return True
+
 
 class ThesisProjectionResult(BaseModel):
     """
@@ -220,6 +282,51 @@ class ThesisProjectionResult(BaseModel):
             "confidence": self.confidence,
             "reasoning": self.reasoning,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ThesisProjectionResult":
+        """
+        从字典构造 ThesisProjectionResult 对象
+
+        Args:
+            data: 包含所有必需字段的字典
+
+        Returns:
+            ThesisProjectionResult: 构造的结果对象
+
+        Raises:
+            ValidationError: 字段验证失败
+        """
+        return cls(
+            thesis_aligned=data.get("thesis_aligned", False),
+            our_growth=data.get("our_growth", 0.0),
+            confidence=data.get("confidence", "中"),
+            reasoning=data.get("reasoning", ""),
+        )
+
+    def validate(self) -> bool:
+        """
+        验证结果是否有效
+
+        检查所有必需字段是否存在且有效。
+
+        Returns:
+            bool: 验证通过返回 True
+        """
+        # 检查增长率范围
+        if not (-50.0 <= self.our_growth <= 100.0):
+            return False
+
+        # 检查置信度是否有效
+        valid_confidence = {"高", "中", "低"}
+        if self.confidence not in valid_confidence:
+            return False
+
+        # 检查推理文本非空
+        if not self.reasoning:
+            return False
+
+        return True
 
 
 class AuditSignal(BaseModel):
