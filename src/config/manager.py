@@ -117,13 +117,14 @@ class ConfigManager:
             config["llm_api"]["api_key"] = env_api_key
 
         # 从环境变量注入 Tushare Token（如果需要）
+        # PRD 5.1: TUSHARE_TOKEN 应注入到 data_sources.a_shares.token
         env_tushare_token = os.environ.get("TUSHARE_TOKEN")
         if env_tushare_token:
             if "data_sources" not in config:
                 config["data_sources"] = {}
-            if "quotes" not in config["data_sources"]:
-                config["data_sources"]["quotes"] = {}
-            config["data_sources"]["quotes"]["tushare_token"] = env_tushare_token
+            if "a_shares" not in config["data_sources"]:
+                config["data_sources"]["a_shares"] = {}
+            config["data_sources"]["a_shares"]["token"] = env_tushare_token
 
         return config
 
