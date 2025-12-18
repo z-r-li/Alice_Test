@@ -90,6 +90,69 @@ class TextSourceConfig(BaseModel):
     search_entrypoints: list[str] = Field(default_factory=list)
 
 
+class TrustedSourcesConfig(BaseModel):
+    """
+    可信数据源配置
+
+    对应 PRD 5.1 节 trusted_sources 配置
+
+    Attributes:
+        cn: 中文可信数据源域名列表
+        en: 英文可信数据源域名列表
+    """
+
+    cn: list[str] = Field(
+        default_factory=lambda: [
+            "eastmoney.com",
+            "10jqka.com.cn",
+            "wind.com.cn",
+        ],
+        description="中文可信数据源",
+    )
+    en: list[str] = Field(
+        default_factory=lambda: [
+            "bloomberg.com",
+            "reuters.com",
+        ],
+        description="英文可信数据源",
+    )
+
+
+class CrawlerConfig(BaseModel):
+    """
+    爬虫配置
+
+    对应 PRD 5.1 节爬虫配置定义
+
+    Attributes:
+        use_llm_for_sources: 是否使用 LLM 辅助生成数据源
+        trusted_sources: 可信数据源配置
+        lookback_hours: 文本回溯时间窗口（小时）
+        max_items_per_ticker: 每个标的最大文本数量
+    """
+
+    use_llm_for_sources: bool = Field(
+        default=True,
+        description="是否使用 LLM 辅助生成数据源",
+    )
+    trusted_sources: TrustedSourcesConfig = Field(
+        default_factory=TrustedSourcesConfig,
+        description="可信数据源配置",
+    )
+    lookback_hours: int = Field(
+        default=48,
+        gt=0,
+        le=168,
+        description="文本回溯时间窗口（小时）",
+    )
+    max_items_per_ticker: int = Field(
+        default=10,
+        gt=0,
+        le=50,
+        description="每个标的最大文本数量",
+    )
+
+
 class DataSourcesConfig(BaseModel):
     """
     数据源总配置
@@ -97,10 +160,12 @@ class DataSourcesConfig(BaseModel):
     Attributes:
         quotes: 行情数据源配置
         text: 文本数据源配置
+        crawler: 爬虫配置
     """
 
     quotes: QuotesSourceConfig = Field(default_factory=QuotesSourceConfig)
     text: TextSourceConfig = Field(default_factory=TextSourceConfig)
+    crawler: CrawlerConfig = Field(default_factory=CrawlerConfig)
 
 
 class TargetConfig(BaseModel):

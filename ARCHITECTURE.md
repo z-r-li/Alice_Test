@@ -162,6 +162,17 @@ class TextPreprocessor:
     def is_noise(self, text: TextItem) -> bool: ...
     def extract_key_content(self, raw_text: str) -> str: ...
     def calculate_opinion_density(self, text: TextItem) -> float: ...
+
+# config/models.py - 爬虫配置
+class CrawlerConfig:
+    use_llm_for_sources: bool = True           # 是否使用 LLM 辅助生成数据源
+    trusted_sources: TrustedSourcesConfig      # 可信数据源配置
+    lookback_hours: int = 48                   # 文本回溯时间窗口（小时）
+    max_items_per_ticker: int = 10             # 每个标的最大文本数量
+
+class TrustedSourcesConfig:
+    cn: list[str]  # 中文可信源: eastmoney.com, 10jqka.com.cn, wind.com.cn
+    en: list[str]  # 英文可信源: bloomberg.com, reuters.com
 ```
 
 ### 3.3 LLM 模块 (`llm/`)
@@ -170,17 +181,22 @@ class TextPreprocessor:
 # llm/models.py
 @dataclass
 class ConsensusResult:
-    """Module A 输出"""
-    sentiment_score: int    # 0-100
-    implied_growth: float   # 百分数，如 5.0 表示 5%
-    key_narrative: str
+    """Module A 输出 - 对应 PRD 4.2.2"""
+    sentiment_score: int       # 0-100 情绪评分
+    sentiment_label: str       # 恐慌|悲观|中性|乐观|狂热
+    implied_growth: float      # 百分数，如 5.0 表示 5%
+    key_narrative: str         # 一句话市场总结
+    key_worry: str             # 主要担忧
+    key_hope: str              # 主要期待
     def validate(self) -> bool: ...
 
 @dataclass
 class ThesisProjectionResult:
-    """Module B 输出"""
-    our_growth: float       # 百分数，如 15.0 表示 15%
-    reasoning: str
+    """Module B 输出 - 对应 PRD 4.3.1"""
+    thesis_aligned: bool       # 是否与用户信念一致
+    our_growth: float          # 百分数，如 15.0 表示 15%
+    confidence: str            # 高|中|低
+    reasoning: str             # 2-3 句解释
     def validate(self) -> bool: ...
 
 # llm/deepseek_client.py
@@ -259,17 +275,31 @@ class AuditSignal(str, Enum):
 
 @dataclass
 class AuditResult:
-    date: datetime
-    ticker: str
-    name: str
-    price: float
-    sentiment_score: int
-    implied_growth: float
-    our_growth: float
-    gap: float
-    signal: AuditSignal
-    key_narrative: str
-    reasoning: str
+    """审计结果 - 对应 PRD 6.1 audit_report.csv 字段定义"""
+    # 基础信息
+    date: datetime           # 审计日期 (YYYY-MM-DD)
+    ticker: str              # 股票代码
+    name: str                # 公司名称
+    price: float             # 收盘价
+    pe_ttm: float | None     # 市盈率（TTM）
+
+    # Module A 输出
+    sentiment_score: int     # 情绪分数 (0-100)
+    sentiment_label: str     # 情绪标签 (恐慌|悲观|中性|乐观|狂热)
+    implied_growth: float    # 市场隐含增长率 %
+    key_narrative: str       # 一句话市场总结
+    key_worry: str           # 主要担忧
+    key_hope: str            # 主要期待
+
+    # Module B 输出
+    thesis_aligned: bool     # 是否与投资信念一致
+    our_growth: float        # 信念预期增长率 %
+    confidence: str          # 预测置信度 (高|中|低)
+    reasoning: str           # 信念投影推理说明
+
+    # 信号判定
+    gap: float               # 认知差 (our - implied)
+    signal: AuditSignal      # OPPORTUNITY / OVERHEATED / WAIT
     status: Literal["ok", "data_error", "llm_error"]
 
 class GapCalculator:
@@ -281,6 +311,7 @@ class GapCalculator:
         ticker: str,
         name: str,
         price: float,
+        pe_ttm: float | None,
         consensus: ConsensusResult,
         thesis_projection: ThesisProjectionResult,
         audit_date: datetime | None = None,
