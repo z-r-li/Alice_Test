@@ -1,17 +1,32 @@
 # Alice Test 配置文件示例
 # 复制此文件为 config.yaml 并填入实际配置
+# 对应 PRD 第 5.1 节 config.yaml 结构
 
+# ============================================
+# LLM API 配置
+# ============================================
 llm_api:
   provider: "deepseek"
   api_key: ""  # 留空则从环境变量 DEEPSEEK_API_KEY 读取
   model: "deepseek-chat"
   temperature: 0  # 必须为 0，保证评分稳定
   max_tokens: 4096
+  max_retries: 2  # 请求失败时的最大重试次数
 
+# ============================================
+# 数据源配置
+# ============================================
 data_sources:
-  quotes:
-    a_share: "tushare"  # 或 "akshare"
-    hk_us: "yfinance"
+  # A 股数据源（PRD 格式）
+  a_shares:
+    provider: "tushare"  # 或 "akshare"
+    token: ""  # Tushare Token，留空则从环境变量 TUSHARE_TOKEN 读取
+
+  # 港美股数据源（PRD 格式）
+  hk_us:
+    provider: "yfinance"
+
+  # 文本数据源配置
   text:
     research_providers:
       - "中信证券"
@@ -26,6 +41,7 @@ data_sources:
       - "路透"
     search_entrypoints:
       - "https://example-research-site.com"
+
   # 爬虫配置（对应 PRD 5.1）
   crawler:
     use_llm_for_sources: true  # 是否使用 LLM 辅助生成数据源
@@ -37,9 +53,12 @@ data_sources:
       en:
         - "bloomberg.com"
         - "reuters.com"
-    lookback_hours: 48  # 文本回溯时间窗口（小时）
-    max_items_per_ticker: 10  # 每个标的最大文本数量
+    lookback_hours: 48  # 文本回溯时间窗口（小时），默认 48
+    max_items_per_ticker: 10  # 每个标的最大文本数量，默认 10
 
+# ============================================
+# 投资标的列表
+# ============================================
 targets:
   - ticker: "601985.SH"
     name: "中国核电"
@@ -59,9 +78,23 @@ targets:
       国内社交和游戏基本盘稳固，海外游戏和云业务是增量，
       回购和分红提升股东回报，估值修复空间大。
 
+# ============================================
+# 输出配置
+# ============================================
+output:
+  format: "csv"  # 或 "sqlite"
+  path: "./output/audit_report.csv"
+
+# ============================================
+# 调度配置
+# ============================================
 scheduler:
   cron: "0 18 * * MON-FRI"  # 每个交易日 18:00 运行
+  enabled: true
 
+# ============================================
+# Gap 判定阈值配置
+# ============================================
 gap_thresholds:
   opportunity_gap_min: 10.0  # Gap > 10 视为机会
   opportunity_sentiment_max: 40  # 情绪 < 40 视为悲观
