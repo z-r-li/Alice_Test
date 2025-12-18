@@ -22,6 +22,7 @@ class LLMConfig(BaseModel):
         model: 模型名称
         temperature: 温度参数，必须为 0 以保证评分稳定
         max_tokens: 最大 token 数
+        max_retries: 请求失败时的最大重试次数
     """
 
     provider: Literal["deepseek"] = "deepseek"
@@ -29,6 +30,7 @@ class LLMConfig(BaseModel):
     model: str = "deepseek-chat"
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, gt=0)
+    max_retries: int = Field(default=2, ge=0, le=10, description="最大重试次数")
 
     @field_validator("temperature")
     @classmethod
@@ -62,9 +64,56 @@ class LLMConfig(BaseModel):
         return key
 
 
+class ASharesSourceConfig(BaseModel):
+    """
+    A 股数据源配置
+
+    对应 PRD 5.1 节 data_sources.a_shares 配置
+
+    Attributes:
+        provider: A 股数据源提供商，支持 tushare 或 akshare
+        token: Tushare API Token（使用 tushare 时必填）
+    """
+
+    provider: Literal["tushare", "akshare"] = "tushare"
+    token: str = Field(default="", description="Tushare API Token")
+
+    def get_token(self) -> str:
+        """
+        获取 Token，优先从环境变量读取
+
+        Returns:
+            str: Token
+
+        Raises:
+            ValueError: 使用 tushare 但未配置 Token
+        """
+        token = os.environ.get("TUSHARE_TOKEN", self.token)
+        if self.provider == "tushare" and not token:
+            raise ValueError(
+                "使用 tushare 数据源需配置 Token。"
+                "请在 config.yaml 中设置 data_sources.a_shares.token "
+                "或设置环境变量 TUSHARE_TOKEN"
+            )
+        return token
+
+
+class HKUSSourceConfig(BaseModel):
+    """
+    港美股数据源配置
+
+    对应 PRD 5.1 节 data_sources.hk_us 配置
+
+    Attributes:
+        provider: 港美股数据源提供商，当前仅支持 yfinance
+    """
+
+    provider: Literal["yfinance"] = "yfinance"
+
+
 class QuotesSourceConfig(BaseModel):
     """
-    行情数据源配置
+    行情数据源配置（兼容旧版配置格式）
 
     Attributes:
         a_share: A 股数据源，支持 tushare 或 akshare
@@ -157,15 +206,58 @@ class DataSourcesConfig(BaseModel):
     """
     数据源总配置
 
+    对应 PRD 5.1 节 data_sources 配置
+
     Attributes:
-        quotes: 行情数据源配置
+        a_shares: A 股数据源配置（PRD 格式）
+        hk_us: 港美股数据源配置（PRD 格式）
+        quotes: 行情数据源配置（兼容旧格式）
         text: 文本数据源配置
         crawler: 爬虫配置
     """
 
+    # PRD 定义的格式
+    a_shares: ASharesSourceConfig = Field(
+        default_factory=ASharesSourceConfig,
+        description="A 股数据源配置",
+    )
+    hk_us: HKUSSourceConfig = Field(
+        default_factory=HKUSSourceConfig,
+        description="港美股数据源配置",
+    )
+    # 兼容旧格式
     quotes: QuotesSourceConfig = Field(default_factory=QuotesSourceConfig)
     text: TextSourceConfig = Field(default_factory=TextSourceConfig)
     crawler: CrawlerConfig = Field(default_factory=CrawlerConfig)
+
+    @model_validator(mode="after")
+    def sync_quotes_config(self) -> "DataSourcesConfig":
+        """同步 a_shares/hk_us 和 quotes 配置，确保兼容性"""
+        # 如果 a_shares 被显式设置，同步到 quotes
+        if self.a_shares.provider != "tushare":  # 非默认值
+            self.quotes.a_share = self.a_shares.provider
+        return self
+
+
+class OutputConfig(BaseModel):
+    """
+    输出配置
+
+    对应 PRD 5.1 节 output 配置
+
+    Attributes:
+        format: 输出格式，支持 csv 或 sqlite
+        path: 输出文件路径
+    """
+
+    format: Literal["csv", "sqlite"] = Field(
+        default="csv",
+        description="输出格式",
+    )
+    path: str = Field(
+        default="./output/audit_report.csv",
+        description="输出文件路径",
+    )
 
 
 class TargetConfig(BaseModel):
@@ -258,11 +350,13 @@ class AppConfig(BaseModel):
     应用总配置
 
     这是配置文件的根模型，包含所有子配置。
+    对应 PRD 5.1 节完整的 config.yaml 结构。
 
     Attributes:
         llm_api: LLM API 配置
         data_sources: 数据源配置
         targets: 监控标的列表
+        output: 输出配置
         scheduler: 调度配置
         gap_thresholds: Gap 判定阈值配置
 
@@ -281,6 +375,7 @@ class AppConfig(BaseModel):
     llm_api: LLMConfig = Field(default_factory=LLMConfig)
     data_sources: DataSourcesConfig = Field(default_factory=DataSourcesConfig)
     targets: list[TargetConfig] = Field(default_factory=list)
+    output: OutputConfig = Field(default_factory=OutputConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     gap_thresholds: GapThresholdConfig = Field(default_factory=GapThresholdConfig)
 

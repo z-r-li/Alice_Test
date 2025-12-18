@@ -3,6 +3,9 @@
 
 提供 load_config() 便捷函数和 ConfigManager 类，
 支持从 YAML 文件加载配置并转换为类型安全的 Pydantic 模型。
+
+全局配置访问：
+    使用 get_config() 获取全局配置单例。
 """
 from __future__ import annotations
 
@@ -14,6 +17,9 @@ import yaml
 from pydantic import ValidationError
 
 from .models import AppConfig, TargetConfig
+
+# 全局配置单例
+_global_config: AppConfig | None = None
 
 
 class ConfigError(Exception):
@@ -219,3 +225,71 @@ def load_config_from_dict(data: dict[str, Any]) -> AppConfig:
         return AppConfig.model_validate(data)
     except ValidationError as e:
         raise ConfigError(f"配置验证失败:\n{e}")
+
+
+def get_config(path: str | Path | None = None, reload: bool = False) -> AppConfig:
+    """
+    获取全局配置单例
+
+    提供一个可全局访问的 Config 对象。首次调用时会从指定路径加载配置，
+    后续调用将返回缓存的配置对象（除非指定 reload=True）。
+
+    Args:
+        path: 配置文件路径，默认为 "config.yaml"。仅在首次加载或 reload 时使用。
+        reload: 是否强制重新加载配置
+
+    Returns:
+        AppConfig: 全局配置对象
+
+    Raises:
+        ConfigError: 配置文件不存在或格式错误
+
+    Example:
+        >>> # 首次加载
+        >>> config = get_config("config.yaml")
+        >>> print(config.llm_api.model)
+        deepseek-chat
+
+        >>> # 后续访问（使用缓存）
+        >>> config = get_config()
+        >>> print(config.targets[0].ticker)
+        601985.SH
+
+        >>> # 强制重新加载
+        >>> config = get_config(reload=True)
+    """
+    global _global_config
+
+    if _global_config is None or reload:
+        config_path = path or "config.yaml"
+        _global_config = load_config(config_path)
+
+    return _global_config
+
+
+def set_global_config(config: AppConfig) -> None:
+    """
+    设置全局配置对象
+
+    用于测试或程序化设置配置。
+
+    Args:
+        config: 配置对象
+
+    Example:
+        >>> config = load_config_from_dict({"targets": [...]})
+        >>> set_global_config(config)
+    """
+    global _global_config
+    _global_config = config
+
+
+def reset_global_config() -> None:
+    """
+    重置全局配置
+
+    清除缓存的全局配置对象，下次调用 get_config() 时将重新加载。
+    主要用于测试场景。
+    """
+    global _global_config
+    _global_config = None
