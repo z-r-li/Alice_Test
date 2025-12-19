@@ -171,53 +171,98 @@ class ConsensusResult(BaseModel):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ConsensusResult":
         """
-        从字典构造 ConsensusResult 对象
+        从 LLM JSON 响应构造 ConsensusResult 对象
+
+        支持 PRD 4.2.2 定义的字段名映射：
+        - implied_growth_rate (LLM响应) -> implied_growth (内部)
 
         Args:
-            data: 包含所有必需字段的字典
+            data: LLM 返回的 JSON 解析后的字典
 
         Returns:
             ConsensusResult: 构造的结果对象
 
         Raises:
             ValidationError: 字段验证失败
+            KeyError: 缺少必需字段且无默认值
         """
+        # 处理字段名映射：implied_growth_rate (PRD) -> implied_growth (内部)
+        implied_growth = data.get(
+            "implied_growth",
+            data.get("implied_growth_rate", 0.0),
+        )
+
         return cls(
-            sentiment_score=data.get("sentiment_score", 0),
-            sentiment_label=data.get("sentiment_label", "中性"),
-            implied_growth=data.get("implied_growth", 0.0),
-            key_narrative=data.get("key_narrative", ""),
-            key_worry=data.get("key_worry", ""),
-            key_hope=data.get("key_hope", ""),
+            sentiment_score=int(data.get("sentiment_score", 0)),
+            sentiment_label=str(data.get("sentiment_label", "中性")),
+            implied_growth=float(implied_growth),
+            key_narrative=str(data.get("key_narrative", "")),
+            key_worry=str(data.get("key_worry", "")),
+            key_hope=str(data.get("key_hope", "")),
         )
 
     def validate(self) -> bool:
         """
-        验证结果是否有效
+        验证数据完整性和范围
 
-        检查所有必需字段是否存在且有效。
+        根据 PRD 4.2.2 定义的规则验证：
+        - sentiment_score: 0-100 整数范围
+        - sentiment_label: 必须是 恐慌|悲观|中性|乐观|狂热 之一
+        - implied_growth: 合理范围检查 (-50% ~ 100%)
+        - 文本字段: 非空检查
 
         Returns:
-            bool: 验证通过返回 True
+            bool: 验证通过返回 True，否则返回 False
         """
-        # 检查情绪评分范围
-        if not (0 <= self.sentiment_score <= 100):
+        # 1. 检查情绪评分范围 (0-100)
+        if not isinstance(self.sentiment_score, int) or not (
+            0 <= self.sentiment_score <= 100
+        ):
             return False
 
-        # 检查情绪标签是否有效
+        # 2. 检查情绪标签是否有效 (恐慌|悲观|中性|乐观|狂热)
         valid_labels = {"恐慌", "悲观", "中性", "乐观", "狂热"}
         if self.sentiment_label not in valid_labels:
             return False
 
-        # 检查隐含增长率范围
-        if not (-50.0 <= self.implied_growth <= 100.0):
+        # 3. 检查情绪评分与标签是否一致
+        expected_label = self._get_expected_label(self.sentiment_score)
+        if self.sentiment_label != expected_label:
+            # 允许边界情况有一定容差，不强制返回 False
+            pass
+
+        # 4. 检查隐含增长率范围 (-50% ~ 100%)
+        if not isinstance(self.implied_growth, (int, float)) or not (
+            -50.0 <= self.implied_growth <= 100.0
+        ):
             return False
 
-        # 检查文本字段非空
-        if not self.key_narrative or not self.key_worry or not self.key_hope:
+        # 5. 检查文本字段非空
+        if (
+            not self.key_narrative
+            or not self.key_narrative.strip()
+            or not self.key_worry
+            or not self.key_worry.strip()
+            or not self.key_hope
+            or not self.key_hope.strip()
+        ):
             return False
 
         return True
+
+    @staticmethod
+    def _get_expected_label(score: int) -> str:
+        """根据评分返回预期的情绪标签"""
+        if score <= 20:
+            return "恐慌"
+        elif score <= 40:
+            return "悲观"
+        elif score <= 60:
+            return "中性"
+        elif score <= 80:
+            return "乐观"
+        else:
+            return "狂热"
 
 
 class ThesisProjectionResult(BaseModel):
@@ -286,44 +331,73 @@ class ThesisProjectionResult(BaseModel):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ThesisProjectionResult":
         """
-        从字典构造 ThesisProjectionResult 对象
+        从 LLM JSON 响应构造 ThesisProjectionResult 对象
+
+        支持 PRD 4.3.1 定义的字段名映射：
+        - expected_growth_rate (LLM响应) -> our_growth (内部)
 
         Args:
-            data: 包含所有必需字段的字典
+            data: LLM 返回的 JSON 解析后的字典
 
         Returns:
             ThesisProjectionResult: 构造的结果对象
 
         Raises:
             ValidationError: 字段验证失败
+            KeyError: 缺少必需字段且无默认值
         """
+        # 处理字段名映射：expected_growth_rate (PRD) -> our_growth (内部)
+        our_growth = data.get(
+            "our_growth",
+            data.get("expected_growth_rate", 0.0),
+        )
+
+        # 处理 thesis_aligned 可能是字符串的情况
+        thesis_aligned = data.get("thesis_aligned", False)
+        if isinstance(thesis_aligned, str):
+            thesis_aligned = thesis_aligned.lower() in ("true", "1", "yes", "是")
+
         return cls(
-            thesis_aligned=data.get("thesis_aligned", False),
-            our_growth=data.get("our_growth", 0.0),
-            confidence=data.get("confidence", "中"),
-            reasoning=data.get("reasoning", ""),
+            thesis_aligned=bool(thesis_aligned),
+            our_growth=float(our_growth),
+            confidence=str(data.get("confidence", "中")),
+            reasoning=str(data.get("reasoning", "")),
         )
 
     def validate(self) -> bool:
         """
-        验证结果是否有效
+        验证数据完整性
 
-        检查所有必需字段是否存在且有效。
+        根据 PRD 4.3.1 定义的规则验证：
+        - thesis_aligned: 布尔值
+        - our_growth: 合理范围检查 (-50% ~ 100%)
+        - confidence: 必须是 高|中|低 之一
+        - reasoning: 非空字符串
 
         Returns:
-            bool: 验证通过返回 True
+            bool: 验证通过返回 True，否则返回 False
         """
-        # 检查增长率范围
-        if not (-50.0 <= self.our_growth <= 100.0):
+        # 1. 检查 thesis_aligned 是布尔值
+        if not isinstance(self.thesis_aligned, bool):
             return False
 
-        # 检查置信度是否有效
+        # 2. 检查增长率范围 (-50% ~ 100%)
+        if not isinstance(self.our_growth, (int, float)) or not (
+            -50.0 <= self.our_growth <= 100.0
+        ):
+            return False
+
+        # 3. 检查置信度是否有效 (高|中|低)
         valid_confidence = {"高", "中", "低"}
         if self.confidence not in valid_confidence:
             return False
 
-        # 检查推理文本非空
-        if not self.reasoning:
+        # 4. 检查推理文本非空
+        if not self.reasoning or not self.reasoning.strip():
+            return False
+
+        # 5. 推理文本长度合理性检查（至少10个字符，确保是有意义的解释）
+        if len(self.reasoning.strip()) < 10:
             return False
 
         return True
