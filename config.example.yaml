@@ -44,6 +44,7 @@ data_sources:
 
   # 爬虫配置（对应 PRD 5.1）
   crawler:
+    use_mock: true  # MVP 阶段使用模拟数据，生产环境设为 false
     use_llm_for_sources: true  # 是否使用 LLM 辅助生成数据源
     trusted_sources:
       cn:
