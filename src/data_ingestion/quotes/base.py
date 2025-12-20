@@ -7,6 +7,15 @@ from datetime import datetime
 from ..models import QuoteData
 
 
+class DataFetchError(Exception):
+    """数据获取失败异常"""
+
+    def __init__(self, message: str, ticker: str | None = None):
+        self.ticker = ticker
+        self.message = message
+        super().__init__(f"[{ticker}] {message}" if ticker else message)
+
+
 class QuotesProvider(ABC):
     """行情数据提供者抽象基类"""
 
