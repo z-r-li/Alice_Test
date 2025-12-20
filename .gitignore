@@ -28,3 +28,6 @@ htmlcov/
 # Environment
 .env
 .env.local
+
+# Config (may contain sensitive data)
+config.yaml

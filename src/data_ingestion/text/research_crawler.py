@@ -2,15 +2,20 @@
 研报爬虫 - 从配置的券商来源获取研报摘要
 
 参考 PRD 4.1.2 节（软数据规格）和 5.1 节（爬虫配置）实现。
-MVP 阶段返回模拟数据，实际爬虫需根据具体数据源调整。
+支持 use_mock 参数控制是否使用模拟数据。
 """
+from __future__ import annotations
+
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from ..models import TextItem
 from .base import TextProvider
+
+if TYPE_CHECKING:
+    from .mock_provider import MockTextProvider
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,7 @@ class ResearchCrawler(TextProvider):
         self,
         providers: list[str],
         search_entrypoints: list[str] | None = None,
+        use_mock: bool = False,
     ):
         """
         初始化研报爬虫
@@ -53,9 +59,16 @@ class ResearchCrawler(TextProvider):
         Args:
             providers: 允许的研报来源列表，如 ["中信证券", "华泰证券", "Morgan Stanley"]
             search_entrypoints: 搜索入口 URL 列表
+            use_mock: 是否使用模拟数据（MVP 阶段设为 True）
         """
         self._providers = providers
         self._search_entrypoints = search_entrypoints or []
+        self._use_mock = use_mock
+        self._mock_provider: MockTextProvider | None = None
+
+        if use_mock:
+            from .mock_provider import MockTextProvider
+            self._mock_provider = MockTextProvider(data_type="research")
 
     def fetch_texts(
         self,
@@ -78,8 +91,18 @@ class ResearchCrawler(TextProvider):
 
         Returns:
             list[TextItem]: 研报摘要列表，按发布时间倒序排列
+
+        Raises:
+            NotImplementedError: 当 use_mock=False 时，实际爬取逻辑尚未实现
         """
         logger.info(f"Fetching research reports for {ticker} ({name})")
+
+        # 使用模拟数据
+        if self._use_mock and self._mock_provider:
+            logger.debug("Using mock data provider")
+            return self._mock_provider.fetch_texts(
+                ticker, name, lookback_hours, max_items
+            )
 
         # 1. 构建搜索关键词
         queries = self._build_search_queries(ticker, name)
@@ -234,7 +257,7 @@ class ResearchCrawler(TextProvider):
         """
         搜索研报
 
-        MVP 阶段返回模拟数据。实际实现需要：
+        实际实现需要：
         1. 遍历 search_entrypoints 进行搜索
         2. 解析搜索结果页面
         3. 提取研报链接和基本信息
@@ -247,72 +270,18 @@ class ResearchCrawler(TextProvider):
 
         Returns:
             list[dict]: 研报数据列表，每项包含 source, title, content, published_at, url
+
+        Raises:
+            NotImplementedError: 实际爬取逻辑尚未实现，请使用 use_mock=True
         """
-        # MVP: 返回模拟数据
-        # TODO: 实现实际爬虫逻辑，可能需要：
+        # 实际爬虫逻辑尚未实现
+        # 需要实现：
         # - requests/httpx 进行 HTTP 请求
         # - BeautifulSoup/lxml 解析 HTML
         # - 处理反爬措施
         # - 使用 LLM 辅助提取结构化信息
+        raise NotImplementedError(
+            "实际研报爬取逻辑尚未实现，请在初始化时设置 use_mock=True 使用模拟数据。"
+            "如需使用真实数据，请参考 PRD 5.1 节实现具体的爬虫逻辑。"
+        )
 
-        logger.debug("Using mock data for MVP stage")
-
-        # 模拟数据 - 展示数据结构
-        mock_results = [
-            {
-                "source": "中信证券",
-                "title": "中国核电深度报告：AI算力驱动电力需求增长",
-                "content": """
-摘要：核电作为稳定基荷电力，将充分受益于AI算力发展带来的电力需求增长。
-公司作为国内核电龙头，在建机组规模领先，未来成长确定性高。
-
-投资要点：
-1. AI算力中心需要24小时稳定供电，核电是理想选择
-2. 公司在运机组容量持续增长，发电量稳步提升
-3. 新建机组审批加速，储备项目充足
-
-风险提示：核电政策变化风险；电力市场化改革风险；项目建设进度不及预期。
-""",
-                "summary": "核电作为稳定基荷电力，将受益于AI算力发展",
-                "published_at": end_time - timedelta(hours=6),
-                "url": "https://example.com/research/001",
-            },
-            {
-                "source": "华泰证券",
-                "title": "中国核电：核电重启加速，龙头地位稳固",
-                "content": """
-摘要：核电审批重启后，公司作为行业龙头充分受益。维持"买入"评级。
-
-投资要点：公司在建机组数量行业领先，未来三年业绩增长可期。
-核电利用小时数高于火电，盈利能力稳定。
-
-风险提示：电价下行风险；核安全事件风险。
-""",
-                "summary": "核电审批重启，维持买入评级",
-                "published_at": end_time - timedelta(hours=12),
-                "url": "https://example.com/research/002",
-            },
-            {
-                "source": "Morgan Stanley",
-                "title": "China Nuclear Power: Beneficiary of AI Power Demand",
-                "content": """
-Summary: China Nuclear Power is well-positioned to benefit from rising power demand
-driven by AI infrastructure buildout. Maintain Overweight rating.
-
-Investment highlights:
-- Nuclear provides stable baseload power essential for data centers
-- Company has industry-leading pipeline of units under construction
-- Regulatory environment becoming more supportive
-
-Risk factors: Policy changes; construction delays; safety incidents.
-""",
-                "summary": "Well-positioned to benefit from AI power demand",
-                "published_at": end_time - timedelta(hours=24),
-                "url": "https://example.com/research/003",
-            },
-        ]
-
-        # 过滤时间窗口内的结果
-        return [
-            r for r in mock_results if start_time <= r["published_at"] <= end_time
-        ]

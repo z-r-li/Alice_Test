@@ -1,9 +1,11 @@
 from .base import TextProvider
-from .research_crawler import ResearchCrawler
+from .mock_provider import MockTextProvider
 from .news_crawler import NewsCrawler
+from .research_crawler import ResearchCrawler
 
 __all__ = [
     "TextProvider",
+    "MockTextProvider",
     "ResearchCrawler",
     "NewsCrawler",
 ]

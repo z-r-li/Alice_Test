@@ -2,14 +2,19 @@
 新闻爬虫 - 从配置的新闻站点获取标题和摘要
 
 参考 PRD 4.1.2 节（软数据规格）和 5.1 节（爬虫配置）实现。
-MVP 阶段返回模拟数据，实际爬虫需根据具体数据源调整。
+支持 use_mock 参数控制是否使用模拟数据。
 """
+from __future__ import annotations
+
 import logging
 from datetime import datetime, timedelta
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from ..models import TextItem
 from .base import TextProvider
+
+if TYPE_CHECKING:
+    from .mock_provider import MockTextProvider
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +62,7 @@ class NewsCrawler(TextProvider):
         self,
         news_sites: list[str],
         search_entrypoints: list[str] | None = None,
+        use_mock: bool = False,
     ):
         """
         初始化新闻爬虫
@@ -64,9 +70,16 @@ class NewsCrawler(TextProvider):
         Args:
             news_sites: 允许的新闻站点列表，如 ["东方财富", "彭博", "路透"]
             search_entrypoints: 搜索入口 URL 列表
+            use_mock: 是否使用模拟数据（MVP 阶段设为 True）
         """
         self._news_sites = news_sites
         self._search_entrypoints = search_entrypoints or []
+        self._use_mock = use_mock
+        self._mock_provider: MockTextProvider | None = None
+
+        if use_mock:
+            from .mock_provider import MockTextProvider
+            self._mock_provider = MockTextProvider(data_type="news")
 
     def fetch_texts(
         self,
@@ -89,8 +102,18 @@ class NewsCrawler(TextProvider):
 
         Returns:
             list[TextItem]: 新闻列表，按发布时间倒序排列
+
+        Raises:
+            NotImplementedError: 当 use_mock=False 时，实际爬取逻辑尚未实现
         """
         logger.info(f"Fetching news for {ticker} ({name})")
+
+        # 使用模拟数据
+        if self._use_mock and self._mock_provider:
+            logger.debug("Using mock data provider")
+            return self._mock_provider.fetch_texts(
+                ticker, name, lookback_hours, max_items
+            )
 
         # 1. 构建搜索关键词
         queries = self._build_search_queries(ticker, name)
@@ -222,7 +245,7 @@ class NewsCrawler(TextProvider):
         """
         搜索新闻
 
-        MVP 阶段返回模拟数据。实际实现需要：
+        实际实现需要：
         1. 遍历 search_entrypoints 进行搜索
         2. 解析搜索结果页面
         3. 提取新闻链接和基本信息
@@ -235,79 +258,17 @@ class NewsCrawler(TextProvider):
 
         Returns:
             list[dict]: 新闻数据列表，每项包含 source, title, summary, published_at, url
+
+        Raises:
+            NotImplementedError: 实际爬取逻辑尚未实现，请使用 use_mock=True
         """
-        # MVP: 返回模拟数据
-        # TODO: 实现实际爬虫逻辑，可能需要：
+        # 实际爬虫逻辑尚未实现
+        # 需要实现：
         # - requests/httpx 进行 HTTP 请求
         # - BeautifulSoup/lxml 解析 HTML
         # - 处理反爬措施
         # - 使用 LLM 辅助提取结构化信息
-
-        logger.debug("Using mock data for MVP stage")
-
-        # 模拟数据 - 展示数据结构
-        mock_results = [
-            {
-                "source": "东方财富",
-                "title": "中国核电：AI算力需求推动核电板块持续走强",
-                "summary": "受AI数据中心电力需求增长预期影响，核电板块持续获得市场关注。"
-                "中国核电作为行业龙头，近期获得机构密集调研。分析人士指出，"
-                "核电具有稳定、清洁、低成本的特点，是支撑AI算力发展的理想电力来源。",
-                "published_at": end_time - timedelta(hours=2),
-                "url": "https://finance.eastmoney.com/news/001",
-            },
-            {
-                "source": "同花顺",
-                "title": "核电审批加速，中国核电在建机组规模领先",
-                "summary": "国家能源局近期核准多个核电项目，核电建设进入加速期。"
-                "中国核电在建机组数量和规模均处于行业领先地位，"
-                "未来几年将迎来机组集中投产期。",
-                "published_at": end_time - timedelta(hours=8),
-                "url": "https://news.10jqka.com.cn/news/002",
-            },
-            {
-                "source": "Bloomberg",
-                "title": "China Nuclear Power Gains as AI Demand Boosts Outlook",
-                "summary": "China Nuclear Power Corp. shares rose as investors bet on "
-                "increasing electricity demand from artificial intelligence data centers. "
-                "The company operates the largest fleet of nuclear reactors in China.",
-                "published_at": end_time - timedelta(hours=18),
-                "url": "https://www.bloomberg.com/news/003",
-            },
-            {
-                "source": "Reuters",
-                "title": "China's nuclear power sector sees renewed growth momentum",
-                "summary": "China's nuclear power industry is experiencing a resurgence "
-                "as the country accelerates its clean energy transition. "
-                "New reactor approvals have reached the highest level in years.",
-                "published_at": end_time - timedelta(hours=30),
-                "url": "https://www.reuters.com/news/004",
-            },
-            # 以下是应该被过滤掉的内容示例
-            {
-                "source": "东方财富",
-                "title": "中国核电融资融券信息(12-19)",
-                "summary": "12月19日，中国核电融资融券信息显示，融资余额为...",
-                "published_at": end_time - timedelta(hours=4),
-                "url": "https://finance.eastmoney.com/news/005",
-            },
-            {
-                "source": "同花顺",
-                "title": "中国核电：关于股东减持公告",
-                "summary": "本公司股东计划减持不超过...",
-                "published_at": end_time - timedelta(hours=10),
-                "url": "https://news.10jqka.com.cn/news/006",
-            },
-            {
-                "source": "东方财富",
-                "title": "中国核电龙虎榜：机构净买入2.5亿",
-                "summary": "12月19日龙虎榜数据显示...",
-                "published_at": end_time - timedelta(hours=5),
-                "url": "https://finance.eastmoney.com/news/007",
-            },
-        ]
-
-        # 过滤时间窗口内的结果
-        return [
-            r for r in mock_results if start_time <= r["published_at"] <= end_time
-        ]
+        raise NotImplementedError(
+            "实际新闻爬取逻辑尚未实现，请在初始化时设置 use_mock=True 使用模拟数据。"
+            "如需使用真实数据，请参考 PRD 5.1 节实现具体的爬虫逻辑。"
+        )
