@@ -4,11 +4,9 @@
 提供统一的数据获取接口，支持多种数据源。
 """
 from .base import DataProvider, ProviderRegistry, ProviderType
-from .mock_provider import MockProvider
 
 __all__ = [
     "DataProvider",
     "ProviderType",
     "ProviderRegistry",
-    "MockProvider",
 ]
