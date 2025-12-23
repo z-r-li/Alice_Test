@@ -174,12 +174,17 @@ class CrawlerConfig(BaseModel):
     对应 PRD 5.1 节爬虫配置定义
 
     Attributes:
+        use_mock: 开发模式，使用 Mock 假数据跳过真实数据源
         use_llm_for_sources: 是否使用 LLM 辅助生成数据源
         trusted_sources: 可信数据源配置
         lookback_hours: 文本回溯时间窗口（小时）
         max_items_per_ticker: 每个标的最大文本数量
     """
 
+    use_mock: bool = Field(
+        default=False,
+        description="开发模式：使用 Mock 假数据，跳过真实数据源",
+    )
     use_llm_for_sources: bool = Field(
         default=True,
         description="是否使用 LLM 辅助生成数据源",
