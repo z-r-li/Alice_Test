@@ -5,10 +5,12 @@
 """
 from .base import DataProvider, ProviderRegistry, ProviderType
 from .mock_provider import MockProvider
+from .akshare_provider import AkShareProvider
 
 __all__ = [
     "DataProvider",
     "ProviderType",
     "ProviderRegistry",
     "MockProvider",
+    "AkShareProvider",
 ]
