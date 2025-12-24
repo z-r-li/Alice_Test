@@ -287,12 +287,26 @@ class AliceTestPipeline:
             data_status = "data_error"
             error_message = str(e)
 
-        # 3. 获取文本数据（第二阶段实现，暂时返回空列表）
+        # 3. 获取文本数据
         texts: list[TextItem] = []
-        # TODO: 第二阶段实现
-        # research_texts = self._research_crawler.fetch_texts(ticker, target.name)
-        # news_texts = self._news_crawler.fetch_texts(ticker, target.name)
-        # texts = self._text_preprocessor.filter_texts(research_texts + news_texts)
+
+        if self._config.data_sources.crawler.use_mock:
+            # 开发模式：使用 Mock 数据
+            from .data_ingestion.text import MockTextProvider
+            mock_provider = MockTextProvider()
+            texts = mock_provider.fetch_texts(
+                ticker=ticker,
+                name=target.name,
+                lookback_hours=self._config.data_sources.crawler.lookback_hours,
+                max_items=self._config.data_sources.crawler.max_items_per_ticker,
+            )
+            self._py_logger.debug(f"[{ticker}] 使用 Mock 数据，获取 {len(texts)} 条文本")
+        else:
+            # TODO: 第二阶段实现真实数据源
+            # research_texts = self._research_crawler.fetch_texts(ticker, target.name)
+            # news_texts = self._news_crawler.fetch_texts(ticker, target.name)
+            # texts = self._text_preprocessor.filter_texts(research_texts + news_texts)
+            pass
 
         # 4. 组装 TickerRawData
         raw_data = TickerRawData(

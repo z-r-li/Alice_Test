@@ -250,31 +250,120 @@ class MockTextProvider(TextProvider):
                 "hours_ago": 14,
             },
         ],
+        # ============================================
+        # 苹果 AAPL - 乐观
+        # ============================================
+        "AAPL": [
+            # 乐观 - 研报
+            {
+                "source": "Goldman Sachs",
+                "type": "research",
+                "title": "Apple: AI Integration Poised to Drive Next iPhone Supercycle",
+                "summary": (
+                    "Apple's integration of on-device AI features in the upcoming iPhone lineup "
+                    "is expected to drive a major upgrade cycle. With over 1 billion active iPhones, "
+                    "even modest upgrade rates would generate substantial revenue. "
+                    "Services revenue continues to grow at 20%+ annually. Buy rating, $250 target."
+                ),
+                "hours_ago": 5,
+            },
+            {
+                "source": "Morgan Stanley",
+                "type": "research",
+                "title": "Apple: Vision Pro Opens New Revenue Stream, Maintain Overweight",
+                "summary": (
+                    "Apple Vision Pro launch marks the company's entry into spatial computing. "
+                    "While initial volumes are modest, the long-term TAM for AR/VR is significant. "
+                    "Core iPhone and Services businesses remain strong. "
+                    "Overweight rating with $240 price target."
+                ),
+                "hours_ago": 18,
+            },
+            # 乐观 - 新闻
+            {
+                "source": "Bloomberg",
+                "type": "news",
+                "title": "Apple Stock Hits All-Time High on AI Optimism",
+                "summary": (
+                    "Apple shares reached a record high as investors bet on the company's "
+                    "AI strategy driving renewed demand for iPhones and other devices. "
+                    "Analysts highlight Apple's ability to monetize AI features across its ecosystem."
+                ),
+                "hours_ago": 2,
+            },
+            {
+                "source": "Reuters",
+                "type": "news",
+                "title": "Apple Services Revenue Beats Expectations, Hits New Record",
+                "summary": (
+                    "Apple reported record services revenue, driven by strong App Store, "
+                    "iCloud, and Apple Music subscriptions. The high-margin services segment "
+                    "now accounts for over 20% of total revenue, supporting margin expansion."
+                ),
+                "hours_ago": 8,
+            },
+            # 中性 - 新闻
+            {
+                "source": "CNBC",
+                "type": "news",
+                "title": "Apple Faces Regulatory Scrutiny in EU Over App Store Policies",
+                "summary": (
+                    "European regulators continue to examine Apple's App Store policies, "
+                    "which could impact the company's services revenue in the region. "
+                    "Apple maintains its practices comply with local regulations."
+                ),
+                "hours_ago": 12,
+            },
+        ],
+        # ============================================
+        # 默认数据 _default_ - 中性
+        # ============================================
+        "_default_": [
+            {
+                "source": "中信证券",
+                "type": "research",
+                "title": "行业研究：板块估值处于历史中枢",
+                "summary": (
+                    "当前板块估值处于历史中枢水平，基本面保持稳定。"
+                    "建议关注行业龙头的配置价值，等待催化因素出现。"
+                    "维持行业「中性」评级。"
+                ),
+                "hours_ago": 12,
+            },
+            {
+                "source": "华泰证券",
+                "type": "research",
+                "title": "行业跟踪：基本面平稳，关注政策动向",
+                "summary": (
+                    "行业整体运行平稳，供需格局未见明显变化。"
+                    "近期政策面存在不确定性，建议投资者保持观望。"
+                    "维持「增持」评级。"
+                ),
+                "hours_ago": 24,
+            },
+            {
+                "source": "东方财富",
+                "type": "news",
+                "title": "市场观察：板块走势分化，机构观点不一",
+                "summary": (
+                    "今日市场走势分化，部分板块表现活跃。"
+                    "分析人士建议投资者保持理性，关注个股基本面变化。"
+                ),
+                "hours_ago": 4,
+            },
+            {
+                "source": "同花顺",
+                "type": "news",
+                "title": "行业资讯：市场情绪趋于平稳",
+                "summary": (
+                    "近期市场情绪趋于平稳，成交量维持在正常水平。"
+                    "分析师建议投资者关注中长期配置机会。"
+                ),
+                "hours_ago": 8,
+            },
+        ],
     }
 
-    # 默认的模拟数据，用于未预设的标的
-    DEFAULT_MOCK_DATA: ClassVar[list[dict]] = [
-        {
-            "source": "中信证券",
-            "type": "research",
-            "title": "行业研究：板块估值处于历史中枢",
-            "summary": (
-                "当前板块估值处于历史中枢水平，基本面保持稳定。"
-                "建议关注行业龙头的配置价值，等待催化因素出现。"
-            ),
-            "hours_ago": 12,
-        },
-        {
-            "source": "东方财富",
-            "type": "news",
-            "title": "市场观察：板块走势分化",
-            "summary": (
-                "今日市场走势分化，部分板块表现活跃。"
-                "分析人士建议投资者保持理性，关注个股基本面。"
-            ),
-            "hours_ago": 4,
-        },
-    ]
 
     def __init__(self, data_type: str = "all"):
         """
@@ -308,9 +397,9 @@ class MockTextProvider(TextProvider):
 
         now = datetime.now()
 
-        # 获取该标的的模拟数据，如果没有预设则使用默认数据
+        # 获取该标的的模拟数据，如果没有预设则使用 _default_ 数据
         ticker_upper = ticker.upper()
-        mock_data = self.MOCK_DATA.get(ticker_upper, self.DEFAULT_MOCK_DATA)
+        mock_data = self.MOCK_DATA.get(ticker_upper, self.MOCK_DATA.get("_default_", []))
 
         # 过滤数据类型
         if self._data_type != "all":
