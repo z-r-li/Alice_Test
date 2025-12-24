@@ -1,3 +1,4 @@
+from .akshare_news import AkShareNewsProvider
 from .base import TextProvider
 from .mock_provider import MockTextProvider
 from .news_crawler import NewsCrawler
@@ -8,4 +9,5 @@ __all__ = [
     "MockTextProvider",
     "ResearchCrawler",
     "NewsCrawler",
+    "AkShareNewsProvider",
 ]
