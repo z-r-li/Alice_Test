@@ -289,24 +289,38 @@ class AliceTestPipeline:
 
         # 3. 获取文本数据
         texts: list[TextItem] = []
+        crawler_config = self._config.data_sources.crawler
 
-        if self._config.data_sources.crawler.use_mock:
+        if crawler_config.use_mock:
             # 开发模式：使用 Mock 数据
             from .data_ingestion.text import MockTextProvider
             mock_provider = MockTextProvider()
             texts = mock_provider.fetch_texts(
                 ticker=ticker,
                 name=target.name,
-                lookback_hours=self._config.data_sources.crawler.lookback_hours,
-                max_items=self._config.data_sources.crawler.max_items_per_ticker,
+                lookback_hours=crawler_config.lookback_hours,
+                max_items=crawler_config.max_items_per_ticker,
             )
             self._py_logger.debug(f"[{ticker}] 使用 Mock 数据，获取 {len(texts)} 条文本")
+
+        elif self._is_a_share(ticker):
+            # A 股：使用 AkShare
+            from .data_ingestion.text import AkShareTextProvider
+            provider = AkShareTextProvider(
+                llm_client=self._llm_client,
+                extract_pdf=True,
+            )
+            texts = provider.fetch_texts(
+                ticker=ticker,
+                name=target.name,
+                lookback_hours=crawler_config.lookback_hours,
+                max_items=crawler_config.max_items_per_ticker,
+            )
+            self._py_logger.debug(f"[{ticker}] 使用 AkShare 数据，获取 {len(texts)} 条文本")
+
         else:
-            # TODO: 第二阶段实现真实数据源
-            # research_texts = self._research_crawler.fetch_texts(ticker, target.name)
-            # news_texts = self._news_crawler.fetch_texts(ticker, target.name)
-            # texts = self._text_preprocessor.filter_texts(research_texts + news_texts)
-            pass
+            # 港美股：TODO 后续实现 LLM 浏览
+            self._py_logger.debug(f"[{ticker}] 港美股暂无数据源")
 
         # 4. 组装 TickerRawData
         raw_data = TickerRawData(
@@ -349,6 +363,19 @@ class AliceTestPipeline:
         else:
             # 港股 (.HK) 或美股 (无后缀)
             return YFinanceQuotesProvider()
+
+    def _is_a_share(self, ticker: str) -> bool:
+        """
+        判断是否为 A 股代码
+
+        Args:
+            ticker: 证券代码
+
+        Returns:
+            bool: 是否为 A 股
+        """
+        ticker_upper = ticker.upper()
+        return ticker_upper.endswith((".SH", ".SZ"))
 
 
 def parse_args() -> argparse.Namespace:
