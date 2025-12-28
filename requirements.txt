@@ -15,6 +15,7 @@ yfinance>=0.2.0
 
 # Data Processing
 pandas>=2.0
+pdfplumber>=0.10.0
 
 # Scheduling (optional)
 apscheduler>=3.10.0
