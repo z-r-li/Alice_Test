@@ -8,6 +8,7 @@ from typing import List
 
 from ..models import TextItem
 from .base import TextProvider
+from .models import TextSourceType
 from .akshare.news_fetcher import AkShareNewsFetcher
 from .akshare.research_fetcher import AkShareResearchFetcher
 from .akshare.pdf_extractor import PDFExtractor
@@ -55,6 +56,7 @@ class AkShareTextProvider(TextProvider):
         name: str,
         lookback_hours: int = 48,
         max_items: int = 10,
+        source_types: list[TextSourceType] | None = None,
     ) -> List[TextItem]:
         """
         获取 A 股标的的新闻和研报
@@ -104,6 +106,29 @@ class AkShareTextProvider(TextProvider):
 
     def get_source_name(self) -> str:
         return "akshare"
+
+    def supports_market(self, ticker: str) -> bool:
+        """
+        判断该 Provider 是否支持指定市场的 ticker
+
+        AkShareTextProvider 仅支持 A 股市场
+
+        Args:
+            ticker: 证券代码
+
+        Returns:
+            bool: 如果是 A 股代码则返回 True
+        """
+        return self.is_a_share(ticker)
+
+    def get_supported_source_types(self) -> list[TextSourceType]:
+        """
+        返回该 Provider 支持的所有数据源类型
+
+        Returns:
+            list[TextSourceType]: 支持 NEWS 和 RESEARCH 类型
+        """
+        return [TextSourceType.NEWS, TextSourceType.RESEARCH]
 
     def _extract_symbol(self, ticker: str) -> str | None:
         """
