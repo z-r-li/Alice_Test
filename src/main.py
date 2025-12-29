@@ -18,7 +18,7 @@ from .data_ingestion.quotes import (
     AkShareQuotesProvider,
     YFinanceQuotesProvider,
 )
-from .data_ingestion.text import ResearchCrawler, NewsCrawler
+from .data_ingestion.text import TextProviderFactory, TextSourceType
 from .data_ingestion.preprocessor import TextPreprocessor
 from .engines import ConsensusEngine, ThesisProjector, GapCalculator, AuditResult
 from .llm import DeepSeekClient
@@ -251,17 +251,15 @@ class AliceTestPipeline:
         ticker = target.ticker
         now = datetime.now()
 
-        # 1. 根据 ticker 后缀选择行情数据源
+        # 1. 获取行情数据
         quotes_provider = self._select_quotes_provider(ticker)
-
-        # 2. 获取行情数据
         try:
             quote = quotes_provider.get_quote(ticker)
             data_status: Literal["ok", "data_error", "partial"] = "ok"
             error_message = None
         except NotImplementedError:
             # 数据源未实现时，生成占位行情数据（开发阶段）
-            logging.getLogger("alice_test").warning(
+            self._py_logger.warning(
                 f"[{ticker}] QuotesProvider 未实现，使用占位数据"
             )
             quote = QuoteData(
@@ -274,7 +272,7 @@ class AliceTestPipeline:
             data_status = "data_error"
             error_message = "QuotesProvider 未实现"
         except Exception as e:
-            logging.getLogger("alice_test").error(
+            self._py_logger.error(
                 f"[{ticker}] 获取行情数据失败: {e}"
             )
             quote = QuoteData(
@@ -287,43 +285,11 @@ class AliceTestPipeline:
             data_status = "data_error"
             error_message = str(e)
 
-        # 3. 获取文本数据
-        texts: list[TextItem] = []
-        crawler_config = self._config.data_sources.crawler
+        # 2. 获取文本数据
+        texts = self._fetch_texts(target)
 
-        if crawler_config.use_mock:
-            # 开发模式：使用 Mock 数据
-            from .data_ingestion.text import MockTextProvider
-            mock_provider = MockTextProvider()
-            texts = mock_provider.fetch_texts(
-                ticker=ticker,
-                name=target.name,
-                lookback_hours=crawler_config.lookback_hours,
-                max_items=crawler_config.max_items_per_ticker,
-            )
-            self._py_logger.debug(f"[{ticker}] 使用 Mock 数据，获取 {len(texts)} 条文本")
-
-        elif self._is_a_share(ticker):
-            # A 股：使用 AkShare
-            from .data_ingestion.text import AkShareTextProvider
-            provider = AkShareTextProvider(
-                llm_client=self._llm_client,
-                extract_pdf=True,
-            )
-            texts = provider.fetch_texts(
-                ticker=ticker,
-                name=target.name,
-                lookback_hours=crawler_config.lookback_hours,
-                max_items=crawler_config.max_items_per_ticker,
-            )
-            self._py_logger.debug(f"[{ticker}] 使用 AkShare 数据，获取 {len(texts)} 条文本")
-
-        else:
-            # 港美股：TODO 后续实现 LLM 浏览
-            self._py_logger.debug(f"[{ticker}] 港美股暂无数据源")
-
-        # 4. 组装 TickerRawData
-        raw_data = TickerRawData(
+        # 3. 组装返回
+        return TickerRawData(
             date=now,
             ticker=ticker,
             name=target.name,
@@ -333,7 +299,41 @@ class AliceTestPipeline:
             error_message=error_message,
         )
 
-        return raw_data
+    def _fetch_texts(self, target: TargetConfig) -> list[TextItem]:
+        """
+        获取文本数据
+
+        使用 TextProviderFactory 自动选择合适的 Provider。
+
+        Args:
+            target: 标的配置
+
+        Returns:
+            list[TextItem]: 文本数据列表
+        """
+        try:
+            # 从配置获取参数
+            crawler_config = self._config.data_sources.crawler
+
+            texts = TextProviderFactory.fetch_texts(
+                ticker=target.ticker,
+                name=target.name,
+                lookback_hours=crawler_config.lookback_hours,
+                max_items=crawler_config.max_items_per_ticker,
+            )
+
+            if self._verbose:
+                self._py_logger.debug(
+                    f"[{target.ticker}] 获取 {len(texts)} 条文本"
+                )
+
+            return texts
+
+        except Exception as e:
+            self._py_logger.warning(
+                f"[{target.ticker}] 文本获取失败: {e}"
+            )
+            return []
 
     def _select_quotes_provider(self, ticker: str) -> QuotesProvider:
         """
@@ -363,19 +363,6 @@ class AliceTestPipeline:
         else:
             # 港股 (.HK) 或美股 (无后缀)
             return YFinanceQuotesProvider()
-
-    def _is_a_share(self, ticker: str) -> bool:
-        """
-        判断是否为 A 股代码
-
-        Args:
-            ticker: 证券代码
-
-        Returns:
-            bool: 是否为 A 股
-        """
-        ticker_upper = ticker.upper()
-        return ticker_upper.endswith((".SH", ".SZ"))
 
 
 def parse_args() -> argparse.Namespace:
