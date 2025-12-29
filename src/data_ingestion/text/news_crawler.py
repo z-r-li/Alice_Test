@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from ..models import TextItem
 from .base import TextProvider
+from .models import TextSourceType
 
 if TYPE_CHECKING:
     from .mock_provider import MockTextProvider
@@ -87,6 +88,7 @@ class NewsCrawler(TextProvider):
         name: str,
         lookback_hours: int = 48,
         max_items: int = 10,
+        source_types: list[TextSourceType] | None = None,
     ) -> list[TextItem]:
         """
         获取新闻标题和摘要
@@ -153,6 +155,29 @@ class NewsCrawler(TextProvider):
     def get_source_name(self) -> str:
         """返回数据源名称"""
         return "news"
+
+    def supports_market(self, ticker: str) -> bool:
+        """
+        判断该 Provider 是否支持指定市场的 ticker
+
+        NewsCrawler 目前支持所有市场（占位实现，后续废弃）
+
+        Args:
+            ticker: 证券代码
+
+        Returns:
+            bool: 始终返回 True
+        """
+        return True
+
+    def get_supported_source_types(self) -> list[TextSourceType]:
+        """
+        返回该 Provider 支持的所有数据源类型
+
+        Returns:
+            list[TextSourceType]: 仅支持 NEWS 类型
+        """
+        return [TextSourceType.NEWS]
 
     def _build_search_queries(self, ticker: str, name: str) -> list[str]:
         """

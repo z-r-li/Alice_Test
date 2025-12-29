@@ -9,6 +9,7 @@ from typing import ClassVar
 
 from ..models import TextItem
 from .base import TextProvider
+from .models import TextSourceType
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +381,7 @@ class MockTextProvider(TextProvider):
         name: str,
         lookback_hours: int = 48,
         max_items: int = 10,
+        source_types: list[TextSourceType] | None = None,
     ) -> list[TextItem]:
         """
         获取模拟文本数据
@@ -431,6 +433,29 @@ class MockTextProvider(TextProvider):
     def get_source_name(self) -> str:
         """返回数据源名称"""
         return "mock"
+
+    def supports_market(self, ticker: str) -> bool:
+        """
+        判断该 Provider 是否支持指定市场的 ticker
+
+        MockTextProvider 支持所有市场（用于测试）
+
+        Args:
+            ticker: 证券代码
+
+        Returns:
+            bool: 始终返回 True
+        """
+        return True
+
+    def get_supported_source_types(self) -> list[TextSourceType]:
+        """
+        返回该 Provider 支持的所有数据源类型
+
+        Returns:
+            list[TextSourceType]: 支持 NEWS 和 RESEARCH 类型
+        """
+        return [TextSourceType.NEWS, TextSourceType.RESEARCH]
 
     @classmethod
     def get_available_tickers(cls) -> list[str]:
