@@ -4,4 +4,8 @@ A 股文本数据采集模块
 包含 A 股市场特有的文本数据获取器实现。
 """
 
-__all__: list[str] = []
+from .news_fetcher import NewsFetcher
+
+__all__: list[str] = [
+    "NewsFetcher",
+]
