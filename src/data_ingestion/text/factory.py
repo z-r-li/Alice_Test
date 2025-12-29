@@ -63,7 +63,7 @@ class TextProviderFactory:
     文本 Provider 工厂
 
     根据 ticker 后缀自动选择合适的 Provider：
-    - .SH / .SZ -> AShareTextProvider (AkShareTextProvider)
+    - .SH / .SZ -> AShareTextProvider（聚合研报、互动易、评级、新闻）
     - .HK / 无后缀 -> HKUSTextProvider (暂未实现，返回占位)
 
     使用单例模式缓存 Provider 实例。
@@ -94,7 +94,7 @@ class TextProviderFactory:
         Example:
             >>> provider = TextProviderFactory.get_provider("601985.SH")
             >>> provider.get_source_name()
-            'akshare'
+            'a_share_aggregated'
         """
         market = TextProvider.detect_market(ticker)
 
@@ -109,13 +109,10 @@ class TextProviderFactory:
         """获取或创建 A 股 Provider（单例）"""
         if cls._a_share_provider is None:
             # 延迟导入避免循环依赖
-            from .akshare_provider import AkShareTextProvider
+            from .a_share import AShareTextProvider
 
-            cls._a_share_provider = AkShareTextProvider(
-                llm_client=None,
-                extract_pdf=False,  # 默认不提取 PDF，避免依赖 LLM
-            )
-            logger.info("创建 A 股 TextProvider (AkShareTextProvider)")
+            cls._a_share_provider = AShareTextProvider()
+            logger.info("创建 A 股 TextProvider (AShareTextProvider)")
 
         return cls._a_share_provider
 
