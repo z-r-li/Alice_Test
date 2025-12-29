@@ -28,6 +28,7 @@ data_sources:
 
   # 文本数据源配置
   text:
+    # 原有配置（兼容）
     research_providers:
       - "中信证券"
       - "华泰证券"
@@ -41,6 +42,28 @@ data_sources:
       - "路透"
     search_entrypoints:
       - "https://example-research-site.com"
+
+    # A 股文本源配置
+    a_share:
+      enabled_sources:
+        - research
+        - irm
+        - rating
+        - news
+      quota_weights:
+        research: 4
+        irm: 3
+        rating: 2
+        news: 3
+
+    # 港美股文本源配置（预留）
+    hk_us:
+      search_provider: "serpapi"
+      search_api_key: ""  # 从环境变量 SERPAPI_KEY 读取
+      trusted_domains:
+        - "bloomberg.com"
+        - "reuters.com"
+        - "seekingalpha.com"
 
   # 爬虫配置（对应 PRD 5.1）
   crawler:

@@ -124,6 +124,72 @@ class QuotesSourceConfig(BaseModel):
     hk_us: Literal["yfinance"] = "yfinance"
 
 
+class AShareTextSourceConfig(BaseModel):
+    """
+    A 股文本数据源配置
+
+    控制各数据源的启用状态和配额权重。
+
+    Attributes:
+        enabled_sources: 启用的数据源列表
+        quota_weights: 各数据源的配额权重
+    """
+
+    enabled_sources: list[str] = Field(
+        default_factory=lambda: ["research", "irm", "rating", "news"],
+        description="启用的数据源列表",
+    )
+
+    quota_weights: dict[str, int] = Field(
+        default_factory=lambda: {
+            "research": 4,
+            "irm": 3,
+            "rating": 2,
+            "news": 3,
+        },
+        description="各数据源的配额权重",
+    )
+
+    @field_validator("enabled_sources")
+    @classmethod
+    def validate_sources(cls, v: list[str]) -> list[str]:
+        valid = {"research", "irm", "rating", "news"}
+        for source in v:
+            if source not in valid:
+                raise ValueError(f"无效的数据源: {source}，有效值: {valid}")
+        return v
+
+
+class HKUSTextSourceConfig(BaseModel):
+    """
+    港美股文本数据源配置（预留）
+
+    Attributes:
+        search_provider: 搜索引擎提供商
+        search_api_key: 搜索 API Key，留空则从环境变量读取
+        trusted_domains: 可信数据源域名
+    """
+
+    search_provider: Literal["serpapi", "google_custom_search"] = Field(
+        default="serpapi",
+        description="搜索引擎提供商",
+    )
+
+    search_api_key: str = Field(
+        default="",
+        description="搜索 API Key，留空则从环境变量读取",
+    )
+
+    trusted_domains: list[str] = Field(
+        default_factory=lambda: [
+            "bloomberg.com",
+            "reuters.com",
+            "seekingalpha.com",
+        ],
+        description="可信数据源域名",
+    )
+
+
 class TextSourceConfig(BaseModel):
     """
     文本数据源配置
@@ -132,11 +198,25 @@ class TextSourceConfig(BaseModel):
         research_providers: 允许的研报来源机构列表
         news_sites: 允许的新闻站点列表
         search_entrypoints: 搜索入口 URL 列表
+        a_share: A 股文本源配置
+        hk_us: 港美股文本源配置
     """
 
+    # 原有字段（兼容）
     research_providers: list[str] = Field(default_factory=list)
     news_sites: list[str] = Field(default_factory=list)
     search_entrypoints: list[str] = Field(default_factory=list)
+
+    # 新增：分市场配置
+    a_share: AShareTextSourceConfig = Field(
+        default_factory=AShareTextSourceConfig,
+        description="A 股文本源配置",
+    )
+
+    hk_us: HKUSTextSourceConfig = Field(
+        default_factory=HKUSTextSourceConfig,
+        description="港美股文本源配置",
+    )
 
 
 class TrustedSourcesConfig(BaseModel):
