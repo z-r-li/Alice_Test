@@ -5,7 +5,9 @@ A 股文本数据采集模块
 """
 
 from .news_fetcher import NewsFetcher
+from .research_fetcher import ResearchFetcher
 
 __all__: list[str] = [
     "NewsFetcher",
+    "ResearchFetcher",
 ]
