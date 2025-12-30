@@ -37,14 +37,14 @@ class PromptTemplates:
 
 # 输出格式
 仅返回有效 JSON：
-{
+{{
   "sentiment_score": <0-100 整数>,
   "sentiment_label": "<恐慌|悲观|中性|乐观|狂热>",
   "implied_growth": <百分比浮点数>,
   "key_worry": "<市场主要担忧>",
   "key_hope": "<市场主要期待>",
   "key_narrative": "<一句话总结市场主要叙事>"
-}"""
+}}"""
 
     # Module A: 用户消息模板
     CONSENSUS_ENGINE_USER: str = """标的：{ticker_name} ({ticker})
