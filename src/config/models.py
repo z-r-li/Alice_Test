@@ -135,7 +135,7 @@ class AShareTextSourceConfig(BaseModel):
         quota_weights: 各数据源的配额权重
     """
 
-    enabled_sources: list[str] = Field(
+    enabled_sources: list[Literal["research", "irm", "rating", "news"]] = Field(
         default_factory=lambda: ["research", "irm", "rating", "news"],
         description="启用的数据源列表",
     )
@@ -149,15 +149,6 @@ class AShareTextSourceConfig(BaseModel):
         },
         description="各数据源的配额权重",
     )
-
-    @field_validator("enabled_sources")
-    @classmethod
-    def validate_sources(cls, v: list[str]) -> list[str]:
-        valid = {"research", "irm", "rating", "news"}
-        for source in v:
-            if source not in valid:
-                raise ValueError(f"无效的数据源: {source}，有效值: {valid}")
-        return v
 
 
 class HKUSTextSourceConfig(BaseModel):
