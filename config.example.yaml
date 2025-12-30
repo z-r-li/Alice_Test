@@ -28,27 +28,37 @@ data_sources:
 
   # 文本数据源配置
   text:
-    # A 股文本源（基于 AkShare）
+    # A 股文本源配置（基于 AkShare API）
     a_share:
+      # 启用的数据源类型
+      # - research: 研报 (stock_research_report_em)
+      # - irm: 互动易问答 (stock_sns_sseinfo / stock_irm_cninfo)
+      # - rating: 机构评级变动 (stock_institute_recommend_detail)
+      # - news: 新闻 (stock_news_em)
       enabled_sources:
-        - research    # stock_research_report_em
-        - irm         # stock_sns_sseinfo / stock_irm_cninfo
-        - rating      # stock_institute_recommend_detail
-        - news        # stock_news_em
-      quota_weights:
-        research: 4
-        irm: 3
-        rating: 2
-        news: 3
+        - research
+        - irm
+        - rating
+        - news
 
-    # 港美股文本源（预留，需要 Web Search）
+      # 各数据源的配额权重
+      # 总 max_items 会按权重比例分配给各数据源
+      quota_weights:
+        research: 4   # 研报权重最高，最有分析价值
+        irm: 3        # 互动易直接反映投资者担忧
+        rating: 2     # 评级变动是预期变化信号
+        news: 3       # 新闻补充市场叙事
+
+    # 港美股文本源配置（基于 Web Search，预留）
     hk_us:
-      search_provider: "serpapi"
-      search_api_key: ""
+      search_provider: "serpapi"  # 支持: serpapi, google_custom_search
+      search_api_key: ""          # 留空则从环境变量 SERPAPI_KEY 读取
       trusted_domains:
         - "bloomberg.com"
         - "reuters.com"
         - "seekingalpha.com"
+        - "wsj.com"
+        - "ft.com"
 
   # 爬虫/数据获取配置
   crawler:
