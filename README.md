@@ -1,121 +1,265 @@
-# Alice_Test
+# Alice Test
 
-Alice Test is a Python pipeline for A-share and HK/US stocks that uses market data plus research/news with LLMs to infer a 3-year market-implied growth rate, compare it with your thesis from config, and quantify the cognitive gap to guide contrarian entries and long-term holds.
+**市场隐含预期与认知偏差自动审计系统**
 
-Alice Test 是一个用于 A 股与港美股的 Python 自动审计流水线，结合行情数据与研报/新闻，用大模型反推“市场隐含 3 年增长率”，再与你在 config 中写下的长期投资逻辑对比，量化“认知差”，为逆向布局与长期持有提供结构化参考。
+Alice Test 是一个自动化 Python 数据流水线，用于监控特定投资标的，计算**认知差 (Cognitive Gap)**——即"市场当前共识"与"预设宏观信念"之间的偏差。
 
-Alice Test is an automated Python pipeline for monitoring selected equities (e.g. nuclear power, shipbuilding, internet giants) and auditing the “Cognitive Gap” between:
+> 🎯 **核心价值**: 不预测股价，而是系统性识别市场定价偏差带来的机会
 
-·Market implicit expectations inferred from price, valuation and recent narratives
+---
 
-·Your own macro / structural investment thesis
+## 📋 目录
 
-Alice Test 是一个面向投资者的 Python 自动化流水线，用来长期监控一篮子标的（如：核电、造船、腾讯等），重点不是“预测股价”，而是量化“认知差”：
-当前市场隐含的增长预期 vs. 你基于宏观/产业逻辑得出的合理预期
+- [功能特性](#功能特性)
+- [快速开始](#快速开始)
+- [用户指南](#用户指南)
+  - [安装依赖](#1-安装依赖)
+  - [配置文件设置](#2-配置文件设置)
+  - [运行程序](#3-运行程序)
+  - [输出结果解读](#4-输出结果解读)
+- [配置详解](#配置详解)
+- [常见问题](#常见问题)
 
-Instead of predicting prices, the system estimates:
+---
 
-·A market-implied 3-year growth rate using LLM-summarized sentiment & valuation
+## 功能特性
 
-·A thesis-based 3-year growth rate using your pre-defined macro view
+- 🔄 自动采集 A股/港股/美股行情数据
+- 📰 整合研报摘要与新闻标题
+- 🤖 基于 DeepSeek-V3 的市场情绪分析
+- 📊 认知差计算与信号生成 (OPPORTUNITY / OVERHEATED / WAIT)
+- 📁 CSV 格式审计报告输出
 
-The Gap = Our_Expected_Growth − Market_Implied_Growth, and assigns signals:
+---
 
-·OPPORTUNITY when market is pessimistic vs your thesis
-·OVERHEATED when sentiment is euphoric
-·WAIT otherwise
+## 快速开始
 
-Daily runs generate an audit_report.csv containing price, sentiment score, both growth rates, gap, final signal and a key narrative sentence for each ticker.
+```bash
+# 克隆项目
+git clone <repository-url>
+cd alice_test
 
-系统会在每日收盘后自动完成以下工作：
+# 安装依赖
+pip install -r requirements.txt
 
-1.抓数&抓话术
-  
-  获取最新收盘价、估值指标（PE、PB、换手率等）
-  
-  抓取过去 48 小时内的核心研报观点和新闻标题，过滤掉无关公告，只保留“有观点的文本”
+# 配置 API 密钥
+export DEEPSEEK_API_KEY="your-api-key"
+export TUSHARE_TOKEN="your-tushare-token"  # 可选，用于 A 股数据
 
-2.市场共识引擎（Consensus Engine, CE）
-  
-  调用 LLM 总结市场现在在担心什么、期待什么
-  
-  按 0–100 对市场情绪打分（恐慌 → 狂热）
-  
-  在估值与情绪的约束下，反推市场隐含的 未来 3 年年化增长率
-  
-3.信念投影器（Thesis Projector, TP）
+# 运行
+python src/main.py --config config.yaml
+```
 
-  读取 config.yaml 中你为每个标的写下的宏观/产业信念
-  
-  要求 LLM 忽略短期噪音，从第一性原理评估该标的的合理长期增长率
-  
-4.审计裁决（Gap Calculation, GC）
-  
-  本地 Python 计算：Gap = Our_Expected_Growth − Market_Implied_Growth
+---
 
-  按规则输出：
-  
-  OPPORTUNITY（机会）
-  
-  OVERHEATED（过热）
-  
-  WAIT（观望）
+## 用户指南
 
-最终结果写入 audit_report.csv，包含日期、Ticker、价格、情绪分数、市场隐含增长、我们预期增长、    Gap、信号，以及一句总结性的关键叙事，帮助你从“价格波动”切回“逻辑对不对”。
+### 1. 安装依赖
 
-Core Pipeline：
+确保你的 Python 版本为 3.10 或更高版本。
 
-Data Ingestion
+```bash
+# 创建虚拟环境（推荐）
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# 或 Windows: venv\Scripts\activate
 
-Pulls latest close, PE (TTM), PB, turnover etc.
+# 安装依赖
+pip install -r requirements.txt
+```
 
-Scrapes broker reports & news headlines (last 48h), filters to opinion-style texts only.
+**主要依赖说明：**
+| 依赖 | 用途 |
+|------|------|
+| `openai` | DeepSeek API 调用（兼容 OpenAI SDK） |
+| `tushare` | A股行情数据（可选） |
+| `akshare` | A股数据备选方案 |
+| `yfinance` | 港股/美股行情数据 |
+| `pyyaml` | 配置文件解析 |
+| `pydantic` | 数据模型校验 |
 
-Consensus Engine (CE)
+### 2. 配置文件设置
 
-LLM module that:
+在项目根目录创建 `config.yaml` 文件：
 
-Extracts current market concerns & hopes
+```yaml
+# LLM 配置
+llm_api:
+  provider: "deepseek"
+  model: "deepseek-chat"
+  api_key: "${DEEPSEEK_API_KEY}"  # 支持环境变量
+  temperature: 0  # 重要：保持为 0 以确保评分一致性
+  max_tokens: 2000
 
-Scores sentiment from 0–100 (panic → euphoria)
+# 数据源配置
+data_sources:
+  a_shares:
+    provider: "akshare"  # 可选: "tushare" 或 "akshare"
+    token: "${TUSHARE_TOKEN}"  # 使用 tushare 时需要
+  hk_us:
+    provider: "yfinance"
 
-Infers the market-implied 3-year growth rate
+# 监控标的配置
+targets:
+  - ticker: "601985.SH"
+    name: "中国核电"
+    thesis: |
+      AI算力发展将大幅增加电力需求，核电作为稳定基荷电源将充分受益。
+      公司在建机组规模行业领先，2025-2027年将迎来机组集中投产期。
+      预期未来3年净利润复合增长率约12%。
+    expected_growth: 12.0
+    
+  - ticker: "AAPL"
+    name: "苹果公司"
+    thesis: |
+      iPhone 换机周期叠加 AI 功能升级，预计带来新一轮增长。
+      服务业务持续高毛利贡献，生态护城河稳固。
+    expected_growth: 8.0
 
-Thesis Projector (TP)
+# Gap 阈值配置
+gap_thresholds:
+  opportunity: 5.0   # gap >= 5% 触发 OPPORTUNITY 信号
+  overheated: -5.0   # gap <= -5% 触发 OVERHEATED 信号
 
-LLM module that projects your configurable macro thesis onto each ticker
+# 输出配置
+output:
+  format: "csv"
+  path: "audit_report.csv"
+  append: true  # 追加模式
+```
 
-Outputs your own expected 3-year growth rate under that thesis
+### 3. 运行程序
 
-Gap Calculation (GC)
+**基础用法：**
 
-Pure Python logic computing the growth gap and mapping to discrete trading signals.
+```bash
+# 使用默认配置运行
+python src/main.py
 
-Tech Stack
+# 指定配置文件
+python src/main.py --config path/to/config.yaml
 
-Language: Python 3.x
+# 指定输出文件
+python src/main.py --output my_report.csv
 
-LLM API: DeepSeek-V3 / deepseek-chat, GPT-4o-mini (temperature = 0 for stability)
+# 只处理特定标的
+python src/main.py --ticker 601985.SH
 
-Market Data: Tushare / AkShare (A-share), yfinance (HK/US)
+# 详细输出模式（调试用）
+python src/main.py --verbose
+```
 
-Storage: SQLite or CSV (lightweight, backtest-friendly)
+**命令行参数说明：**
 
-Config: config.yaml with tickers & per-ticker thesis text
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--config` | 配置文件路径 | `config.yaml` |
+| `--output` | 输出报告路径 | `audit_report.csv` |
+| `--ticker` | 只处理指定标的 | 处理所有标的 |
+| `--verbose, -v` | 详细输出模式 | 关闭 |
 
-技术与实现要点
+**定时运行（Linux cron 示例）：**
 
-语言：Python 3.x
+```bash
+# 每日收盘后 17:00 运行
+0 17 * * 1-5 cd /path/to/alice_test && python src/main.py >> logs/cron.log 2>&1
+```
 
-大模型：deepseek-chat（temperature=0 保证评分稳定）
+### 4. 输出结果解读
 
-数据源：Tushare / AkShare（A股），yfinance（港/美股）
+运行完成后，会生成 `audit_report.csv` 文件：
 
-存储：SQLite
+| 字段 | 说明 |
+|------|------|
+| `date` | 审计日期 |
+| `ticker` | 股票代码 |
+| `name` | 公司名称 |
+| `price` | 收盘价 |
+| `pe_ttm` | 市盈率（TTM） |
+| `sentiment_score` | 情绪分数 (0-100) |
+| `sentiment_label` | 情绪标签（恐慌/悲观/中性/乐观/狂热） |
+| `implied_growth` | 市场隐含增长率 % |
+| `our_growth` | 你的预期增长率 % |
+| `gap` | 认知差 (our - implied) |
+| `signal` | **交易信号** |
+| `key_narrative` | 一句话市场总结 |
+| `key_worry` | 主要担忧 |
+| `key_hope` | 主要期待 |
 
-配置：config.yaml 中为每个 ticker 绑定一段自然语言“投资信念”
+**信号解读：**
 
-你可以将本仓库理解为一个 “市场认知 vs. 自己逻辑” 的自动对账系统：
+| 信号 | 条件 | 含义 |
+|------|------|------|
+| `OPPORTUNITY` | gap ≥ 5% | 市场低估，可能存在买入机会 |
+| `OVERHEATED` | gap ≤ -5% | 市场高估，需谨慎 |
+| `WAIT` | -5% < gap < 5% | 定价合理，继续观察 |
 
-当系统持续提醒“市场悲观、逻辑健康”时，你就知道该认真研究“逆向机会”在哪里了。
+---
 
+## 配置详解
+
+### 标的代码格式
+
+| 市场 | 格式 | 示例 |
+|------|------|------|
+| A股（上海） | `XXXXXX.SH` | `601985.SH` |
+| A股（深圳） | `XXXXXX.SZ` | `000001.SZ` |
+| 港股 | `XXXXX.HK` | `00700.HK` |
+| 美股 | 无后缀 | `AAPL`, `TSLA` |
+
+### 环境变量
+
+| 变量名 | 说明 | 必需 |
+|--------|------|------|
+| `DEEPSEEK_API_KEY` | DeepSeek API 密钥 | ✅ |
+| `TUSHARE_TOKEN` | Tushare API Token | 使用 Tushare 时需要 |
+
+---
+
+## 常见问题
+
+### Q: 运行时提示 "配置文件不存在"
+
+确保 `config.yaml` 文件在当前工作目录下，或使用 `--config` 参数指定完整路径。
+
+### Q: API 调用失败
+
+1. 检查 `DEEPSEEK_API_KEY` 环境变量是否设置正确
+2. 确认网络可以访问 DeepSeek API
+3. 使用 `--verbose` 参数查看详细错误信息
+
+### Q: A股数据获取失败
+
+- 使用 Tushare 时，确保已设置 `TUSHARE_TOKEN` 且有足够积分
+- 尝试切换到 AkShare：在配置文件中设置 `data_sources.a_shares.provider: "akshare"`
+
+### Q: 如何添加新的监控标的？
+
+在 `config.yaml` 的 `targets` 列表中添加新条目：
+
+```yaml
+targets:
+  - ticker: "NEW_TICKER"
+    name: "公司名称"
+    thesis: |
+      你对这个公司的投资逻辑...
+    expected_growth: 10.0  # 你预期的增长率
+```
+
+---
+
+## 技术栈
+
+| 组件 | 技术选型 |
+|------|----------|
+| 编程语言 | Python 3.x |
+| LLM 服务 | DeepSeek-V3 (主力) / GPT-4o-mini (备选) |
+| A股数据 | Tushare / AkShare |
+| 港美股数据 | yfinance |
+| 存储 | SQLite / CSV |
+
+---
+
+## License
+
+MIT License
