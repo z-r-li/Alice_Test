@@ -36,7 +36,7 @@ Alice Test 是一个自动化 Python 数据流水线，用于监控特定投资�
 
 ```bash
 # 克隆项目
-git clone <repository-url>
+git clone https://github.com/llaoleDY/Alice_Test.git
 cd alice_test
 
 # 安装依赖
