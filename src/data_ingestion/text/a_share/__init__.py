@@ -8,6 +8,7 @@ from .cninfo_irm_fetcher import CNInfoIRMFetcher
 from .irm_fetcher import IRMFetcher
 from .news_fetcher import NewsFetcher
 from .provider import AShareTextProvider
+from .rating_change_fetcher import RatingChangeFetcher
 from .rating_fetcher import RatingFetcher
 from .research_fetcher import ResearchFetcher
 from .sse_interactive_fetcher import SSEInteractiveFetcher
@@ -17,6 +18,7 @@ __all__: list[str] = [
     "CNInfoIRMFetcher",
     "IRMFetcher",
     "NewsFetcher",
+    "RatingChangeFetcher",
     "RatingFetcher",
     "ResearchFetcher",
     "SSEInteractiveFetcher",
