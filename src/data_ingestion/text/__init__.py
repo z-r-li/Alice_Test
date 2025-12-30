@@ -10,7 +10,7 @@ from .mock_provider import MockTextProvider
 from .models import FetchResult, TextSourceType
 
 # A 股 Provider（如需直接使用）
-from .a_share import AShareTextProvider
+from .a_share import AShareTextCoordinator, AShareTextProvider
 
 __all__ = [
     # 核心接口
@@ -20,6 +20,7 @@ __all__ = [
     "TextSourceType",
     "FetchResult",
     # 具体实现
+    "AShareTextCoordinator",
     "AShareTextProvider",
     "MockTextProvider",
 ]

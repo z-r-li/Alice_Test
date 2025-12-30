@@ -5,6 +5,7 @@ A 股文本数据采集模块
 """
 
 from .cninfo_irm_fetcher import CNInfoIRMFetcher
+from .coordinator import AShareTextCoordinator
 from .irm_fetcher import IRMFetcher
 from .news_fetcher import NewsFetcher
 from .provider import AShareTextProvider
@@ -14,6 +15,7 @@ from .research_fetcher import ResearchFetcher
 from .sse_interactive_fetcher import SSEInteractiveFetcher
 
 __all__: list[str] = [
+    "AShareTextCoordinator",
     "AShareTextProvider",
     "CNInfoIRMFetcher",
     "IRMFetcher",

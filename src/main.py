@@ -19,6 +19,7 @@ from .data_ingestion.quotes import (
     YFinanceQuotesProvider,
 )
 from .data_ingestion.text import TextProviderFactory, TextSourceType
+from .data_ingestion.text.a_share.coordinator import AShareTextCoordinator
 from .data_ingestion.preprocessor import TextPreprocessor
 from .engines import ConsensusEngine, ThesisProjector, GapCalculator, AuditResult
 from .llm import DeepSeekClient
@@ -64,6 +65,12 @@ class AliceTestPipeline:
         self._gap_calculator = GapCalculator(config.gap_thresholds)
         self._report_writer: AuditReportStore = CSVReportWriter(self._output_path)
         self._text_preprocessor = TextPreprocessor()
+
+        # 初始化 A 股文本协调器
+        self._text_coordinator = AShareTextCoordinator(
+            config=self._config.data_sources.text.a_share,
+            logger=self._py_logger,
+        )
 
     def _create_llm_client(self) -> DeepSeekClient:
         """创建 LLM 客户端"""
@@ -303,7 +310,7 @@ class AliceTestPipeline:
         """
         获取文本数据
 
-        使用 TextProviderFactory 自动选择合适的 Provider。
+        对于 A 股使用 AShareTextCoordinator，其他市场使用 TextProviderFactory。
 
         Args:
             target: 标的配置
@@ -315,12 +322,25 @@ class AliceTestPipeline:
             # 从配置获取参数
             crawler_config = self._config.data_sources.crawler
 
-            texts = TextProviderFactory.fetch_texts(
-                ticker=target.ticker,
-                name=target.name,
-                lookback_hours=crawler_config.lookback_hours,
-                max_items=crawler_config.max_items_per_ticker,
-            )
+            # 判断市场类型
+            market = target.get_market()
+
+            if market == "a_share":
+                # A 股使用协调器
+                texts = self._text_coordinator.fetch_texts(
+                    ticker=target.ticker,
+                    name=target.name,
+                    lookback_hours=crawler_config.lookback_hours,
+                    max_items=crawler_config.max_items_per_ticker,
+                )
+            else:
+                # 港美股使用原有工厂方法
+                texts = TextProviderFactory.fetch_texts(
+                    ticker=target.ticker,
+                    name=target.name,
+                    lookback_hours=crawler_config.lookback_hours,
+                    max_items=crawler_config.max_items_per_ticker,
+                )
 
             if self._verbose:
                 self._py_logger.debug(
