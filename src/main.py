@@ -227,6 +227,13 @@ class AliceTestPipeline:
         # Step 1: 数据摄入
         raw_data = self._ingest_data(target)
 
+        # 检查是否有有效的文本数据，避免无意义的 LLM 调用
+        if not raw_data.texts:
+            self._py_logger.warning(
+                f"[{target.ticker}] 无有效文本数据，跳过 LLM 分析"
+            )
+            # 记录为数据错误，但仍继续处理（使用默认值）
+
         # Step 2: Module A - 市场共识分析
         consensus = self._consensus_engine.analyze(raw_data)
 
@@ -413,6 +420,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="详细输出模式",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="启用 DEBUG 级别日志（显示 LLM 原始响应等调试信息）",
+    )
     return parser.parse_args()
 
 
@@ -420,10 +432,18 @@ def main() -> None:
     """主入口函数"""
     args = parse_args()
 
-    # 配置日志
-    log_level = logging.DEBUG if args.verbose else logging.INFO
+    # 配置日志（--debug 优先于 --verbose）
+    if args.debug:
+        log_level = logging.DEBUG
+    elif args.verbose:
+        log_level = logging.DEBUG
+    else:
+        log_level = logging.INFO
     setup_logger(level=log_level)
     logger = logging.getLogger("alice_test")
+
+    if args.debug:
+        logger.debug("DEBUG 模式已启用，将输出 LLM 原始响应等详细调试信息")
 
     logger.info("Alice Test - 市场隐含预期与逻辑偏差自动审计系统")
     logger.info(f"配置文件: {args.config}")

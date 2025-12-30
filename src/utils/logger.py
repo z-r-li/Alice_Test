@@ -4,11 +4,25 @@
 职责：
 - 统一日志格式
 - 记录运行统计信息（成功/失败数、Token 消耗等）
+- 支持 DEBUG 模式（通过 ALICE_DEBUG 环境变量或 --debug 参数）
 """
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+
+def is_debug_mode() -> bool:
+    """
+    检查是否启用 DEBUG 模式
+
+    可通过设置环境变量 ALICE_DEBUG=1 启用
+
+    Returns:
+        bool: 是否为 DEBUG 模式
+    """
+    return os.environ.get("ALICE_DEBUG", "").lower() in ("1", "true", "yes")
 
 
 @dataclass
@@ -27,7 +41,7 @@ class RunStatistics:
 
 def setup_logger(
     name: str = "alice_test",
-    level: int = logging.INFO,
+    level: int | None = None,
     log_file: str | Path | None = None,
 ) -> logging.Logger:
     """
@@ -35,24 +49,38 @@ def setup_logger(
 
     Args:
         name: 日志器名称
-        level: 日志级别
+        level: 日志级别，默认 INFO，若 ALICE_DEBUG=1 则自动使用 DEBUG
         log_file: 日志文件路径（可选）
 
     Returns:
         logging.Logger: 配置好的日志器
     """
+    # 自动检测 DEBUG 模式
+    if level is None:
+        level = logging.DEBUG if is_debug_mode() else logging.INFO
+
     logger = logging.getLogger(name)
     logger.setLevel(level)
+
+    # 避免重复添加 handler
+    if logger.handlers:
+        return logger
 
     # 控制台处理器
     console_handler = logging.StreamHandler()
     console_handler.setLevel(level)
 
-    # 格式化器
-    formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    # 格式化器（DEBUG 模式下显示更多信息）
+    if level == logging.DEBUG:
+        formatter = logging.Formatter(
+            fmt="%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    else:
+        formatter = logging.Formatter(
+            fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
@@ -124,6 +152,10 @@ class AuditLogger:
             self._current_stats.llm_error_count += 1
             self._current_stats.errors.append(f"[{ticker}] LLM error: {error}")
         self._logger.error(f"[{ticker}] LLM error: {error}")
+
+    def log_debug(self, message: str) -> None:
+        """记录调试信息（仅在 DEBUG 模式下输出）"""
+        self._logger.debug(message)
 
     def log_llm_call(self, tokens_used: int, latency_ms: float) -> None:
         """记录 LLM 调用统计"""

@@ -3,6 +3,7 @@ DeepSeek API 客户端封装
 
 使用 OpenAI 官方 Python SDK 调用 DeepSeek API
 """
+import logging
 import os
 import json
 import time
@@ -200,14 +201,20 @@ class DeepSeekClient:
             JSONParseError: JSON 解析失败（重试后仍失败）
             APICallError: API 调用失败
         """
+        logger = logging.getLogger("alice_test")
         retries = max_retries if max_retries is not None else self.MAX_RETRIES
         last_error: Exception | None = None
+        attempt_details: list[str] = []  # 记录每次尝试的详情
 
         for attempt in range(retries + 1):
             try:
                 # 重试时追加 JSON 修复提示（PRD 7.2 要求）
                 effective_system = system_prompt
                 if attempt > 0:
+                    logger.warning(
+                        f"JSON 解析重试 (第 {attempt + 1}/{retries + 1} 次): "
+                        f"原因 - {last_error}"
+                    )
                     effective_system += PromptTemplates.JSON_REPAIR_SUFFIX
 
                 # 启用 JSON 模式调用 API（PRD 4.2, 4.3 要求）
@@ -221,15 +228,24 @@ class DeepSeekClient:
                 result = self._parse_json_response(response.content, result_class)
 
                 if result.validate():
+                    logger.debug(f"JSON 解析成功 (第 {attempt + 1} 次尝试)")
                     return result
                 else:
-                    raise JSONParseError("响应验证失败：字段值不符合约束条件")
+                    error_msg = "响应验证失败：字段值不符合约束条件"
+                    attempt_details.append(f"第 {attempt + 1} 次: {error_msg}")
+                    raise JSONParseError(error_msg)
 
             except JSONParseError as e:
                 last_error = e
+                attempt_details.append(f"第 {attempt + 1} 次: {e}")
                 if attempt < retries:
                     time.sleep(1)  # 重试前等待 1 秒
                     continue
+                # 最终失败，记录所有尝试信息
+                logger.error(
+                    f"JSON 解析最终失败 (共尝试 {retries + 1} 次):\n"
+                    + "\n".join(f"  - {detail}" for detail in attempt_details)
+                )
                 raise
 
             except APICallError:
@@ -255,6 +271,17 @@ class DeepSeekClient:
         Raises:
             JSONParseError: 解析失败
         """
+        logger = logging.getLogger("alice_test")
+
+        # 记录原始响应（debug 级别，限制长度）
+        content_preview = content[:500] if len(content) > 500 else content
+        logger.debug(f"LLM 原始响应 (前500字符): {content_preview}")
+
+        # 检查空响应
+        if not content or not content.strip():
+            logger.error("LLM 返回空响应")
+            raise JSONParseError("LLM 返回空响应")
+
         try:
             # 清理 markdown 代码块标记
             cleaned = content.strip()
@@ -270,11 +297,28 @@ class DeepSeekClient:
             data = json.loads(cleaned)
 
             # 构造结果对象
+            logger.debug(f"JSON 解析成功，字段: {list(data.keys())}")
             return result_class.from_dict(data)
         except json.JSONDecodeError as e:
-            raise JSONParseError(f"JSON 解析失败: {e}") from e
+            # 记录完整的原始响应用于调试
+            logger.error(
+                f"JSON 解析失败，原始响应:\n{content[:1000]}"
+                + ("..." if len(content) > 1000 else "")
+            )
+            # 异常信息中包含响应内容摘要
+            content_summary = content[:200] + ("..." if len(content) > 200 else "")
+            raise JSONParseError(
+                f"JSON 解析失败: {e}\n响应内容预览: {content_summary}"
+            ) from e
         except Exception as e:
-            raise JSONParseError(f"结果构造失败: {e}") from e
+            logger.error(
+                f"结果构造失败，原始响应:\n{content[:1000]}"
+                + ("..." if len(content) > 1000 else "")
+            )
+            content_summary = content[:200] + ("..." if len(content) > 200 else "")
+            raise JSONParseError(
+                f"结果构造失败: {e}\n响应内容预览: {content_summary}"
+            ) from e
 
     def get_consensus(
         self,
