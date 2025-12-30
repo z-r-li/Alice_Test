@@ -490,3 +490,115 @@ class TestLLMConfig:
 
             assert len(w) == 1
             assert "temperature" in str(w[0].message)
+
+
+class TestTextSourceConfig:
+    """TextSourceConfig 测试类"""
+
+    def test_default_values(self):
+        """测试默认配置值"""
+        from src.config.models import TextSourceConfig
+
+        config = TextSourceConfig()
+
+        # A 股默认启用所有数据源
+        assert "research" in config.a_share.enabled_sources
+        assert "irm" in config.a_share.enabled_sources
+        assert "rating" in config.a_share.enabled_sources
+        assert "news" in config.a_share.enabled_sources
+
+        # 默认权重
+        assert config.a_share.quota_weights["research"] == 4
+        assert config.a_share.quota_weights["irm"] == 3
+        assert config.a_share.quota_weights["rating"] == 2
+        assert config.a_share.quota_weights["news"] == 3
+
+    def test_custom_a_share_config(self):
+        """测试自定义 A 股配置"""
+        config = load_config_from_dict({
+            "targets": [],
+            "data_sources": {
+                "text": {
+                    "a_share": {
+                        "enabled_sources": ["research", "news"],
+                        "quota_weights": {
+                            "research": 6,
+                            "news": 4,
+                        }
+                    }
+                }
+            }
+        })
+
+        assert config.data_sources.text.a_share.enabled_sources == ["research", "news"]
+        assert config.data_sources.text.a_share.quota_weights["research"] == 6
+
+    def test_backward_compatibility_ignores_old_fields(self):
+        """测试向后兼容：旧字段被静默忽略并发出警告"""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            # 这不应该抛出异常
+            config = load_config_from_dict({
+                "targets": [],
+                "data_sources": {
+                    "text": {
+                        # 旧字段（应被忽略）
+                        "research_providers": ["中信证券"],
+                        "news_sites": ["东方财富"],
+                        "search_entrypoints": ["https://example.com"],
+                        # 新字段
+                        "a_share": {
+                            "enabled_sources": ["research"]
+                        }
+                    }
+                }
+            })
+
+            # 新字段正常工作
+            assert config.data_sources.text.a_share.enabled_sources == ["research"]
+
+            # 旧字段不应存在
+            assert not hasattr(config.data_sources.text, "research_providers")
+            assert not hasattr(config.data_sources.text, "news_sites")
+            assert not hasattr(config.data_sources.text, "search_entrypoints")
+
+            # 应该有废弃警告
+            deprecation_warnings = [
+                warning for warning in w
+                if issubclass(warning.category, DeprecationWarning)
+            ]
+            assert len(deprecation_warnings) >= 1
+            assert "已废弃" in str(deprecation_warnings[0].message)
+
+    def test_hk_us_config_preserved(self):
+        """测试港美股配置正确保留"""
+        config = load_config_from_dict({
+            "targets": [],
+            "data_sources": {
+                "text": {
+                    "hk_us": {
+                        "search_provider": "google_custom_search",
+                        "trusted_domains": ["bloomberg.com", "wsj.com"]
+                    }
+                }
+            }
+        })
+
+        assert config.data_sources.text.hk_us.search_provider == "google_custom_search"
+        assert "bloomberg.com" in config.data_sources.text.hk_us.trusted_domains
+        assert "wsj.com" in config.data_sources.text.hk_us.trusted_domains
+
+    def test_hk_us_default_values(self):
+        """测试港美股配置默认值"""
+        from src.config.models import TextSourceConfig
+
+        config = TextSourceConfig()
+
+        assert config.hk_us.search_provider == "serpapi"
+        assert config.hk_us.search_api_key == ""
+        assert "bloomberg.com" in config.hk_us.trusted_domains
+        assert "reuters.com" in config.hk_us.trusted_domains
+        assert "seekingalpha.com" in config.hk_us.trusted_domains

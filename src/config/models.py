@@ -185,20 +185,13 @@ class TextSourceConfig(BaseModel):
     """
     文本数据源配置
 
+    按市场类型分别配置文本数据获取策略。
+
     Attributes:
-        research_providers: 允许的研报来源机构列表
-        news_sites: 允许的新闻站点列表
-        search_entrypoints: 搜索入口 URL 列表
-        a_share: A 股文本源配置
-        hk_us: 港美股文本源配置
+        a_share: A 股文本源配置（基于 AkShare API）
+        hk_us: 港美股文本源配置（基于 Web Search，预留）
     """
 
-    # 原有字段（兼容）
-    research_providers: list[str] = Field(default_factory=list)
-    news_sites: list[str] = Field(default_factory=list)
-    search_entrypoints: list[str] = Field(default_factory=list)
-
-    # 新增：分市场配置
     a_share: AShareTextSourceConfig = Field(
         default_factory=AShareTextSourceConfig,
         description="A 股文本源配置",
@@ -208,6 +201,29 @@ class TextSourceConfig(BaseModel):
         default_factory=HKUSTextSourceConfig,
         description="港美股文本源配置",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def warn_deprecated_fields(cls, data: dict) -> dict:
+        """向后兼容：警告并忽略已废弃的配置字段"""
+        if not isinstance(data, dict):
+            return data
+
+        import warnings
+
+        deprecated = ["research_providers", "news_sites", "search_entrypoints"]
+        found = [f for f in deprecated if f in data]
+        if found:
+            warnings.warn(
+                f"配置字段 {found} 已废弃，将被忽略。"
+                f"A 股文本数据现在通过 AkShare API 获取，请使用 'a_share' 配置。",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            # 删除旧字段，避免 Pydantic 报错
+            for f in found:
+                data.pop(f, None)
+        return data
 
 
 class TrustedSourcesConfig(BaseModel):
