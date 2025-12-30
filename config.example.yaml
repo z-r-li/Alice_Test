@@ -45,16 +45,20 @@ data_sources:
 
     # A 股文本源配置
     a_share:
+      # 启用的数据源（按优先级排序）
       enabled_sources:
-        - research
-        - irm
-        - rating
-        - news
+        - research    # 研报
+        - irm         # 互动易问答
+        - rating      # 机构评级变动
+        - news        # 新闻
+
+      # 各数据源的配额权重
+      # 总 max_items 会按权重分配给各数据源
       quota_weights:
-        research: 4
-        irm: 3
-        rating: 2
-        news: 3
+        research: 4   # 研报最有价值
+        irm: 3        # 互动易直接反映担忧
+        rating: 2     # 评级变动是信号
+        news: 3       # 新闻补充叙事
 
     # 港美股文本源配置（预留）
     hk_us:
