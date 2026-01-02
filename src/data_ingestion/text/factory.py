@@ -120,8 +120,37 @@ class TextProviderFactory:
     def _get_hk_us_provider(cls) -> TextProvider:
         """获取或创建港美股 Provider（单例）"""
         if cls._hk_us_provider is None:
-            cls._hk_us_provider = _PlaceholderProvider("hk_us")
-            logger.info("创建港美股 TextProvider (占位实现)")
+            # 从环境或配置加载
+            from .hk_us import HKUSTextProvider
+            from src.config import get_config  # 假设有全局配置获取方法
+
+            try:
+                config = get_config()
+                hk_us_config = config.data_sources.text.hk_us
+                crawler_config = config.data_sources.crawler
+
+                # 尝试创建 LLM 客户端（用于内容提取）
+                llm_client = None
+                try:
+                    from src.llm.deepseek_client import DeepSeekClient
+
+                    llm_client = DeepSeekClient(
+                        api_key=config.llm_api.api_key,
+                        model=config.llm_api.model,
+                    )
+                except Exception as e:
+                    logger.warning(f"无法创建 LLM 客户端，将禁用内容提取: {e}")
+
+                cls._hk_us_provider = HKUSTextProvider(
+                    config=hk_us_config,
+                    crawler_config=crawler_config,
+                    llm_client=llm_client,
+                )
+                logger.info("创建港美股 TextProvider (HKUSTextProvider)")
+
+            except Exception as e:
+                logger.warning(f"无法创建 HKUSTextProvider，使用占位实现: {e}")
+                cls._hk_us_provider = _PlaceholderProvider("hk_us")
 
         return cls._hk_us_provider
 
