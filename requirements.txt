@@ -17,6 +17,10 @@ yfinance>=0.2.0
 pandas>=2.0
 pdfplumber>=0.10.0
 
+# Web Scraping
+beautifulsoup4>=4.12.0
+lxml>=5.0.0  # Optional: faster HTML parsing
+
 # Scheduling (optional)
 apscheduler>=3.10.0
 
