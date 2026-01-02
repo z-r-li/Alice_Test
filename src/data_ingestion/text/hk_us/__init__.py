@@ -1,12 +1,16 @@
 """
 港美股文本数据采集模块
 
-TODO: 待实现港美股市场的文本数据获取器。
-
-预计包含:
-- SEC/HKEX 公告获取
-- 英文财经新闻采集
-- 海外研报获取
+包含:
+- Serper.dev 搜索客户端（Google Search API）
+- SEC/HKEX 公告获取（TODO）
+- 英文财经新闻采集（TODO）
+- 海外研报获取（TODO）
 """
 
-__all__: list[str] = []
+from .serper_client import SearchResult, SerperClient
+
+__all__: list[str] = [
+    "SearchResult",
+    "SerperClient",
+]
