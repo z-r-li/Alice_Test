@@ -56,16 +56,47 @@ data_sources:
         rating: 2     # 评级变动是预期变化信号
         news: 3       # 新闻补充市场叙事
 
-    # 港美股文本源配置（基于 Web Search，预留）
+    # 港美股文本源配置（基于 Web Search）
     hk_us:
-      search_provider: "serpapi"  # 支持: serpapi, google_custom_search
-      search_api_key: ""          # 留空则从环境变量 SERPAPI_KEY 读取
+      # 搜索服务提供商
+      # - serper: 推荐，免费额度 2,500次/月，性价比最高
+      # - serpapi: 备选，免费额度 100次/月
+      search_provider: "serper"
+
+      # 搜索 API 密钥
+      # 留空则从环境变量读取：
+      # - serper: SERPER_API_KEY
+      # - serpapi: SERPAPI_KEY
+      search_api_key: ""
+
+      # 多层浏览配置
+      # 用于从搜索结果页深入获取研报详情
+      browsing:
+        enabled: true           # 是否启用多层浏览
+        max_depth: 2            # 最大浏览深度 (1-3)
+        max_links_per_page: 3   # 每页最多跟踪的链接数
+        link_selection_mode: "llm"  # 链接选择模式: "llm" 或 "rule"
+
+      # 可信域名白名单
+      # 只从这些域名获取内容，保证信息质量
       trusted_domains:
-        - "bloomberg.com"
-        - "reuters.com"
-        - "seekingalpha.com"
-        - "wsj.com"
-        - "ft.com"
+        - "seekingalpha.com"    # 美股研报社区
+        - "tipranks.com"        # 分析师评级汇总
+        - "morningstar.com"     # 晨星研究
+        - "finance.yahoo.com"   # 雅虎财经
+        - "bloomberg.com"       # 彭博
+        - "reuters.com"         # 路透
+        - "wsj.com"             # 华尔街日报
+        - "ft.com"              # 金融时报
+        - "cnbc.com"            # CNBC
+        - "barrons.com"         # 巴伦周刊
+
+      # 搜索查询模板
+      # 支持占位符: {ticker} = 股票代码, {name} = 公司名称
+      search_templates:
+        research: "{ticker} {name} analyst report research"
+        news: "{ticker} {name} news"
+        earnings: "{ticker} earnings analysis"
 
   # 爬虫/数据获取配置
   crawler:
