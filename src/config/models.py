@@ -166,33 +166,78 @@ class AShareTextSourceConfig(BaseModel):
     )
 
 
-class HKUSTextSourceConfig(BaseModel):
+class BrowsingConfig(BaseModel):
     """
-    港美股文本数据源配置（预留）
+    多层浏览配置
+
+    用于控制 Agent Browser 的行为，在搜索结果页发现研报链接后
+    决定是否深入获取详情页内容。
 
     Attributes:
-        search_provider: 搜索引擎提供商
-        search_api_key: 搜索 API Key，留空则从环境变量读取
-        trusted_domains: 可信数据源域名
+        enabled: 是否启用多层浏览
+        max_depth: 最大浏览深度（1=仅搜索结果，2=深入一层详情页）
+        max_links_per_page: 每个页面最多跟踪的链接数
+        link_selection_mode: 链接选择模式 ("llm" 使用 LLM 判断, "rule" 使用规则匹配)
     """
 
-    search_provider: Literal["serpapi", "google_custom_search"] = Field(
-        default="serpapi",
-        description="搜索引擎提供商",
+    enabled: bool = Field(default=True, description="是否启用多层浏览")
+    max_depth: int = Field(default=2, ge=1, le=3, description="最大浏览深度")
+    max_links_per_page: int = Field(
+        default=3, ge=1, le=10, description="每页最多跟踪链接数"
+    )
+    link_selection_mode: Literal["llm", "rule"] = Field(
+        default="llm", description="链接选择模式"
     )
 
+
+class HKUSTextSourceConfig(BaseModel):
+    """
+    港美股文本数据源配置
+
+    基于 Web Search API 获取港美股的新闻、研报等文本数据。
+
+    Attributes:
+        search_provider: 搜索服务提供商 ("serper" 推荐, "serpapi" 备选)
+        search_api_key: 搜索 API 密钥（留空则从环境变量读取）
+        browsing: 多层浏览配置
+        trusted_domains: 可信域名白名单
+        search_templates: 搜索查询模板
+    """
+
+    search_provider: Literal["serper", "serpapi"] = Field(
+        default="serper",
+        description="搜索服务提供商，推荐 serper（免费额度 2500次/月）",
+    )
     search_api_key: str = Field(
         default="",
-        description="搜索 API Key，留空则从环境变量读取",
+        description="搜索 API 密钥，留空则从环境变量 SERPER_API_KEY 或 SERPAPI_KEY 读取",
     )
-
+    browsing: BrowsingConfig = Field(
+        default_factory=BrowsingConfig,
+        description="多层浏览配置",
+    )
     trusted_domains: list[str] = Field(
         default_factory=lambda: [
+            "seekingalpha.com",
+            "tipranks.com",
+            "morningstar.com",
+            "finance.yahoo.com",
             "bloomberg.com",
             "reuters.com",
-            "seekingalpha.com",
+            "wsj.com",
+            "ft.com",
+            "cnbc.com",
+            "barrons.com",
         ],
-        description="可信数据源域名",
+        description="可信域名白名单",
+    )
+    search_templates: dict[str, str] = Field(
+        default_factory=lambda: {
+            "research": "{ticker} {name} analyst report research",
+            "news": "{ticker} {name} news",
+            "earnings": "{ticker} earnings analysis",
+        },
+        description="搜索查询模板，支持 {ticker} 和 {name} 占位符",
     )
 
 
