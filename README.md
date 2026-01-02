@@ -26,6 +26,7 @@ Alice Test 是一个自动化 Python 数据流水线，用于监控特定投资�
 
 - 🔄 自动采集 A股/港股/美股行情数据
 - 📰 整合研报摘要与新闻标题
+- 🌐 港美股: Serper.dev + LLM 多层浏览
 - 🤖 基于 DeepSeek-V3 的市场情绪分析
 - 📊 认知差计算与信号生成 (OPPORTUNITY / OVERHEATED / WAIT)
 - 📁 CSV 格式审计报告输出
@@ -45,6 +46,7 @@ pip install -r requirements.txt
 # 配置 API 密钥
 export DEEPSEEK_API_KEY="your-api-key"
 export TUSHARE_TOKEN="your-tushare-token"  # 可选，用于 A 股数据
+export SERPER_API_KEY="your-serper-key"    # 可选，用于港美股文本
 
 # 运行
 python src/main.py --config config.yaml
@@ -75,6 +77,8 @@ pip install -r requirements.txt
 | `tushare` | A股行情数据（可选） |
 | `akshare` | A股数据备选方案 |
 | `yfinance` | 港股/美股行情数据 |
+| `httpx` | 港美股文本异步 HTTP 请求 |
+| `beautifulsoup4` | 港美股网页内容解析 |
 | `pyyaml` | 配置文件解析 |
 | `pydantic` | 数据模型校验 |
 
@@ -98,6 +102,13 @@ data_sources:
     token: "${TUSHARE_TOKEN}"  # 使用 tushare 时需要
   hk_us:
     provider: "yfinance"
+  # 文本数据源配置
+  text:
+    hk_us:
+      provider: "serper"
+      api_key: "${SERPER_API_KEY}"
+      max_results: 10
+      max_pages_to_browse: 3
 
 # 监控标的配置
 targets:
@@ -209,10 +220,11 @@ python src/main.py --verbose
 
 ### 环境变量
 
-| 变量名 | 说明 | 必需 |
+| 变量名 | 必需 | 说明 |
 |--------|------|------|
-| `DEEPSEEK_API_KEY` | DeepSeek API 密钥 | ✅ |
-| `TUSHARE_TOKEN` | Tushare API Token | 使用 Tushare 时需要 |
+| `DEEPSEEK_API_KEY` | 是 | LLM 服务密钥 |
+| `SERPER_API_KEY` | 否 | 港美股文本搜索 (2,500次/月免费) |
+| `TUSHARE_TOKEN` | 否 | A股数据备选方案 |
 
 ### 思考模式（高级）
 
