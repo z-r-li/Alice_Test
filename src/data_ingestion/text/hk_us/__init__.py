@@ -4,17 +4,21 @@
 包含:
 - Serper.dev 搜索客户端（Google Search API）
 - 网页内容抓取器（Web Fetcher）
-- SEC/HKEX 公告获取（TODO）
-- 英文财经新闻采集（TODO）
-- 海外研报获取（TODO）
+- LLM 驱动的多层浏览器（Agent Browser）
+- 港美股文本数据提供器（HKUSTextProvider）
 """
 
 from .serper_client import SearchResult, SerperClient
 from .web_fetcher import PageContent, WebFetcher
+from .agent_browser import AgentBrowser, BrowseResult
+from .hk_us_provider import HKUSTextProvider
 
 __all__: list[str] = [
     "SearchResult",
     "SerperClient",
     "PageContent",
     "WebFetcher",
+    "AgentBrowser",
+    "BrowseResult",
+    "HKUSTextProvider",
 ]
