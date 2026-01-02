@@ -214,6 +214,24 @@ python src/main.py --verbose
 | `DEEPSEEK_API_KEY` | DeepSeek API 密钥 | ✅ |
 | `TUSHARE_TOKEN` | Tushare API Token | 使用 Tushare 时需要 |
 
+### 思考模式（高级）
+
+Module B（信念投影器）支持 DeepSeek 思考模式，可在输出前进行深度推理：
+
+```yaml
+llm_api:
+  # ... 其他配置 ...
+  thesis_thinking_enabled: true  # 启用思考模式
+  thesis_thinking_max_tokens: 16384
+```
+
+| 模式 | 优点 | 缺点 |
+|------|------|------|
+| 标准模式 | 响应快、成本低 | 复杂推理能力一般 |
+| 思考模式 | 推理更深入准确 | Token 消耗增加 2-3 倍 |
+
+**建议：** 初期使用标准模式，如发现 Module B 输出质量不佳再启用思考模式。
+
 ---
 
 ## 常见问题

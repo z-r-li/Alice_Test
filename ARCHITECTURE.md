@@ -178,6 +178,35 @@ class TrustedSourcesConfig:
 ### 3.3 LLM 模块 (`llm/`)
 
 ```python
+# config/models.py - LLM 配置
+class LLMConfig(BaseModel):
+    provider: Literal["deepseek"] = "deepseek"
+    api_key: str = ""
+    model: str = "deepseek-chat"
+    temperature: float = 0.0
+    max_tokens: int = 4096
+    max_retries: int = 2
+
+    # Module B 思考模式配置
+    thesis_thinking_enabled: bool = False  # 是否启用思考模式
+    thesis_thinking_max_tokens: int = 16384  # 思考模式最大 token 数
+```
+
+#### 思考模式说明
+
+Module B（信念投影器）支持可选的 DeepSeek 思考模式：
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `thesis_thinking_enabled` | 是否启用思考模式 | `false` |
+| `thesis_thinking_max_tokens` | 思考模式最大 token 数 | `16384` |
+
+**使用建议：**
+- 初期建议保持关闭（`false`），使用标准模式
+- 如发现增长率预估准确性不足，可开启进行对比测试
+- 思考模式会增加约 2-3 倍的 token 消耗和响应时间
+
+```python
 # llm/models.py
 @dataclass
 class ConsensusResult:

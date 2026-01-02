@@ -76,10 +76,12 @@ class AliceTestPipeline:
         """创建 LLM 客户端"""
         llm_config = self._config.llm_api
         return DeepSeekClient(
-            api_key=llm_config.api_key,
+            api_key=llm_config.get_api_key(),
             model=llm_config.model,
             temperature=llm_config.temperature,
             max_tokens=llm_config.max_tokens,
+            thinking_enabled=llm_config.thesis_thinking_enabled,
+            thinking_max_tokens=llm_config.thesis_thinking_max_tokens,
         )
 
     def run(self) -> list[AuditResult]:

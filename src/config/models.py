@@ -23,6 +23,8 @@ class LLMConfig(BaseModel):
         temperature: 温度参数，必须为 0 以保证评分稳定
         max_tokens: 最大 token 数
         max_retries: 请求失败时的最大重试次数
+        thesis_thinking_enabled: 是否为 Module B（信念投影器）启用 DeepSeek 思考模式
+        thesis_thinking_max_tokens: 思考模式下的最大 token 数（含思维链）
     """
 
     provider: Literal["deepseek"] = "deepseek"
@@ -31,6 +33,19 @@ class LLMConfig(BaseModel):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, gt=0)
     max_retries: int = Field(default=2, ge=0, le=10, description="最大重试次数")
+
+    # Module B 思考模式开关
+    thesis_thinking_enabled: bool = Field(
+        default=False,
+        description="是否为 Module B（信念投影器）启用 DeepSeek 思考模式。"
+        "启用后可能提升推理质量，但会增加 token 消耗和响应时间。",
+    )
+    thesis_thinking_max_tokens: int = Field(
+        default=16384,
+        gt=0,
+        le=65536,
+        description="思考模式下的最大 token 数（含思维链），默认 16K，最大 64K",
+    )
 
     @field_validator("temperature")
     @classmethod
