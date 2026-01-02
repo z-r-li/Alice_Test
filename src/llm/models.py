@@ -22,6 +22,7 @@ class LLMResponse(BaseModel):
         model: 使用的模型名称
         prompt_tokens: 输入 token 数
         completion_tokens: 输出 token 数
+        reasoning_content: 思维链内容（思考模式下可用）
         raw_response: 原始响应对象（用于调试）
     """
 
@@ -29,6 +30,7 @@ class LLMResponse(BaseModel):
     model: str = Field(..., description="使用的模型")
     prompt_tokens: int = Field(default=0, description="输入 token 数")
     completion_tokens: int = Field(default=0, description="输出 token 数")
+    reasoning_content: str | None = Field(default=None, description="思维链内容（思考模式下可用）")
     raw_response: Any = Field(default=None, exclude=True, description="原始响应对象")
 
     def get_total_tokens(self) -> int:

@@ -9,9 +9,16 @@ llm_api:
   provider: "deepseek"
   api_key: ""  # 留空则从环境变量 DEEPSEEK_API_KEY 读取
   model: "deepseek-chat"
-  temperature: 0  # 必须为 0，保证评分稳定
+  temperature: 0  # 必须为 0，保证评分稳定（思考模式下此参数不生效）
   max_tokens: 4096
   max_retries: 2  # 请求失败时的最大重试次数
+
+  # Module B 思考模式配置（可选）
+  # 思考模式会让模型在输出最终答案前先进行深度推理
+  # 优点：可能提升增长率预估的准确性
+  # 缺点：增加 token 消耗和响应时间
+  thesis_thinking_enabled: false  # 是否为 Module B 启用思考模式
+  thesis_thinking_max_tokens: 16384  # 思考模式下最大 token 数（含思维链），最大 65536
 
 # ============================================
 # 数据源配置

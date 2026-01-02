@@ -96,6 +96,7 @@ class DeepSeekClient:
     DEFAULT_MODEL = "deepseek-chat"
     DEFAULT_TEMPERATURE = 0.0
     DEFAULT_MAX_TOKENS = 4096
+    DEFAULT_THINKING_MAX_TOKENS = 16384
     MAX_RETRIES = 2
 
     def __init__(
@@ -105,6 +106,8 @@ class DeepSeekClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         base_url: str = "https://api.deepseek.com",
+        thinking_enabled: bool = False,
+        thinking_max_tokens: int | None = None,
     ):
         """
         初始化 DeepSeek 客户端
@@ -115,12 +118,16 @@ class DeepSeekClient:
             temperature: 温度参数，默认 0.0
             max_tokens: 最大 token 数，默认 4096
             base_url: API 基础 URL
+            thinking_enabled: 是否启用思考模式（用于 Module B）
+            thinking_max_tokens: 思考模式下的最大 token 数
         """
         self._api_key = api_key
         self._model = model or self.DEFAULT_MODEL
         self._temperature = temperature if temperature is not None else self.DEFAULT_TEMPERATURE
         self._max_tokens = max_tokens or self.DEFAULT_MAX_TOKENS
         self._base_url = base_url
+        self._thinking_enabled = thinking_enabled
+        self._thinking_max_tokens = thinking_max_tokens or self.DEFAULT_THINKING_MAX_TOKENS
         self._client = OpenAI(api_key=api_key, base_url=base_url)
 
     def chat(
@@ -129,6 +136,7 @@ class DeepSeekClient:
         user_prompt: str,
         temperature: float | None = None,
         json_mode: bool = False,
+        use_thinking: bool = False,
     ) -> LLMResponse:
         """
         发送聊天请求
@@ -138,6 +146,7 @@ class DeepSeekClient:
             user_prompt: 用户消息
             temperature: 可选覆盖温度参数
             json_mode: 是否启用 JSON 输出模式
+            use_thinking: 是否启用思考模式（仅对当前请求生效）
 
         Returns:
             LLMResponse: 响应对象
@@ -153,9 +162,17 @@ class DeepSeekClient:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                "temperature": temperature if temperature is not None else self._temperature,
-                "max_tokens": self._max_tokens,
             }
+
+            # 思考模式处理
+            if use_thinking:
+                # 思考模式下不支持 temperature 参数，使用 extra_body 启用
+                kwargs["max_tokens"] = self._thinking_max_tokens
+                kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+                # 注意：思考模式下 temperature 参数不会生效
+            else:
+                kwargs["temperature"] = temperature if temperature is not None else self._temperature
+                kwargs["max_tokens"] = self._max_tokens
 
             # 启用 JSON 输出模式（PRD 4.2, 4.3 要求）
             if json_mode:
@@ -164,6 +181,14 @@ class DeepSeekClient:
             response = self._client.chat.completions.create(**kwargs)
 
             content = response.choices[0].message.content or ""
+
+            # 提取思维链内容（如果有）
+            reasoning_content = getattr(
+                response.choices[0].message,
+                "reasoning_content",
+                None,
+            )
+
             usage = response.usage
 
             return LLMResponse(
@@ -171,6 +196,7 @@ class DeepSeekClient:
                 model=response.model,
                 prompt_tokens=usage.prompt_tokens if usage else 0,
                 completion_tokens=usage.completion_tokens if usage else 0,
+                reasoning_content=reasoning_content,
             )
         except Exception as e:
             raise APICallError(f"API 调用失败: {e}") from e
@@ -181,6 +207,7 @@ class DeepSeekClient:
         user_prompt: str,
         result_class: Type[T],
         max_retries: int | None = None,
+        use_thinking: bool = False,
     ) -> T:
         """
         发送聊天请求并解析 JSON 响应
@@ -193,6 +220,7 @@ class DeepSeekClient:
             user_prompt: 用户消息
             result_class: 结果数据类 (ConsensusResult 或 ThesisProjectionResult)
             max_retries: 最大重试次数，默认为 MAX_RETRIES (2)
+            use_thinking: 是否启用思考模式（仅对当前请求生效）
 
         Returns:
             T: 解析后的结果对象
@@ -222,6 +250,7 @@ class DeepSeekClient:
                     effective_system,
                     user_prompt,
                     json_mode=True,  # 启用 response_format={"type": "json_object"}
+                    use_thinking=use_thinking,  # 传递思考模式开关
                 )
 
                 # 解析并验证响应
@@ -363,6 +392,8 @@ class DeepSeekClient:
         """
         获取信念投影结果 (Module B)
 
+        自动根据配置决定是否使用思考模式。
+
         Args:
             ticker: 证券代码
             ticker_name: 标的名称
@@ -378,7 +409,12 @@ class DeepSeekClient:
             user_thesis=user_thesis,
             industry=industry,
         )
-        return self.chat_with_json_output(system, user, ThesisProjectionResult)
+        return self.chat_with_json_output(
+            system,
+            user,
+            ThesisProjectionResult,
+            use_thinking=self._thinking_enabled,  # 使用配置的思考模式开关
+        )
 
 
 # =============================================================================
