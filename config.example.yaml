@@ -143,7 +143,13 @@ scheduler:
 # ============================================
 # Gap 判定阈值配置
 # ============================================
+# 简化模式：仅基于 gap 值判断（推荐）
 gap_thresholds:
-  opportunity_gap_min: 10.0  # Gap > 10 视为机会
-  opportunity_sentiment_max: 40  # 情绪 < 40 视为悲观
-  overheated_sentiment_min: 80  # 情绪 > 80 视为过热
+  opportunity: 5.0   # gap >= 5% 触发 OPPORTUNITY 信号
+  overheated: -5.0   # gap <= -5% 触发 OVERHEATED 信号
+
+# 高级模式（可选）：结合情绪分数判断
+# gap_thresholds:
+#   opportunity_gap_min: 10.0  # Gap > 10 视为机会
+#   opportunity_sentiment_max: 40  # 情绪 < 40 视为悲观
+#   overheated_sentiment_min: 80  # 情绪 > 80 视为过热

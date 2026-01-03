@@ -18,11 +18,15 @@
 ## 2. 技术栈
 
 ```yaml
-编程语言:      Python 3.x
+编程语言:      Python 3.10+
 LLM 服务商:    DeepSeek-V3 (主力) / GPT-4o-mini (备选)
 数据源:
-  - A股:       Tushare / AkShare (开源)
-  - 港美股:    yfinance
+  - A股行情:   AkShare (默认) / Tushare
+  - 港美股行情: yfinance
+  - A股文本:   AkShare API (研报、互动易、评级、新闻)
+  - 港美股文本: Serper.dev 搜索 + LLM 多层浏览
+HTTP 客户端:   httpx (异步)
+网页解析:      BeautifulSoup4 + lxml
 持久化存储:    SQLite 或 CSV（轻量级，方便回测）
 调度频率:      每日收盘后运行
 ```
@@ -76,18 +80,80 @@ LLM 服务商:    DeepSeek-V3 (主力) / GPT-4o-mini (备选)
 | 参数 | 规格 |
 |------|------|
 | **时间窗口** | 过去 48 小时 |
-| **数据来源** | 券商研报摘要、主流新闻标题 |
+| **数据来源** | 券商研报摘要、主流新闻标题、机构评级、互动问答 |
 | **数量限制** | 每个标的取 Top 5-10 条最有价值的文本 |
 | **过滤规则** | 剔除：融资融券公告、大宗交易通知等无观点内容 |
 
-#### 4.1.3 数据源配置（LLM 辅助）
+#### 4.1.3 A股文本数据源（AkShare API）
 
-> **说明：** 由于我们不受 Token 数量限制，可使用 LLM 实现：
-> - 动态生成搜索源列表
-> - 操作爬虫程序
-> - Agent 浏览功能
+A股文本数据通过 AkShare 提供的多个 API 获取：
 
-默认可信数据源应配置为投行领域的"优质权威机构"（涵盖中英文来源）。
+| 数据类型 | API 接口 | 说明 |
+|----------|----------|------|
+| 研报 | `stock_research_report_em` | 东方财富研报，含标题和 PDF |
+| 互动易 | `stock_sns_sseinfo` / `stock_irm_cninfo` | 投资者问答，直接反映市场担忧 |
+| 评级 | `stock_institute_recommend_detail` | 机构评级变动，预期变化信号 |
+| 新闻 | `stock_news_em` | 补充市场叙事 |
+
+**配额权重分配：**
+
+```yaml
+quota_weights:
+  research: 4   # 研报权重最高，最有分析价值
+  irm: 3        # 互动易直接反映投资者担忧
+  rating: 2     # 评级变动是预期变化信号
+  news: 3       # 新闻补充市场叙事
+```
+
+#### 4.1.4 港美股文本数据源（多层浏览）
+
+港美股无统一 API，采用 **Web Search + LLM 多层浏览** 方案：
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    港美股文本获取架构                                 │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐          │
+│  │ SerperClient │───▶│ PageFetcher  │───▶│LLMLinkSelector│         │
+│  │              │    │              │    │              │          │
+│  │ Serper.dev   │    │ httpx +      │    │ DeepSeek     │          │
+│  │ 搜索 API     │    │ BeautifulSoup│    │ 链接判断     │          │
+│  └──────────────┘    └──────────────┘    └──────────────┘          │
+│         │                   │                   │                   │
+│         ▼                   ▼                   ▼                   │
+│    搜索结果          页面内容抓取          智能链接选择              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**数据流：**
+1. **Serper 搜索**：生成查询（如 "AAPL analyst report"），获取搜索结果
+2. **第一层抓取**：httpx 获取搜索结果页面内容 + 提取页面内链接
+3. **LLM 链接选择**：DeepSeek 判断哪些链接值得深入
+4. **第二层抓取**：获取 LLM 选中的链接（通常是具体分析文章）
+5. **内容提取**：LLM 从页面提取关键投资信息
+
+**可信域名白名单：**
+
+| 域名 | 类型 | 说明 |
+|------|------|------|
+| seekingalpha.com | 研报/分析 | 深度分析文章 |
+| tipranks.com | 评级汇总 | 机构评级、目标价聚合 |
+| morningstar.com | 研报 | 基金评级、股票分析 |
+| finance.yahoo.com | 综合 | 新闻、财报、分析师预测 |
+| bloomberg.com | 新闻/分析 | 高质量权威财经 |
+| reuters.com | 新闻 | 权威财经新闻 |
+
+**成本估算（单标的）：**
+
+| 组件 | 服务 | 成本 |
+|------|------|------|
+| 搜索 | Serper.dev | ~$0.003 (3次查询) |
+| 页面抓取 | httpx | 免费 |
+| LLM 链接选择 | DeepSeek | ~$0.0025 |
+| LLM 内容提取 | DeepSeek | ~$0.02 |
+| **总计** | | **~$0.025/标的** |
 
 ---
 
@@ -218,32 +284,67 @@ def generate_signal(gap: float, sentiment: int) -> str:
 # LLM 配置
 llm_api:
   provider: "deepseek"
-  api_key: "sk-xxxxxx"
+  api_key: ""  # 留空则从环境变量 DEEPSEEK_API_KEY 读取
   model: "deepseek-chat"
-  temperature: 0
+  temperature: 0  # 必须为 0，保证评分稳定
+  max_tokens: 4096
   max_retries: 2
+  # Module B 思考模式配置（可选）
+  thesis_thinking_enabled: false
+  thesis_thinking_max_tokens: 16384
 
 # 数据源配置
 data_sources:
+  # A 股行情数据源
   a_shares:
-    provider: "tushare"  # 或 "akshare"
-    token: "your_tushare_token"
+    provider: "akshare"  # 或 "tushare"
+    token: ""  # Tushare 需要
+
+  # 港美股行情数据源
   hk_us:
     provider: "yfinance"
 
-# 爬虫配置（LLM 辅助生成数据源）
-crawler:
-  use_llm_for_sources: true
-  trusted_sources:
-    cn:
-      - "eastmoney.com"
-      - "10jqka.com.cn"
-      - "wind.com.cn"
-    en:
-      - "bloomberg.com"
-      - "reuters.com"
-  lookback_hours: 48
-  max_items_per_ticker: 10
+  # 文本数据源配置
+  text:
+    # A 股文本源（基于 AkShare API）
+    a_share:
+      enabled_sources:
+        - research
+        - irm
+        - rating
+        - news
+      quota_weights:
+        research: 4
+        irm: 3
+        rating: 2
+        news: 3
+
+    # 港美股文本源（基于 Web Search）
+    hk_us:
+      search_provider: "serper"  # serper | serpapi
+      search_api_key: ""  # 留空从 SERPER_API_KEY 读取
+      browsing:
+        enabled: true
+        max_depth: 2
+        max_links_per_page: 3
+        link_selection_mode: "llm"  # llm | rule
+      trusted_domains:
+        - "seekingalpha.com"
+        - "tipranks.com"
+        - "morningstar.com"
+        - "finance.yahoo.com"
+        - "bloomberg.com"
+        - "reuters.com"
+      search_templates:
+        research: "{ticker} {name} analyst report research"
+        news: "{ticker} {name} news"
+        earnings: "{ticker} earnings analysis"
+
+  # 爬虫通用配置
+  crawler:
+    use_mock: false
+    lookback_hours: 48
+    max_items_per_ticker: 10
 
 # 投资标的列表
 targets:
@@ -262,14 +363,32 @@ targets:
   - ticker: "0700.HK"
     name: "腾讯控股"
     thesis: >
-      中国互联网平台的核心资产，
-      游戏与云业务提供稳定现金流，微信生态护城河深厚。
+      国内社交和游戏基本盘稳固，海外游戏和云业务是增量，
+      回购和分红提升股东回报，估值修复空间大。
 
 # 输出配置
 output:
   format: "csv"  # 或 "sqlite"
   path: "./output/audit_report.csv"
+
+# 调度配置
+scheduler:
+  cron: "0 18 * * MON-FRI"  # 每个交易日 18:00 运行
+  enabled: true
+
+# Gap 判定阈值配置
+gap_thresholds:
+  opportunity: 5.0   # gap >= 5% 触发 OPPORTUNITY 信号
+  overheated: -5.0   # gap <= -5% 触发 OVERHEATED 信号
 ```
+
+### 5.2 环境变量
+
+| 变量名 | 必需 | 说明 |
+|--------|------|------|
+| `DEEPSEEK_API_KEY` | 是 | LLM 服务密钥 |
+| `SERPER_API_KEY` | 否 | 港美股文本搜索 (免费 2,500次/月) |
+| `TUSHARE_TOKEN` | 否 | A股数据备选方案 |
 
 ---
 
@@ -345,26 +464,29 @@ def parse_llm_response(response: str, retries: int = 1) -> dict:
 
 ## 8. 开发优先级
 
-### 第一阶段：核心流水线 (MVP)
+### 第一阶段：核心流水线 (MVP) ✅
 
 1. ✅ 配置文件解析器
-2. ✅ 数据摄入模块（硬数据）
+2. ✅ 数据摄入模块（硬数据：A股/港美股行情）
 3. ✅ 模块 A：共识引擎（关键路径）
-4. ✅ 模块 B：信念投影
+4. ✅ 模块 B：信念投影（含思考模式支持）
 5. ✅ 认知差计算与信号生成
 6. ✅ CSV 输出
 
-### 第二阶段：数据增强
+### 第二阶段：数据增强 ✅
 
-1. 带过滤的软数据爬虫
-2. LLM 辅助数据源生成
-3. 优质数据源集成
+1. ✅ A股文本数据源（AkShare API：研报、互动易、评级、新闻）
+2. ✅ 港美股文本数据源（Serper + LLM 多层浏览）
+3. ✅ 可信域名白名单机制
+4. ✅ 付费墙检测与过滤
 
 ### 第三阶段：监控与告警
 
-1. 每日定时调度 (cron)
-2. 信号告警（邮件/Webhook）
-3. 历史趋势可视化
+1. ⬜ 每日定时调度 (cron)
+2. ⬜ 信号告警（邮件/Webhook）
+3. ⬜ 历史趋势可视化
+4. ⬜ SEC/HKEX 公告集成
+5. ⬜ 财报电话会议记录解析
 
 ---
 
@@ -405,5 +527,5 @@ def parse_llm_response(response: str, retries: int = 1) -> dict:
 
 ---
 
-*文档版本：1.0*  
-*最后更新：2025年*
+*文档版本：2.0*
+*最后更新：2026年1月*
