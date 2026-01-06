@@ -132,13 +132,26 @@ class ResearchFetcher:
                     continue
 
                 # 构建 TextItem
+                # 列名映射: AkShare stock_research_report_em 返回的列名
+                # - 报告名称 (报告标题)
+                # - 机构 (机构名称)
+                # - 报告PDF链接 (研报链接)
+                title = str(row.get("报告名称", "") or row.get("报告标题", "")).strip()
+                if not title:
+                    logger.debug("跳过空标题研报")
+                    continue
+
+                source = str(row.get("机构", "") or row.get("机构名称", "") or "未知机构")
+                url_val = row.get("报告PDF链接", "") or row.get("研报链接", "")
+                url = str(url_val).strip() if url_val else None
+
                 item = TextItem(
-                    source=str(row.get("机构名称", "未知机构")),
+                    source=source,
                     type="research",
-                    title=str(row.get("报告标题", "")),
+                    title=title,
                     summary=self._build_summary(row),
                     published_at=published_at,
-                    url=str(row.get("研报链接", "")) or None,
+                    url=url,
                 )
                 results.append(item)
 
@@ -215,8 +228,8 @@ class ResearchFetcher:
         """
         构建研报摘要
 
-        格式: "评级: {东财评级} | 机构: {机构名称} | 分析师: {研究员}"
-        如有 EPS 预测，追加: "| 2024E EPS: {value}"
+        格式: "评级: {东财评级} | 机构: {机构} | 分析师: {研究员}"
+        如有 EPS 预测，追加: "| 2025E EPS: {value}"
 
         Args:
             row: 单行研报数据
@@ -228,32 +241,42 @@ class ResearchFetcher:
 
         # 评级信息
         rating = row.get("东财评级", "")
-        if rating:
+        if rating and str(rating) not in ["", "nan", "-"]:
             parts.append(f"评级: {rating}")
 
-        # 机构名称
-        institution = row.get("机构名称", "")
-        if institution:
+        # 机构名称 (兼容两种列名)
+        institution = row.get("机构", "") or row.get("机构名称", "")
+        if institution and str(institution) not in ["", "nan", "-"]:
             parts.append(f"机构: {institution}")
 
-        # 分析师
+        # 分析师 (可选字段)
         analyst = row.get("研究员", "")
-        if analyst:
+        if analyst and str(analyst) not in ["", "nan", "-"]:
             parts.append(f"分析师: {analyst}")
 
-        # EPS 预测
+        # EPS 预测 - 兼容新旧两种列名格式
+        # 新格式: "2025-盈利预测-收益", "2026-盈利预测-收益", "2027-盈利预测-收益"
+        # 旧格式: "2024E EPS", "2025E EPS", "2026E EPS"
         eps_fields = [
+            ("2025-盈利预测-收益", "2025E EPS"),
+            ("2026-盈利预测-收益", "2026E EPS"),
+            ("2027-盈利预测-收益", "2027E EPS"),
             ("2024E EPS", "2024E EPS"),
             ("2025E EPS", "2025E EPS"),
             ("2026E EPS", "2026E EPS"),
         ]
 
+        seen_years = set()
         for field_name, display_name in eps_fields:
+            year = display_name[:4]  # 提取年份
+            if year in seen_years:
+                continue
             eps_value = row.get(field_name, "")
             if eps_value and str(eps_value) not in ["", "nan", "-"]:
                 try:
                     eps_float = float(eps_value)
                     parts.append(f"{display_name}: {eps_float:.2f}")
+                    seen_years.add(year)
                 except (ValueError, TypeError):
                     pass
 
