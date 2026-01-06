@@ -85,14 +85,6 @@ class ResearchFetcher:
                 request_count=max_items,
             )
 
-        # 调试日志：打印实际返回的列名和数据类型
-        logger.debug(f"[{ticker}] 研报 DataFrame 列名: {list(df.columns)}")
-        if len(df) > 0:
-            first_row = df.iloc[0]
-            for col in df.columns:
-                val = first_row.get(col)
-                logger.debug(f"[{ticker}] 列 '{col}': 类型={type(val).__name__}, 值={val}")
-
         # 转换为 TextItem 列表
         items = self._convert_to_text_items(df, lookback_hours, max_items)
 
@@ -105,20 +97,6 @@ class ResearchFetcher:
             fetch_count=len(items),
             request_count=max_items,
         )
-
-    # 可能的日期列名（AkShare API 可能使用不同的列名）
-    DATE_COLUMN_CANDIDATES = ["日期", "发布日期", "报告日期", "date", "Date"]
-
-    def _find_date_column(self, df: pd.DataFrame) -> str | None:
-        """查找日期列名"""
-        for col in self.DATE_COLUMN_CANDIDATES:
-            if col in df.columns:
-                return col
-        # 尝试模糊匹配包含"日期"的列
-        for col in df.columns:
-            if "日期" in col or "date" in col.lower():
-                return col
-        return None
 
     def _convert_to_text_items(
         self,
@@ -142,21 +120,11 @@ class ResearchFetcher:
         cutoff_date = datetime.now().date() - timedelta(days=lookback_days)
         results: list[TextItem] = []
 
-        # 自动检测日期列名
-        date_col = self._find_date_column(df)
-        if date_col is None:
-            logger.warning(f"研报 DataFrame 中未找到日期列, 可用列: {list(df.columns)}")
-            return results
-
-        logger.debug(f"研报过滤: 日期列='{date_col}', lookback_days={lookback_days}, cutoff_date={cutoff_date}")
-
-        for idx, row in df.iterrows():
+        for _, row in df.iterrows():
             try:
                 # 解析发布日期
-                date_val = row.get(date_col)
-                published_at = self._parse_date(date_val)
+                published_at = self._parse_date(row.get("日期", ""))
                 if published_at is None:
-                    logger.debug(f"行 {idx}: 日期解析失败, 原始值='{date_val}', 类型={type(date_val).__name__}")
                     continue
 
                 # 按天过滤（研报只有日期）
