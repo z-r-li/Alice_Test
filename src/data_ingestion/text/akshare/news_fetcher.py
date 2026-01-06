@@ -79,21 +79,68 @@ class AkShareNewsFetcher:
         logger.info(f"[{symbol}] 获取 {len(results)} 条新闻")
         return results
 
-    def _parse_datetime(self, dt_str: str) -> datetime | None:
-        """解析时间字符串"""
-        if not dt_str:
+    def _parse_datetime(self, date_val) -> datetime | None:
+        """
+        解析时间字段 - 兼容 AkShare 返回的多种类型
+
+        支持:
+        - datetime.datetime 对象
+        - datetime.date 对象 (转为当天 00:00:00)
+        - str 字符串 (多种格式)
+        - pandas.Timestamp
+
+        Args:
+            date_val: 时间值，可以是多种类型
+
+        Returns:
+            datetime | None: 解析后的时间，解析失败返回 None
+        """
+        import pandas as pd
+        from datetime import date
+
+        if date_val is None:
             return None
 
-        formats = [
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M",
-            "%Y-%m-%d",
-        ]
-        for fmt in formats:
-            try:
-                return datetime.strptime(str(dt_str), fmt)
-            except ValueError:
-                continue
+        # 1. 已经是 datetime 对象
+        if isinstance(date_val, datetime):
+            return date_val
+
+        # 2. date 对象 (但不是 datetime) - 转为当天 00:00:00
+        if isinstance(date_val, date):
+            return datetime.combine(date_val, datetime.min.time())
+
+        # 3. pandas Timestamp
+        if isinstance(date_val, pd.Timestamp):
+            return date_val.to_pydatetime()
+
+        # 4. 字符串 - 尝试多种格式解析
+        if isinstance(date_val, str):
+            date_str = date_val.strip()
+            if not date_str or date_str in ("nan", "None", "-", ""):
+                return None
+
+            formats = [
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M",
+                "%Y-%m-%d",
+                "%Y/%m/%d %H:%M:%S",
+                "%Y/%m/%d %H:%M",
+                "%Y/%m/%d",
+            ]
+            for fmt in formats:
+                try:
+                    return datetime.strptime(date_str, fmt)
+                except ValueError:
+                    continue
+
+        # 5. 其他类型尝试转字符串后解析
+        try:
+            date_str = str(date_val).strip()
+            if date_str and date_str not in ("nan", "None", "-", ""):
+                return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            pass
+
         return None
 
     def _truncate_content(self, content: str, max_len: int) -> str:
