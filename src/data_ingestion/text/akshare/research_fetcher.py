@@ -143,15 +143,57 @@ class AkShareResearchFetcher:
 
         return " | ".join(parts) if parts else "暂无摘要"
 
-    def _parse_date(self, date_str: str) -> date | None:
-        """解析日期字符串"""
-        if not date_str:
+    def _parse_date(self, date_val) -> date | None:
+        """
+        解析日期字段 - 兼容 AkShare 返回的多种类型
+
+        支持:
+        - datetime.date 对象
+        - datetime.datetime 对象
+        - str 字符串 (格式: YYYY-MM-DD, YYYY/MM/DD, YYYYMMDD)
+        - pandas.Timestamp
+
+        Args:
+            date_val: 日期值，可以是多种类型
+
+        Returns:
+            date | None: 解析后的日期，解析失败返回 None
+        """
+        import pandas as pd
+
+        if date_val is None:
             return None
 
-        formats = ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]
-        for fmt in formats:
-            try:
-                return datetime.strptime(str(date_str), fmt).date()
-            except ValueError:
-                continue
+        # 1. 已经是 date 对象 (但不是 datetime)
+        if isinstance(date_val, date) and not isinstance(date_val, datetime):
+            return date_val
+
+        # 2. datetime 对象 - 转为 date
+        if isinstance(date_val, datetime):
+            return date_val.date()
+
+        # 3. pandas Timestamp
+        if isinstance(date_val, pd.Timestamp):
+            return date_val.date()
+
+        # 4. 字符串 - 尝试多种格式解析
+        if isinstance(date_val, str):
+            date_str = date_val.strip()
+            if not date_str or date_str in ("nan", "None", "-", ""):
+                return None
+
+            for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]:
+                try:
+                    return datetime.strptime(date_str, fmt).date()
+                except ValueError:
+                    continue
+
+        # 5. 其他类型尝试转字符串后解析
+        try:
+            date_str = str(date_val).strip()
+            if date_str and date_str not in ("nan", "None", "-", ""):
+                return datetime.strptime(date_str, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            pass
+
         return None
