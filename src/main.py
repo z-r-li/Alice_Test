@@ -3,6 +3,15 @@ Alice Test - 主程序入口
 
 市场隐含预期与逻辑偏差自动审计系统
 """
+import sys
+from pathlib import Path
+
+# 支持直接运行: python src/main.py
+if __name__ == "__main__" and __package__ is None:
+    # 将项目根目录添加到 Python 路径
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    __package__ = "src"
+
 import argparse
 import logging
 import sys
