@@ -343,13 +343,13 @@ class CrawlerConfig(BaseModel):
     lookback_hours: int = Field(
         default=48,
         gt=0,
-        le=168,
+        le=8760,
         description="文本回溯时间窗口（小时）",
     )
     max_items_per_ticker: int = Field(
         default=10,
         gt=0,
-        le=50,
+        le=200,
         description="每个标的最大文本数量",
     )
 
