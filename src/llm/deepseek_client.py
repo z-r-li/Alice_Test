@@ -90,6 +90,11 @@ class APICallError(DeepSeekClientError):
     pass
 
 
+class ContentModerationError(APICallError):
+    """内容审核错误 - API 拒绝处理内容"""
+    pass
+
+
 class DeepSeekClient:
     """DeepSeek API 客户端"""
 
@@ -199,6 +204,10 @@ class DeepSeekClient:
                 reasoning_content=reasoning_content,
             )
         except Exception as e:
+            error_msg = str(e)
+            # 检测内容审核错误
+            if "Content Exists Risk" in error_msg or "content_filter" in error_msg.lower():
+                raise ContentModerationError(f"内容审核失败: {e}") from e
             raise APICallError(f"API 调用失败: {e}") from e
 
     def chat_with_json_output(
@@ -277,8 +286,12 @@ class DeepSeekClient:
                 )
                 raise
 
+            except ContentModerationError:
+                # 内容审核失败直接抛出，由调用方处理
+                raise
+
             except APICallError:
-                # API 调用失败直接抛出，不重试
+                # 其他 API 调用失败直接抛出，不重试
                 raise
 
         # 理论上不会到达这里，但为了类型完整性
@@ -372,6 +385,7 @@ class DeepSeekClient:
         Returns:
             ConsensusResult: 市场共识分析结果
         """
+        logger = logging.getLogger("alice_test")
         system, user = PromptTemplates.format_consensus_prompt(
             ticker=ticker,
             ticker_name=ticker_name,
@@ -380,7 +394,22 @@ class DeepSeekClient:
             pb=pb,
             texts_content=texts_content,
         )
-        return self.chat_with_json_output(system, user, ConsensusResult)
+
+        try:
+            return self.chat_with_json_output(system, user, ConsensusResult)
+        except ContentModerationError as e:
+            # 内容审核失败，返回中性默认结果
+            logger.warning(
+                f"[{ticker}] 内容审核触发，使用默认中性结果: {e}"
+            )
+            return ConsensusResult(
+                sentiment_score=50,
+                sentiment_label="中性",
+                implied_growth=5.0,
+                key_narrative="内容审核限制，无法分析市场情绪",
+                key_worry="无法获取（内容审核限制）",
+                key_hope="无法获取（内容审核限制）",
+            )
 
     def get_thesis_projection(
         self,
@@ -403,18 +432,32 @@ class DeepSeekClient:
         Returns:
             ThesisProjectionResult: 信念投影结果
         """
+        logger = logging.getLogger("alice_test")
         system, user = PromptTemplates.format_thesis_prompt(
             ticker=ticker,
             ticker_name=ticker_name,
             user_thesis=user_thesis,
             industry=industry,
         )
-        return self.chat_with_json_output(
-            system,
-            user,
-            ThesisProjectionResult,
-            use_thinking=self._thinking_enabled,  # 使用配置的思考模式开关
-        )
+
+        try:
+            return self.chat_with_json_output(
+                system,
+                user,
+                ThesisProjectionResult,
+                use_thinking=self._thinking_enabled,  # 使用配置的思考模式开关
+            )
+        except ContentModerationError as e:
+            # 内容审核失败，返回中性默认结果
+            logger.warning(
+                f"[{ticker}] 信念投影内容审核触发，使用默认结果: {e}"
+            )
+            return ThesisProjectionResult(
+                thesis_aligned=True,
+                our_growth=5.0,
+                confidence="低",
+                reasoning="内容审核限制，无法进行信念投影分析，使用保守默认值",
+            )
 
 
 # =============================================================================
