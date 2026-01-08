@@ -7,19 +7,26 @@ Module B: 信念投影器
 """
 from ..config.models import TargetConfig
 from ..llm import DeepSeekClient, ThesisProjectionResult
+from ..utils.sanitizer import TextSanitizer, get_sanitizer
 
 
 class ThesisProjector:
     """信念投影器 (Module B)"""
 
-    def __init__(self, llm_client: DeepSeekClient):
+    def __init__(
+        self,
+        llm_client: DeepSeekClient,
+        sanitizer: TextSanitizer | None = None,
+    ):
         """
         初始化信念投影器
 
         Args:
             llm_client: DeepSeek 客户端实例
+            sanitizer: 文本脱敏器实例（可选，默认使用全局单例）
         """
         self._llm_client = llm_client
+        self._sanitizer = sanitizer or get_sanitizer()
 
     def project(
         self,
@@ -39,11 +46,16 @@ class ThesisProjector:
         Raises:
             EngineError: 投影失败
         """
+        # 对发送给 LLM 的文本进行脱敏处理
+        safe_name = self._sanitizer.sanitize(target.name)
+        safe_thesis = self._sanitizer.sanitize(target.thesis)
+        safe_industry = self._sanitizer.sanitize(industry)
+
         return self._llm_client.get_thesis_projection(
             ticker=target.ticker,
-            ticker_name=target.name,
-            user_thesis=target.thesis,
-            industry=industry,
+            ticker_name=safe_name,
+            user_thesis=safe_thesis,
+            industry=safe_industry,
         )
 
     def project_batch(
