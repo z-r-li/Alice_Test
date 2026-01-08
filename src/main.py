@@ -33,7 +33,7 @@ from .data_ingestion.preprocessor import TextPreprocessor
 from .engines import ConsensusEngine, ThesisProjector, GapCalculator, AuditResult
 from .llm import DeepSeekClient
 from .persistence import CSVReportWriter, AuditReportStore
-from .utils import setup_logger, AuditLogger
+from .utils import setup_logger, AuditLogger, TextSanitizer
 
 
 class AliceTestPipeline:
@@ -69,8 +69,13 @@ class AliceTestPipeline:
 
         # 初始化组件
         self._llm_client = self._create_llm_client()
-        self._consensus_engine = ConsensusEngine(self._llm_client)
-        self._thesis_projector = ThesisProjector(self._llm_client)
+        self._sanitizer = TextSanitizer()
+        self._consensus_engine = ConsensusEngine(
+            self._llm_client, sanitizer=self._sanitizer
+        )
+        self._thesis_projector = ThesisProjector(
+            self._llm_client, sanitizer=self._sanitizer
+        )
         self._gap_calculator = GapCalculator(config.gap_thresholds)
         self._report_writer: AuditReportStore = CSVReportWriter(self._output_path)
         self._text_preprocessor = TextPreprocessor()

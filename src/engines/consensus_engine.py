@@ -9,19 +9,26 @@ import logging
 
 from ..data_ingestion.models import TickerRawData, TextItem
 from ..llm import DeepSeekClient, ConsensusResult
+from ..utils.sanitizer import TextSanitizer, get_sanitizer
 
 
 class ConsensusEngine:
     """市场共识引擎 (Module A)"""
 
-    def __init__(self, llm_client: DeepSeekClient):
+    def __init__(
+        self,
+        llm_client: DeepSeekClient,
+        sanitizer: TextSanitizer | None = None,
+    ):
         """
         初始化市场共识引擎
 
         Args:
             llm_client: DeepSeek 客户端实例
+            sanitizer: 文本脱敏器实例（可选，默认使用全局单例）
         """
         self._llm_client = llm_client
+        self._sanitizer = sanitizer or get_sanitizer()
         self._logger = logging.getLogger("alice_test")
 
     def analyze(self, raw_data: TickerRawData) -> ConsensusResult:
@@ -39,6 +46,10 @@ class ConsensusEngine:
         """
         texts_content = self._format_texts(raw_data.texts, raw_data.ticker)
 
+        # 对发送给 LLM 的文本进行脱敏处理
+        safe_name = self._sanitizer.sanitize(raw_data.name)
+        safe_texts = self._sanitizer.sanitize(texts_content)
+
         self._logger.debug(
             f"[{raw_data.ticker}] 调用 LLM 进行市场共识分析，"
             f"文本数量: {len(raw_data.texts)}"
@@ -46,11 +57,11 @@ class ConsensusEngine:
 
         return self._llm_client.get_consensus(
             ticker=raw_data.ticker,
-            ticker_name=raw_data.name,
+            ticker_name=safe_name,
             price_close=raw_data.quote.price_close,
             pe_ttm=raw_data.quote.pe_ttm,
             pb=raw_data.quote.pb,
-            texts_content=texts_content,
+            texts_content=safe_texts,
         )
 
     def _format_texts(self, texts: list[TextItem], ticker: str = "") -> str:
