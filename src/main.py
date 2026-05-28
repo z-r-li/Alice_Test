@@ -31,8 +31,9 @@ from .data_ingestion.text import TextProviderFactory, TextSourceType
 from .data_ingestion.text.a_share.coordinator import AShareTextCoordinator
 from .data_ingestion.preprocessor import TextPreprocessor
 from .engines import ConsensusEngine, ThesisProjector, GapCalculator, AuditResult
-from .llm import DeepSeekClient
-from .persistence import CSVReportWriter, AuditReportStore
+from .engines.gap_calculator import AuditSignal
+from .llm import DeepSeekClient, ConsensusResult, ThesisProjectionResult
+from .persistence import CSVReportWriter, SQLiteReportStore, AuditReportStore
 from .utils import setup_logger, AuditLogger, TextSanitizer
 
 
@@ -61,11 +62,8 @@ class AliceTestPipeline:
         self._logger = AuditLogger()
         self._py_logger = logging.getLogger("alice_test")
 
-        # 输出路径
-        if output_path:
-            self._output_path = Path(output_path)
-        else:
-            self._output_path = Path(config.output.path)
+        # 输出路径：CLI 显式提供时覆盖；否则使用 config 中的路径
+        self._output_path = Path(output_path) if output_path else Path(config.output.path)
 
         # 初始化组件
         self._llm_client = self._create_llm_client()
@@ -77,7 +75,7 @@ class AliceTestPipeline:
             self._llm_client, sanitizer=self._sanitizer
         )
         self._gap_calculator = GapCalculator(config.gap_thresholds)
-        self._report_writer: AuditReportStore = CSVReportWriter(self._output_path)
+        self._report_writer: AuditReportStore = self._create_report_writer()
         self._text_preprocessor = TextPreprocessor()
 
         # 初始化 A 股文本协调器
@@ -85,6 +83,14 @@ class AliceTestPipeline:
             config=self._config.data_sources.text.a_share,
             logger=self._py_logger,
         )
+
+    def _create_report_writer(self) -> AuditReportStore:
+        """根据 output.format 选择 CSV 或 SQLite 存储。"""
+        fmt = self._config.output.format
+        if fmt == "sqlite":
+            self._py_logger.info(f"使用 SQLite 存储: {self._output_path}")
+            return SQLiteReportStore(self._output_path)
+        return CSVReportWriter(self._output_path)
 
     def _create_llm_client(self) -> DeepSeekClient:
         """创建 LLM 客户端"""
@@ -244,12 +250,31 @@ class AliceTestPipeline:
         # Step 1: 数据摄入
         raw_data = self._ingest_data(target)
 
-        # 检查是否有有效的文本数据，避免无意义的 LLM 调用
+        # 无有效文本时，跳过 LLM 共识分析（避免发送无意义的请求），
+        # 返回带 data_error 标记的占位结果。Module B 仍可执行，因为它
+        # 只依赖用户信念，不依赖外部文本。
         if not raw_data.texts:
             self._py_logger.warning(
-                f"[{target.ticker}] 无有效文本数据，跳过 LLM 分析"
+                f"[{target.ticker}] 无有效文本数据，跳过 LLM 共识分析"
             )
-            # 记录为数据错误，但仍继续处理（使用默认值）
+            try:
+                thesis_projection = self._thesis_projector.project(target)
+            except Exception as e:
+                self._py_logger.error(
+                    f"[{target.ticker}] 信念投影失败: {e}"
+                )
+                thesis_projection = ThesisProjectionResult(
+                    thesis_aligned=True,
+                    our_growth=0.0,
+                    confidence="低",
+                    reasoning="无文本数据且信念投影失败，使用默认值",
+                )
+            return self._build_data_error_result(
+                target=target,
+                raw_data=raw_data,
+                thesis_projection=thesis_projection,
+                reason="无有效文本数据",
+            )
 
         # Step 2: Module A - 市场共识分析
         consensus = self._consensus_engine.analyze(raw_data)
@@ -267,6 +292,37 @@ class AliceTestPipeline:
             thesis_projection=thesis_projection,
         )
 
+        # 行情失败时的状态传递
+        if raw_data.status != "ok":
+            result.status = raw_data.status
+
+        return result
+
+    def _build_data_error_result(
+        self,
+        target: TargetConfig,
+        raw_data: TickerRawData,
+        thesis_projection: ThesisProjectionResult,
+        reason: str,
+    ) -> AuditResult:
+        """构造一个 data_error 状态的占位结果（共识部分用中性默认值）。"""
+        consensus = ConsensusResult(
+            sentiment_score=50,
+            sentiment_label="中性",
+            implied_growth=0.0,
+            key_narrative=f"无法获取市场共识：{reason}",
+            key_worry=f"无法获取（{reason}）",
+            key_hope=f"无法获取（{reason}）",
+        )
+        result = self._gap_calculator.compute_audit_result(
+            ticker=target.ticker,
+            name=target.name,
+            price=raw_data.quote.price_close,
+            pe_ttm=raw_data.quote.pe_ttm,
+            consensus=consensus,
+            thesis_projection=thesis_projection,
+        )
+        result.status = "data_error"
         return result
 
     def _ingest_data(self, target: TargetConfig) -> TickerRawData:
@@ -281,6 +337,28 @@ class AliceTestPipeline:
         """
         ticker = target.ticker
         now = datetime.now()
+
+        # use_mock 模式：跳过真实行情源，使用合理的占位数据
+        if self._config.data_sources.crawler.use_mock:
+            quote = QuoteData(
+                date=now,
+                ticker=ticker,
+                price_close=100.0,
+                pe_ttm=15.0,
+                pb=1.5,
+            )
+            data_status: Literal["ok", "data_error", "partial"] = "ok"
+            error_message = None
+            texts = self._fetch_texts(target)
+            return TickerRawData(
+                date=now,
+                ticker=ticker,
+                name=target.name,
+                quote=quote,
+                texts=texts,
+                status=data_status,
+                error_message=error_message,
+            )
 
         # 1. 获取行情数据
         quotes_provider = self._select_quotes_provider(ticker)
@@ -334,23 +412,28 @@ class AliceTestPipeline:
         """
         获取文本数据
 
-        对于 A 股使用 AShareTextCoordinator，其他市场使用 TextProviderFactory。
+        - `crawler.use_mock=True` 时直接返回 MockTextProvider 数据，跳过外部 API。
+        - A 股使用 AShareTextCoordinator；其他市场使用 TextProviderFactory。
+        - 抓取后用 TextPreprocessor 去噪、去重、按观点密度排序。
 
         Args:
             target: 标的配置
 
         Returns:
-            list[TextItem]: 文本数据列表
+            list[TextItem]: 过滤后的文本数据列表
         """
+        crawler_config = self._config.data_sources.crawler
         try:
-            # 从配置获取参数
-            crawler_config = self._config.data_sources.crawler
+            if crawler_config.use_mock:
+                from .data_ingestion.text.mock_provider import MockTextProvider
 
-            # 判断市场类型
-            market = target.get_market()
-
-            if market == "a_share":
-                # A 股使用协调器
+                texts = MockTextProvider().fetch_texts(
+                    ticker=target.ticker,
+                    name=target.name,
+                    lookback_hours=crawler_config.lookback_hours,
+                    max_items=crawler_config.max_items_per_ticker,
+                )
+            elif target.get_market() == "a_share":
                 texts = self._text_coordinator.fetch_texts(
                     ticker=target.ticker,
                     name=target.name,
@@ -358,12 +441,18 @@ class AliceTestPipeline:
                     max_items=crawler_config.max_items_per_ticker,
                 )
             else:
-                # 港美股使用原有工厂方法
                 texts = TextProviderFactory.fetch_texts(
                     ticker=target.ticker,
                     name=target.name,
                     lookback_hours=crawler_config.lookback_hours,
                     max_items=crawler_config.max_items_per_ticker,
+                )
+
+            # 去噪 + 去重 + 按观点密度排序，再截断到 max_items
+            if texts:
+                texts = self._text_preprocessor.deduplicate(texts)
+                texts = self._text_preprocessor.filter_texts(
+                    texts, max_items=crawler_config.max_items_per_ticker
                 )
 
             if self._verbose:
@@ -423,8 +512,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=str,
-        default="audit_report.csv",
-        help="输出报告路径 (默认: audit_report.csv)",
+        default=None,
+        help="输出报告路径（覆盖配置文件中的 output.path）",
     )
     parser.add_argument(
         "--ticker",

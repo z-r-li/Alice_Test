@@ -171,13 +171,13 @@ targets:
         # 验证环境变量被注入
         assert config.data_sources.a_shares.token == "env-test-tushare-token"
 
-    def test_env_var_priority_over_file(
+    def test_file_value_priority_over_env(
         self,
         temp_config_path: Path,
         env_with_api_key,
     ):
-        """测试环境变量优先级高于配置文件"""
-        # 配置文件中设置了 api_key
+        """显式写在 YAML 中的 api_key 应优先于环境变量。"""
+        # 配置文件中显式设置了 api_key
         config_content = """
 llm_api:
   provider: "deepseek"
@@ -194,8 +194,9 @@ targets:
 
         config = load_config(temp_config_path)
 
-        # 环境变量应该覆盖配置文件的值
-        assert config.llm_api.api_key == "env-test-api-key"
+        # YAML 显式值应胜出，避免全局 env 干扰本地测试配置
+        assert config.llm_api.api_key == "file-api-key"
+        assert config.llm_api.get_api_key() == "file-api-key"
 
 
 class TestConfigManager:
@@ -464,12 +465,12 @@ class TestLLMConfig:
 
         assert config.get_api_key() == "env-test-api-key"
 
-    def test_get_api_key_env_priority(self, env_with_api_key):
-        """测试环境变量优先级"""
+    def test_get_api_key_file_priority(self, env_with_api_key):
+        """显式 YAML/config api_key 应优先于环境变量。"""
         config = LLMConfig(api_key="config-key")
 
-        # 环境变量应该优先
-        assert config.get_api_key() == "env-test-api-key"
+        # 配置文件显式值应优先
+        assert config.get_api_key() == "config-key"
 
     def test_get_api_key_missing(self, clean_env):
         """测试 API Key 缺失时抛出错误"""

@@ -5,6 +5,8 @@ Module B: 信念投影器
 - 调用 LLM 基于用户宏观信念评估合理增长率
 - 路径独立于市场情绪
 """
+import logging
+
 from ..config.models import TargetConfig
 from ..llm import DeepSeekClient, ThesisProjectionResult
 from ..utils.sanitizer import TextSanitizer, get_sanitizer
@@ -65,18 +67,22 @@ class ThesisProjector:
         """
         批量投影多个标的
 
+        失败的标的不会包含在返回字典中，错误会以 error 级别记录到日志。
+
         Args:
             targets: 标的配置列表
 
         Returns:
             dict[str, ThesisProjectionResult]: ticker -> 投影结果 的映射
         """
-        results = {}
+        logger = logging.getLogger("alice_test")
+        results: dict[str, ThesisProjectionResult] = {}
         for target in targets:
             try:
                 results[target.ticker] = self.project(target)
             except Exception as e:
-                # 记录错误，继续处理其他标的
-                # TODO: 使用 logger 记录
-                pass
+                logger.error(
+                    f"[{target.ticker}] 信念投影失败，跳过该标的: {e}",
+                    exc_info=True,
+                )
         return results

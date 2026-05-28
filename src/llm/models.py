@@ -194,9 +194,14 @@ class ConsensusResult(BaseModel):
             data.get("implied_growth_rate", 0.0),
         )
 
+        # 分数权威：从分数推导标签，忽略模型可能不一致的 label 字段。
+        # 这样下游 signal 判定（依赖分数）与展示的标签始终保持一致。
+        sentiment_score = int(data.get("sentiment_score", 0))
+        sentiment_label = cls._get_expected_label(sentiment_score)
+
         return cls(
-            sentiment_score=int(data.get("sentiment_score", 0)),
-            sentiment_label=str(data.get("sentiment_label", "中性")),
+            sentiment_score=sentiment_score,
+            sentiment_label=sentiment_label,
             implied_growth=float(implied_growth),
             key_narrative=str(data.get("key_narrative", "")),
             key_worry=str(data.get("key_worry", "")),
@@ -228,10 +233,9 @@ class ConsensusResult(BaseModel):
             return False
 
         # 3. 检查情绪评分与标签是否一致
-        expected_label = self._get_expected_label(self.sentiment_score)
-        if self.sentiment_label != expected_label:
-            # 允许边界情况有一定容差，不强制返回 False
-            pass
+        # 从 from_dict() 起标签由分数推导，二者保证一致；这里仅做防御性校验。
+        if self.sentiment_label != self._get_expected_label(self.sentiment_score):
+            return False
 
         # 4. 检查隐含增长率范围 (-50% ~ 100%)
         if not isinstance(self.implied_growth, (int, float)) or not (
@@ -405,7 +409,7 @@ class ThesisProjectionResult(BaseModel):
         return True
 
 
-class AuditSignal(BaseModel):
+class AuditSignalRecord(BaseModel):
     """
     审计信号
 
@@ -426,7 +430,7 @@ class AuditSignal(BaseModel):
     confidence: str = Field(default="medium", description="信号置信度")
 
     @model_validator(mode="after")
-    def set_confidence(self) -> "AuditSignal":
+    def set_confidence(self) -> "AuditSignalRecord":
         """根据 gap 大小自动设置置信度"""
         abs_gap = abs(self.gap)
         if abs_gap >= 20:

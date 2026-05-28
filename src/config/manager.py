@@ -99,7 +99,11 @@ class ConfigManager:
         """
         注入环境变量到配置中
 
-        优先级: 环境变量 > 配置文件中的值
+        优先级: 配置文件显式值 > 环境变量 > 默认值
+
+        显式写在 YAML 中的值（包括空字符串以外的任何值）总是优先生效；
+        环境变量仅在 YAML 缺省时作为回退使用。这便于本地用 YAML 覆盖
+        全局 shell 环境变量进行测试。
 
         Args:
             config: 原始配置字典
@@ -107,24 +111,20 @@ class ConfigManager:
         Returns:
             dict: 注入环境变量后的配置
         """
-        # 确保 llm_api 存在
         if "llm_api" not in config:
             config["llm_api"] = {}
 
-        # 从环境变量注入 API Key
+        # DEEPSEEK_API_KEY: 仅在 YAML 未显式提供时回填
         env_api_key = os.environ.get("DEEPSEEK_API_KEY")
-        if env_api_key:
+        if env_api_key and not config["llm_api"].get("api_key"):
             config["llm_api"]["api_key"] = env_api_key
 
-        # 从环境变量注入 Tushare Token（如果需要）
-        # PRD 5.1: TUSHARE_TOKEN 应注入到 data_sources.a_shares.token
+        # TUSHARE_TOKEN: 仅在 YAML 未显式提供时回填
         env_tushare_token = os.environ.get("TUSHARE_TOKEN")
         if env_tushare_token:
-            if "data_sources" not in config:
-                config["data_sources"] = {}
-            if "a_shares" not in config["data_sources"]:
-                config["data_sources"]["a_shares"] = {}
-            config["data_sources"]["a_shares"]["token"] = env_tushare_token
+            config.setdefault("data_sources", {}).setdefault("a_shares", {})
+            if not config["data_sources"]["a_shares"].get("token"):
+                config["data_sources"]["a_shares"]["token"] = env_tushare_token
 
         return config
 

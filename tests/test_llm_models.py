@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.llm.models import (
-    AuditSignal,
+    AuditSignalRecord,
     ConsensusResult,
     LLMResponse,
     ThesisProjectionResult,
@@ -458,46 +458,46 @@ class TestLLMResponse:
         assert response.get_cost_estimate() == pytest.approx(expected_cost)
 
 
-class TestAuditSignalModel:
+class TestAuditSignalRecordModel:
     """AuditSignal Pydantic 模型测试类"""
 
     def test_create_audit_signal(self):
         """测试创建 AuditSignal"""
-        signal = AuditSignal(signal="OPPORTUNITY", gap=15.0)
+        signal = AuditSignalRecord(signal="OPPORTUNITY", gap=15.0)
         assert signal.signal == "OPPORTUNITY"
         assert signal.gap == 15.0
 
     def test_auto_confidence_high(self):
         """测试自动设置高置信度 (gap >= 20)"""
-        signal = AuditSignal(signal="OPPORTUNITY", gap=25.0)
+        signal = AuditSignalRecord(signal="OPPORTUNITY", gap=25.0)
         assert signal.confidence == "high"
 
     def test_auto_confidence_medium(self):
         """测试自动设置中置信度 (10 <= gap < 20)"""
-        signal = AuditSignal(signal="OPPORTUNITY", gap=15.0)
+        signal = AuditSignalRecord(signal="OPPORTUNITY", gap=15.0)
         assert signal.confidence == "medium"
 
     def test_auto_confidence_low(self):
         """测试自动设置低置信度 (gap < 10)"""
-        signal = AuditSignal(signal="WAIT", gap=5.0)
+        signal = AuditSignalRecord(signal="WAIT", gap=5.0)
         assert signal.confidence == "low"
 
     def test_is_actionable_opportunity(self):
         """测试 OPPORTUNITY 信号可操作"""
-        signal = AuditSignal(signal="OPPORTUNITY", gap=15.0)
+        signal = AuditSignalRecord(signal="OPPORTUNITY", gap=15.0)
         assert signal.is_actionable() is True
 
     def test_is_actionable_overheated(self):
         """测试 OVERHEATED 信号可操作"""
-        signal = AuditSignal(signal="OVERHEATED", gap=-5.0)
+        signal = AuditSignalRecord(signal="OVERHEATED", gap=-5.0)
         assert signal.is_actionable() is True
 
     def test_is_actionable_wait(self):
         """测试 WAIT 信号不可操作"""
-        signal = AuditSignal(signal="WAIT", gap=3.0)
+        signal = AuditSignalRecord(signal="WAIT", gap=3.0)
         assert signal.is_actionable() is False
 
     def test_invalid_signal_value(self):
         """测试无效的信号值"""
         with pytest.raises(ValidationError):
-            AuditSignal(signal="INVALID", gap=10.0)
+            AuditSignalRecord(signal="INVALID", gap=10.0)

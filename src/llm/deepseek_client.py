@@ -7,7 +7,7 @@ import logging
 import os
 import json
 import time
-from typing import Literal, TypeVar, Type
+from typing import TypeVar, Type
 
 from openai import OpenAI
 
@@ -23,58 +23,10 @@ DEFAULT_THESIS_MODEL = "deepseek-v4-pro"
 DEFAULT_TEMPERATURE = 0
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 
-
-def _get_client() -> OpenAI:
-    """获取 OpenAI 客户端实例"""
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise ValueError("环境变量 DEEPSEEK_API_KEY 未设置")
-    return OpenAI(api_key=api_key, base_url=DEFAULT_BASE_URL)
-
-
-def call_chat(
-    messages: list[dict],
-    *,
-    response_format: Literal["json", "text"] = "text",
-    model: str = DEFAULT_MODEL,
-    temperature: float = DEFAULT_TEMPERATURE,
-) -> str:
-    """
-    调用 DeepSeek Chat API
-
-    Args:
-        messages: 消息列表，格式为 [{"role": "user", "content": "..."}]
-        response_format: 响应格式，"json" 或 "text"，默认 "text"
-        model: 模型名称，默认 "deepseek-chat"
-        temperature: 温度参数，默认 0
-
-    Returns:
-        str: 模型响应内容
-
-    Raises:
-        ValueError: 环境变量未设置
-        openai.APIError: API 调用失败
-    """
-    client = _get_client()
-
-    kwargs: dict = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-    }
-
-    # 若 response_format="json"，启用 JSON 输出模式
-    if response_format == "json":
-        kwargs["response_format"] = {"type": "json_object"}
-
-    response = client.chat.completions.create(**kwargs)
-
-    return response.choices[0].message.content or ""
-
-
-# =============================================================================
-# 以下为兼容现有代码的类实现
-# =============================================================================
+# 不支持思考模式的兼容别名。命中后会自动切换到对应 thinking 模型。
+_NON_THINKING_ALIAS_TO_THINKING = {
+    "deepseek-chat": "deepseek-reasoner",
+}
 
 
 class DeepSeekClientError(Exception):
@@ -83,7 +35,12 @@ class DeepSeekClientError(Exception):
 
 
 class JSONParseError(DeepSeekClientError):
-    """JSON 解析错误"""
+    """JSON 解析错误（格式问题，可通过 JSON 修复提示重试）"""
+    pass
+
+
+class JSONValidationError(DeepSeekClientError):
+    """JSON 内容验证错误（格式正确但字段值不合规）"""
     pass
 
 
@@ -116,6 +73,7 @@ class DeepSeekClient:
         thinking_enabled: bool = False,
         thinking_max_tokens: int | None = None,
         thesis_model: str | None = None,
+        client: OpenAI | None = None,
     ):
         """
         初始化 DeepSeek 客户端
@@ -130,6 +88,7 @@ class DeepSeekClient:
             thinking_max_tokens: 思考模式下的最大 token 数
             thesis_model: Module B 专用模型；留空则复用 model。
                 常用值为 "deepseek-v4-pro" 以获得更强推理能力。
+            client: 可选的 OpenAI 客户端实例，便于测试注入。
         """
         self._api_key = api_key
         self._model = model or self.DEFAULT_MODEL
@@ -139,7 +98,12 @@ class DeepSeekClient:
         self._base_url = base_url
         self._thinking_enabled = thinking_enabled
         self._thinking_max_tokens = thinking_max_tokens or self.DEFAULT_THINKING_MAX_TOKENS
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        self._client = client if client is not None else OpenAI(api_key=api_key, base_url=base_url)
+
+    @staticmethod
+    def _resolve_thinking_model(model: str) -> str:
+        """思考模式下，将非思考别名自动切换到对应的思考模型。"""
+        return _NON_THINKING_ALIAS_TO_THINKING.get(model, model)
 
     def chat(
         self,
@@ -167,10 +131,21 @@ class DeepSeekClient:
         Raises:
             APICallError: API 调用失败
         """
+        logger = logging.getLogger("alice_test")
         try:
-            # 构建请求参数
+            resolved_model = model or self._model
+
+            # 思考模式下自动切换非思考别名 (deepseek-chat → deepseek-reasoner)
+            if use_thinking:
+                switched = self._resolve_thinking_model(resolved_model)
+                if switched != resolved_model:
+                    logger.info(
+                        f"思考模式：自动将模型 {resolved_model} 切换为 {switched}"
+                    )
+                    resolved_model = switched
+
             kwargs: dict = {
-                "model": model or self._model,
+                "model": resolved_model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -231,7 +206,10 @@ class DeepSeekClient:
         发送聊天请求并解析 JSON 响应
 
         使用 DeepSeek 的 JSON 模式确保输出格式正确（PRD 4.2, 4.3 要求）。
-        实现重试机制：失败时追加 JSON_REPAIR_SUFFIX 提示并重试。
+
+        重试策略：
+        - JSONParseError (格式问题): 追加 JSON_REPAIR_SUFFIX 重试
+        - JSONValidationError (字段值不合规): 不追加修复提示，直接重试
 
         Args:
             system_prompt: 系统提示词
@@ -239,57 +217,57 @@ class DeepSeekClient:
             result_class: 结果数据类 (ConsensusResult 或 ThesisProjectionResult)
             max_retries: 最大重试次数，默认为 MAX_RETRIES (2)
             use_thinking: 是否启用思考模式（仅对当前请求生效）
+            model: 可选覆盖模型名称（仅对当前请求生效）
 
         Returns:
             T: 解析后的结果对象
 
         Raises:
-            JSONParseError: JSON 解析失败（重试后仍失败）
+            JSONParseError | JSONValidationError: 重试后仍失败
             APICallError: API 调用失败
         """
         logger = logging.getLogger("alice_test")
         retries = max_retries if max_retries is not None else self.MAX_RETRIES
         last_error: Exception | None = None
-        attempt_details: list[str] = []  # 记录每次尝试的详情
+        attempt_details: list[str] = []
 
         for attempt in range(retries + 1):
             try:
-                # 重试时追加 JSON 修复提示（PRD 7.2 要求）
                 effective_system = system_prompt
+                # 只有上一轮是 JSONParseError (格式问题) 时才追加修复提示
                 if attempt > 0:
                     logger.warning(
                         f"JSON 解析重试 (第 {attempt + 1}/{retries + 1} 次): "
                         f"原因 - {last_error}"
                     )
-                    effective_system += PromptTemplates.JSON_REPAIR_SUFFIX
+                    if isinstance(last_error, JSONParseError):
+                        effective_system += PromptTemplates.JSON_REPAIR_SUFFIX
 
-                # 启用 JSON 模式调用 API（PRD 4.2, 4.3 要求）
                 response = self.chat(
                     effective_system,
                     user_prompt,
-                    json_mode=True,  # 启用 response_format={"type": "json_object"}
-                    use_thinking=use_thinking,  # 传递思考模式开关
+                    json_mode=True,
+                    use_thinking=use_thinking,
                     model=model,
                 )
 
-                # 解析并验证响应
                 result = self._parse_json_response(response.content, result_class)
 
                 if result.validate():
                     logger.debug(f"JSON 解析成功 (第 {attempt + 1} 次尝试)")
                     return result
-                else:
-                    error_msg = "响应验证失败：字段值不符合约束条件"
-                    attempt_details.append(f"第 {attempt + 1} 次: {error_msg}")
-                    raise JSONParseError(error_msg)
 
-            except JSONParseError as e:
+                # 字段验证失败：不是格式问题，避免误用 JSON 修复提示
+                raise JSONValidationError(
+                    "响应验证失败：字段值不符合约束条件"
+                )
+
+            except (JSONParseError, JSONValidationError) as e:
                 last_error = e
-                attempt_details.append(f"第 {attempt + 1} 次: {e}")
+                attempt_details.append(f"第 {attempt + 1} 次 ({type(e).__name__}): {e}")
                 if attempt < retries:
-                    time.sleep(1)  # 重试前等待 1 秒
+                    time.sleep(1)
                     continue
-                # 最终失败，记录所有尝试信息
                 logger.error(
                     f"JSON 解析最终失败 (共尝试 {retries + 1} 次):\n"
                     + "\n".join(f"  - {detail}" for detail in attempt_details)
@@ -297,14 +275,12 @@ class DeepSeekClient:
                 raise
 
             except ContentModerationError:
-                # 内容审核失败直接抛出，由调用方处理
                 raise
 
             except APICallError:
-                # 其他 API 调用失败直接抛出，不重试
                 raise
 
-        # 理论上不会到达这里，但为了类型完整性
+        # 防御性兜底
         raise JSONParseError(
             f"JSON 解析失败（已重试 {retries} 次）: {last_error}"
         )
@@ -329,7 +305,6 @@ class DeepSeekClient:
         content_preview = content[:500] if len(content) > 500 else content
         logger.debug(f"LLM 原始响应 (前500字符): {content_preview}")
 
-        # 检查空响应
         if not content or not content.strip():
             logger.error("LLM 返回空响应")
             raise JSONParseError("LLM 返回空响应")
@@ -345,19 +320,15 @@ class DeepSeekClient:
                 cleaned = cleaned[:-3]
             cleaned = cleaned.strip()
 
-            # 解析 JSON
             data = json.loads(cleaned)
 
-            # 构造结果对象
             logger.debug(f"JSON 解析成功，字段: {list(data.keys())}")
             return result_class.from_dict(data)
         except json.JSONDecodeError as e:
-            # 记录完整的原始响应用于调试
             logger.error(
                 f"JSON 解析失败，原始响应:\n{content[:1000]}"
                 + ("..." if len(content) > 1000 else "")
             )
-            # 异常信息中包含响应内容摘要
             content_summary = content[:200] + ("..." if len(content) > 200 else "")
             raise JSONParseError(
                 f"JSON 解析失败: {e}\n响应内容预览: {content_summary}"
@@ -408,7 +379,6 @@ class DeepSeekClient:
         try:
             return self.chat_with_json_output(system, user, ConsensusResult)
         except ContentModerationError as e:
-            # 内容审核失败，返回中性默认结果
             logger.warning(
                 f"[{ticker}] 内容审核触发，使用默认中性结果: {e}"
             )
@@ -455,11 +425,10 @@ class DeepSeekClient:
                 system,
                 user,
                 ThesisProjectionResult,
-                use_thinking=self._thinking_enabled,  # 使用配置的思考模式开关
-                model=self._thesis_model,  # Module B 可使用更强模型 (如 deepseek-v4-pro)
+                use_thinking=self._thinking_enabled,
+                model=self._thesis_model,
             )
         except ContentModerationError as e:
-            # 内容审核失败，返回中性默认结果
             logger.warning(
                 f"[{ticker}] 信念投影内容审核触发，使用默认结果: {e}"
             )
@@ -469,27 +438,3 @@ class DeepSeekClient:
                 confidence="低",
                 reasoning="内容审核限制，无法进行信念投影分析，使用保守默认值",
             )
-
-
-# =============================================================================
-# 测试代码
-# =============================================================================
-
-if __name__ == "__main__":
-    # 简单测试 call_chat 函数
-    messages = [
-        {"role": "system", "content": "你是一个有帮助的助手。"},
-        {"role": "user", "content": "你好，请用一句话介绍自己。"},
-    ]
-
-    print("测试 text 格式:")
-    result = call_chat(messages, response_format="text")
-    print(f"响应: {result}\n")
-
-    print("测试 json 格式:")
-    messages_json = [
-        {"role": "system", "content": "你是一个返回 JSON 格式数据的助手。"},
-        {"role": "user", "content": "请返回一个包含 name 和 greeting 字段的 JSON 对象。"},
-    ]
-    result_json = call_chat(messages_json, response_format="json")
-    print(f"响应: {result_json}")

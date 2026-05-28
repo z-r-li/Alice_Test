@@ -78,7 +78,9 @@ class LLMConfig(BaseModel):
 
     def get_api_key(self) -> str:
         """
-        获取 API Key，优先从环境变量读取
+        获取 API Key。
+
+        优先级: 配置文件显式值 > 环境变量。
 
         Returns:
             str: API Key
@@ -86,7 +88,7 @@ class LLMConfig(BaseModel):
         Raises:
             ValueError: 未配置 API Key
         """
-        key = os.environ.get("DEEPSEEK_API_KEY", self.api_key)
+        key = self.api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         if not key:
             raise ValueError(
                 "未配置 DeepSeek API Key。"
@@ -111,7 +113,9 @@ class ASharesSourceConfig(BaseModel):
 
     def get_token(self) -> str:
         """
-        获取 Token，优先从环境变量读取
+        获取 Token。
+
+        优先级: 配置文件显式值 > 环境变量。
 
         Returns:
             str: Token
@@ -119,7 +123,7 @@ class ASharesSourceConfig(BaseModel):
         Raises:
             ValueError: 使用 tushare 但未配置 Token
         """
-        token = os.environ.get("TUSHARE_TOKEN", self.token)
+        token = self.token or os.environ.get("TUSHARE_TOKEN", "")
         if self.provider == "tushare" and not token:
             raise ValueError(
                 "使用 tushare 数据源需配置 Token。"
@@ -354,7 +358,8 @@ class CrawlerConfig(BaseModel):
     )
     trusted_sources: TrustedSourcesConfig = Field(
         default_factory=TrustedSourcesConfig,
-        description="可信数据源配置",
+        description="可信数据源配置（当前未在抓取链路使用，保留以备未来按域名过滤；"
+        "港美股链路请使用 data_sources.text.hk_us.trusted_domains）",
     )
     lookback_hours: int = Field(
         default=48,

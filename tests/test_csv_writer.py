@@ -124,16 +124,17 @@ class TestCSVCommaEscaping:
         writer = CSVReportWriter(temp_csv_path)
         writer.save(result)
 
-        # 读取并验证逗号被转义为中文逗号
+        # 读取并验证逗号保留（由 csv.writer 处理引号转义，不替换为中文逗号）
         with open(temp_csv_path, "r", encoding="utf-8") as f:
             reader = csv.reader(f)
             rows = list(reader)
 
         data_row = rows[1]
-        assert "，" in data_row[2]  # name: 测试公司，子公司
-        assert "，" in data_row[11]  # key_narrative
-        assert "，" in data_row[12]  # key_worry
-        assert "，" in data_row[13]  # key_hope
+        assert "," in data_row[2]  # name: 测试公司,子公司 - 逗号保留
+        assert "，" not in data_row[2]
+        assert "," in data_row[11]  # key_narrative
+        assert "," in data_row[12]  # key_worry
+        assert "," in data_row[13]  # key_hope
 
     def test_no_comma_no_escaping(self, temp_csv_path: Path):
         """测试没有逗号时不进行转义"""
@@ -410,22 +411,26 @@ class TestCSVRowConversion:
 
     def test_row_to_result(self, temp_csv_path: Path):
         """测试 CSV 行转 AuditResult"""
-        row = [
-            "2024-01-15",
-            "TEST.SH",
-            "测试公司",
-            "10.0",
-            "15.0",
-            "50",
-            "中性",
-            "10.0",
-            "15.0",
-            "5.0",
-            "WAIT",
-            "测试叙事",
-            "测试担忧",
-            "测试期望",
-        ]
+        row = {
+            "date": "2024-01-15",
+            "ticker": "TEST.SH",
+            "name": "测试公司",
+            "price": "10.0",
+            "pe_ttm": "15.0",
+            "sentiment_score": "50",
+            "sentiment_label": "中性",
+            "implied_growth": "10.0",
+            "our_growth": "15.0",
+            "gap": "5.0",
+            "signal": "WAIT",
+            "key_narrative": "测试叙事",
+            "key_worry": "测试担忧",
+            "key_hope": "测试期望",
+            "thesis_aligned": "1",
+            "confidence": "中",
+            "reasoning": "测试推理",
+            "status": "ok",
+        }
 
         writer = CSVReportWriter(temp_csv_path)
         result = writer._row_to_result(row)
@@ -437,25 +442,29 @@ class TestCSVRowConversion:
         assert result.pe_ttm == 15.0
         assert result.sentiment_score == 50
         assert result.signal == AuditSignal.WAIT
+        # 新增字段在回读时保留
+        assert result.thesis_aligned is True
+        assert result.confidence == "中"
+        assert result.reasoning == "测试推理"
 
     def test_row_to_result_empty_pe(self, temp_csv_path: Path):
         """测试空 PE 的行转换"""
-        row = [
-            "2024-01-15",
-            "TEST.SH",
-            "测试公司",
-            "10.0",
-            "",  # 空 PE
-            "50",
-            "中性",
-            "10.0",
-            "15.0",
-            "5.0",
-            "WAIT",
-            "测试叙事",
-            "测试担忧",
-            "测试期望",
-        ]
+        row = {
+            "date": "2024-01-15",
+            "ticker": "TEST.SH",
+            "name": "测试公司",
+            "price": "10.0",
+            "pe_ttm": "",  # 空 PE
+            "sentiment_score": "50",
+            "sentiment_label": "中性",
+            "implied_growth": "10.0",
+            "our_growth": "15.0",
+            "gap": "5.0",
+            "signal": "WAIT",
+            "key_narrative": "测试叙事",
+            "key_worry": "测试担忧",
+            "key_hope": "测试期望",
+        }
 
         writer = CSVReportWriter(temp_csv_path)
         result = writer._row_to_result(row)
@@ -501,14 +510,14 @@ class TestCSVReadAllResults:
         assert results[1].ticker == "NVDA"
 
     def test_read_all_results_skips_incomplete_rows(self, temp_csv_path: Path):
-        """测试跳过不完整的行"""
-        # 写入表头和一个不完整的行
+        """测试跳过缺少 date 的行（DictReader 模式下，缺列会填 None / 空字符串）"""
+        # 写入表头和一个 date 为空的行
         with open(temp_csv_path, "w", newline="", encoding="utf-8") as f:
             csvwriter = csv.writer(f)
             csvwriter.writerow(CSVReportWriter.CSV_COLUMNS)
-            csvwriter.writerow(["2024-01-15", "TEST.SH"])  # 不完整的行
+            csvwriter.writerow([""] * len(CSVReportWriter.CSV_COLUMNS))
 
         writer = CSVReportWriter(temp_csv_path)
         results = writer._read_all_results()
 
-        assert results == []  # 不完整的行被跳过
+        assert results == []  # 缺少 date 的行被跳过

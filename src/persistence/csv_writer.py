@@ -14,7 +14,7 @@ from ..engines.gap_calculator import AuditResult, AuditSignal
 class CSVReportWriter(AuditReportStore):
     """CSV 格式的审计报告写入器"""
 
-    # CSV 列定义（按 PRD 6.1 规范）
+    # CSV 列定义（PRD 6.1 字段 + Module B 字段以保证读写无损）
     CSV_COLUMNS: list[str] = [
         "date",
         "ticker",
@@ -30,6 +30,11 @@ class CSVReportWriter(AuditReportStore):
         "key_narrative",
         "key_worry",
         "key_hope",
+        # Module B 字段（PRD 之外，用于回读时保留完整 AuditResult）
+        "thesis_aligned",
+        "confidence",
+        "reasoning",
+        "status",
     ]
 
     def __init__(self, file_path: str | Path = "audit_report.csv"):
@@ -153,10 +158,6 @@ class CSVReportWriter(AuditReportStore):
         # 按日期排序，返回最新的
         return max(results, key=lambda r: r.date)
 
-    def _escape_comma(self, text: str) -> str:
-        """将英文逗号替换为中文逗号，避免 CSV 分隔符冲突"""
-        return text.replace(",", "，") if text else ""
-
     def _result_to_row(self, result: AuditResult) -> list[str]:
         """
         将 AuditResult 转换为 CSV 行
@@ -165,12 +166,13 @@ class CSVReportWriter(AuditReportStore):
             result: 审计结果
 
         Returns:
-            list[str]: CSV 行数据（按 PRD 6.1 顺序）
+            list[str]: CSV 行数据
         """
+        # 让 csv.writer 处理逗号与引号转义；不再手动替换逗号。
         return [
             result.date.strftime("%Y-%m-%d"),
             result.ticker,
-            self._escape_comma(result.name),
+            result.name,
             str(result.price),
             str(result.pe_ttm) if result.pe_ttm is not None else "",
             str(result.sentiment_score),
@@ -179,45 +181,52 @@ class CSVReportWriter(AuditReportStore):
             str(result.our_growth),
             str(result.gap),
             result.signal.value,
-            self._escape_comma(result.key_narrative),
-            self._escape_comma(result.key_worry),
-            self._escape_comma(result.key_hope),
+            result.key_narrative,
+            result.key_worry,
+            result.key_hope,
+            "1" if result.thesis_aligned else "0",
+            result.confidence,
+            result.reasoning,
+            result.status,
         ]
 
-    def _row_to_result(self, row: list[str]) -> AuditResult:
+    def _row_to_result(self, row: dict[str, str]) -> AuditResult:
         """
-        将 CSV 行转换为 AuditResult
+        将 CSV 行（按列名映射的字典）转换为 AuditResult。
 
         Args:
-            row: CSV 行数据
+            row: 由 csv.DictReader 生成的字典
 
         Returns:
             AuditResult: 审计结果对象
         """
         return AuditResult(
-            date=datetime.strptime(row[0], "%Y-%m-%d"),
-            ticker=row[1],
-            name=row[2],
-            price=float(row[3]),
-            pe_ttm=float(row[4]) if row[4] else None,
-            sentiment_score=int(row[5]),
-            sentiment_label=row[6],
-            implied_growth=float(row[7]),
-            our_growth=float(row[8]),
-            gap=float(row[9]),
-            signal=AuditSignal(row[10]),
-            key_narrative=row[11],
-            key_worry=row[12],
-            key_hope=row[13],
-            # 以下字段在 CSV 中不存储，使用默认值
-            thesis_aligned=True,
-            confidence="中",
-            reasoning="",
+            date=datetime.strptime(row["date"], "%Y-%m-%d"),
+            ticker=row["ticker"],
+            name=row["name"],
+            price=float(row["price"]),
+            pe_ttm=float(row["pe_ttm"]) if row.get("pe_ttm") else None,
+            sentiment_score=int(row["sentiment_score"]),
+            sentiment_label=row["sentiment_label"],
+            implied_growth=float(row["implied_growth"]),
+            our_growth=float(row["our_growth"]),
+            gap=float(row["gap"]),
+            signal=AuditSignal(row["signal"]),
+            key_narrative=row["key_narrative"],
+            key_worry=row["key_worry"],
+            key_hope=row["key_hope"],
+            # 新字段：若旧 CSV 缺失则回退到合理默认
+            thesis_aligned=row.get("thesis_aligned", "1") in ("1", "True", "true"),
+            confidence=row.get("confidence") or "中",
+            reasoning=row.get("reasoning") or "",
+            status=row.get("status") or "ok",
         )
 
     def _read_all_results(self) -> list[AuditResult]:
         """
-        读取 CSV 文件中的所有审计结果
+        读取 CSV 文件中的所有审计结果。
+
+        通过 DictReader 按列名读取，支持旧版本 CSV（缺失新增列时回退默认）。
 
         Returns:
             list[AuditResult]: 所有审计结果列表
@@ -225,14 +234,13 @@ class CSVReportWriter(AuditReportStore):
         if not self._file_path.exists():
             return []
 
-        results = []
+        results: list[AuditResult] = []
         with open(self._file_path, "r", newline="", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            # 跳过表头
-            next(reader, None)
+            reader = csv.DictReader(f)
             for row in reader:
-                if len(row) >= 14:  # 确保行数据完整
-                    results.append(self._row_to_result(row))
+                if not row.get("date"):
+                    continue
+                results.append(self._row_to_result(row))
         return results
 
     def _ensure_file_exists(self) -> None:

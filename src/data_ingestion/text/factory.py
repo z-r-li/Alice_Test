@@ -120,9 +120,8 @@ class TextProviderFactory:
     def _get_hk_us_provider(cls) -> TextProvider:
         """获取或创建港美股 Provider（单例）"""
         if cls._hk_us_provider is None:
-            # 从环境或配置加载
             from .hk_us import HKUSTextProvider
-            from src.config import get_config  # 假设有全局配置获取方法
+            from ...config import get_config
 
             try:
                 config = get_config()
@@ -132,11 +131,12 @@ class TextProviderFactory:
                 # 尝试创建 LLM 客户端（用于内容提取）
                 llm_client = None
                 try:
-                    from src.llm.deepseek_client import DeepSeekClient
+                    from ...llm.deepseek_client import DeepSeekClient
 
                     llm_client = DeepSeekClient(
-                        api_key=config.llm_api.api_key,
+                        api_key=config.llm_api.get_api_key(),
                         model=config.llm_api.model,
+                        thesis_model=config.llm_api.get_thesis_model(),
                     )
                 except Exception as e:
                     logger.warning(f"无法创建 LLM 客户端，将禁用内容提取: {e}")

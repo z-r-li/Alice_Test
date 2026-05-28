@@ -7,6 +7,7 @@ from .deepseek_client import (
     DeepSeekClient,
     DeepSeekClientError,
     JSONParseError,
+    JSONValidationError,
     APICallError,
     ContentModerationError,
 )
@@ -14,7 +15,7 @@ from .models import (
     ConsensusResult,
     ThesisProjectionResult,
     LLMResponse,
-    AuditSignal,
+    AuditSignalRecord,
 )
 from .prompts import PromptTemplates
 
@@ -23,13 +24,14 @@ __all__ = [
     "DeepSeekClient",
     "DeepSeekClientError",
     "JSONParseError",
+    "JSONValidationError",
     "APICallError",
     "ContentModerationError",
     # Models
     "ConsensusResult",
     "ThesisProjectionResult",
     "LLMResponse",
-    "AuditSignal",
+    "AuditSignalRecord",
     # Prompts
     "PromptTemplates",
 ]
