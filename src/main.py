@@ -92,6 +92,7 @@ class AliceTestPipeline:
         return DeepSeekClient(
             api_key=llm_config.get_api_key(),
             model=llm_config.model,
+            thesis_model=llm_config.get_thesis_model(),
             temperature=llm_config.temperature,
             max_tokens=llm_config.max_tokens,
             thinking_enabled=llm_config.thesis_thinking_enabled,

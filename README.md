@@ -48,8 +48,26 @@ export DEEPSEEK_API_KEY="your-api-key"
 export TUSHARE_TOKEN="your-tushare-token"  # 可选，用于 A 股数据
 export SERPER_API_KEY="your-serper-key"    # 可选，用于港美股文本
 
-# 运行
+# 命令行运行
 python src/main.py --config config.yaml
+
+# 或启动图形界面（Streamlit）
+streamlit run gui.py
+```
+
+### 图形界面 (GUI)
+
+通过 Streamlit 提供的浏览器 GUI 可以：
+
+- 在表格中增删/编辑监控标的与投资信念
+- 调整 LLM 模型 (Module A: `deepseek-v4-flash`, Module B 可选 `deepseek-v4-pro`)
+- 调整 Gap 判定阈值
+- 点击按钮运行审计，查看实时进度与本次结果
+- 浏览历史 CSV 报告并按 ticker/信号过滤、绘制趋势图
+
+```bash
+streamlit run gui.py
+# 浏览器访问 http://localhost:8501
 ```
 
 ---

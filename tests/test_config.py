@@ -42,7 +42,7 @@ class TestLoadConfig:
 
         # 验证配置
         assert config.llm_api.provider == "deepseek"
-        assert config.llm_api.model == "deepseek-chat"
+        assert config.llm_api.model == "deepseek-chat"  # YAML fixture sets this explicitly
         assert len(config.targets) == 1
         assert config.targets[0].ticker == "601985.SH"
 
@@ -98,7 +98,7 @@ class TestLoadConfigFromDict:
         assert config.targets[0].ticker == "AAPL"
         # 默认值应该被填充
         assert config.llm_api.provider == "deepseek"
-        assert config.llm_api.model == "deepseek-chat"
+        assert config.llm_api.model == "deepseek-v4-flash"
 
     def test_load_config_from_dict_validation_error(self):
         """测试配置验证失败"""

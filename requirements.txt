@@ -24,6 +24,9 @@ lxml>=5.0.0  # Optional: faster HTML parsing
 # Scheduling (optional)
 apscheduler>=3.10.0
 
+# GUI (optional)
+streamlit>=1.30.0
+
 # Development
 pytest>=7.0
 pytest-asyncio>=0.21.0

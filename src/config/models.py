@@ -19,17 +19,29 @@ class LLMConfig(BaseModel):
     Attributes:
         provider: LLM 提供商，当前仅支持 deepseek
         api_key: API 密钥，留空则从环境变量 DEEPSEEK_API_KEY 读取
-        model: 模型名称
+        model: Module A（共识分析）默认模型，建议 deepseek-v4-flash
+        thesis_model: Module B（信念投影）模型；留空则与 model 相同。
+            可设为 deepseek-v4-pro 以获得更强的推理能力
         temperature: 温度参数，必须为 0 以保证评分稳定
         max_tokens: 最大 token 数
         max_retries: 请求失败时的最大重试次数
-        thesis_thinking_enabled: 是否为 Module B（信念投影器）启用 DeepSeek 思考模式
+        thesis_thinking_enabled: 是否为 Module B 启用 DeepSeek 思考模式
         thesis_thinking_max_tokens: 思考模式下的最大 token 数（含思维链）
+
+    可用模型 (2026):
+        - deepseek-v4-flash: 性价比首选，1M 上下文，支持思考模式
+        - deepseek-v4-pro:   推理能力更强，适合 Module B 复杂信念投影
+        - deepseek-chat:     v4-flash 非思考模式的兼容别名（将弃用）
+        - deepseek-reasoner: v4-flash 思考模式的兼容别名（将弃用）
     """
 
     provider: Literal["deepseek"] = "deepseek"
     api_key: str = ""
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-flash"
+    thesis_model: str = Field(
+        default="",
+        description="Module B 专用模型；留空则复用 model。常用值: deepseek-v4-pro",
+    )
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, gt=0)
     max_retries: int = Field(default=2, ge=0, le=10, description="最大重试次数")
@@ -46,6 +58,10 @@ class LLMConfig(BaseModel):
         le=65536,
         description="思考模式下的最大 token 数（含思维链），默认 16K，最大 64K",
     )
+
+    def get_thesis_model(self) -> str:
+        """Module B 使用的模型；未单独配置则复用 model。"""
+        return self.thesis_model or self.model
 
     @field_validator("temperature")
     @classmethod

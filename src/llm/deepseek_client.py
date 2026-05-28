@@ -16,8 +16,10 @@ from .prompts import PromptTemplates
 
 T = TypeVar("T", ConsensusResult, ThesisProjectionResult)
 
-# 默认配置
-DEFAULT_MODEL = "deepseek-chat"
+# 默认配置 (2026)
+# deepseek-chat / deepseek-reasoner 已成为 v4-flash 的兼容别名，计划于 2026/07/24 弃用。
+DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_THESIS_MODEL = "deepseek-v4-pro"
 DEFAULT_TEMPERATURE = 0
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 
@@ -98,7 +100,7 @@ class ContentModerationError(APICallError):
 class DeepSeekClient:
     """DeepSeek API 客户端"""
 
-    DEFAULT_MODEL = "deepseek-chat"
+    DEFAULT_MODEL = "deepseek-v4-flash"
     DEFAULT_TEMPERATURE = 0.0
     DEFAULT_MAX_TOKENS = 4096
     DEFAULT_THINKING_MAX_TOKENS = 16384
@@ -113,21 +115,25 @@ class DeepSeekClient:
         base_url: str = "https://api.deepseek.com",
         thinking_enabled: bool = False,
         thinking_max_tokens: int | None = None,
+        thesis_model: str | None = None,
     ):
         """
         初始化 DeepSeek 客户端
 
         Args:
             api_key: API Key
-            model: 模型名称，默认 "deepseek-chat"
+            model: Module A 默认模型，默认 "deepseek-v4-flash"
             temperature: 温度参数，默认 0.0
             max_tokens: 最大 token 数，默认 4096
             base_url: API 基础 URL
             thinking_enabled: 是否启用思考模式（用于 Module B）
             thinking_max_tokens: 思考模式下的最大 token 数
+            thesis_model: Module B 专用模型；留空则复用 model。
+                常用值为 "deepseek-v4-pro" 以获得更强推理能力。
         """
         self._api_key = api_key
         self._model = model or self.DEFAULT_MODEL
+        self._thesis_model = thesis_model or self._model
         self._temperature = temperature if temperature is not None else self.DEFAULT_TEMPERATURE
         self._max_tokens = max_tokens or self.DEFAULT_MAX_TOKENS
         self._base_url = base_url
@@ -142,6 +148,7 @@ class DeepSeekClient:
         temperature: float | None = None,
         json_mode: bool = False,
         use_thinking: bool = False,
+        model: str | None = None,
     ) -> LLMResponse:
         """
         发送聊天请求
@@ -152,6 +159,7 @@ class DeepSeekClient:
             temperature: 可选覆盖温度参数
             json_mode: 是否启用 JSON 输出模式
             use_thinking: 是否启用思考模式（仅对当前请求生效）
+            model: 可选覆盖模型名称（仅对当前请求生效）
 
         Returns:
             LLMResponse: 响应对象
@@ -162,7 +170,7 @@ class DeepSeekClient:
         try:
             # 构建请求参数
             kwargs: dict = {
-                "model": self._model,
+                "model": model or self._model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -217,6 +225,7 @@ class DeepSeekClient:
         result_class: Type[T],
         max_retries: int | None = None,
         use_thinking: bool = False,
+        model: str | None = None,
     ) -> T:
         """
         发送聊天请求并解析 JSON 响应
@@ -260,6 +269,7 @@ class DeepSeekClient:
                     user_prompt,
                     json_mode=True,  # 启用 response_format={"type": "json_object"}
                     use_thinking=use_thinking,  # 传递思考模式开关
+                    model=model,
                 )
 
                 # 解析并验证响应
@@ -446,6 +456,7 @@ class DeepSeekClient:
                 user,
                 ThesisProjectionResult,
                 use_thinking=self._thinking_enabled,  # 使用配置的思考模式开关
+                model=self._thesis_model,  # Module B 可使用更强模型 (如 deepseek-v4-pro)
             )
         except ContentModerationError as e:
             # 内容审核失败，返回中性默认结果
