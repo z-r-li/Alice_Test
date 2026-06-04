@@ -15,6 +15,8 @@ from ....config.models import AShareTextSourceConfig
 from ...models import TextItem
 from ..base import TextProvider
 from ..models import TextSourceType
+from .announcement_fetcher import AnnouncementFetcher
+from .cls_news_fetcher import CLSNewsFetcher
 from .cninfo_irm_fetcher import CNInfoIRMFetcher
 from .news_fetcher import NewsFetcher
 from .rating_change_fetcher import RatingChangeFetcher
@@ -61,6 +63,8 @@ class AShareTextCoordinator(TextProvider):
         "irm": 3,
         "rating": 2,
         "news": 3,
+        "announcement": 2,
+        "cls": 2,
     }
 
     # 数据源优先级（数值越大越靠前）
@@ -69,6 +73,8 @@ class AShareTextCoordinator(TextProvider):
         "irm": 3,
         "rating": 2,
         "news": 1,
+        "announcement": 1,
+        "cls": 1,
     }
 
     # 标题相似度阈值（超过此值视为重复）
@@ -95,6 +101,8 @@ class AShareTextCoordinator(TextProvider):
         self._sse_irm_fetcher = SSEInteractiveFetcher()
         self._cninfo_irm_fetcher = CNInfoIRMFetcher()
         self._rating_fetcher = RatingChangeFetcher()
+        self._announcement_fetcher = AnnouncementFetcher()  # #65/#66
+        self._cls_fetcher = CLSNewsFetcher()  # #65/#66
 
         # 统计信息
         self._fetch_stats: dict[str, dict[str, int]] = {
@@ -102,6 +110,8 @@ class AShareTextCoordinator(TextProvider):
             "irm": {"success": 0, "failure": 0},
             "rating": {"success": 0, "failure": 0},
             "news": {"success": 0, "failure": 0},
+            "announcement": {"success": 0, "failure": 0},
+            "cls": {"success": 0, "failure": 0},
         }
 
     def fetch_texts(
@@ -135,6 +145,10 @@ class AShareTextCoordinator(TextProvider):
         if not self.supports_market(ticker):
             self._logger.warning(f"[{ticker}] 非 A 股，AShareTextCoordinator 不支持")
             return []
+
+        # #65/#66：A 股可在配置中设置更长回溯窗口（缓解 48h 太短、信息不足）
+        if getattr(self._config, "lookback_hours", None):
+            lookback_hours = self._config.lookback_hours
 
         self._logger.debug(
             f"[{ticker}] 开始获取文本数据, lookback={lookback_hours}h, max={max_items}"
@@ -195,6 +209,32 @@ class AShareTextCoordinator(TextProvider):
                 ticker=ticker,
                 name=name,
                 quota=quotas.get("news", 0),
+                lookback_hours=lookback_hours,
+            )
+            all_items.extend(items)
+
+        # 5. 公告（巨潮资讯）— #65/#66 新增
+        if self._is_source_enabled("announcement"):
+            items = self._fetch_with_fallback(
+                fetcher=self._announcement_fetcher,
+                source_name="公告",
+                source_key="announcement",
+                ticker=ticker,
+                name=name,
+                quota=quotas.get("announcement", 0),
+                lookback_hours=lookback_hours,
+            )
+            all_items.extend(items)
+
+        # 6. 财联社电报 — #65/#66 新增
+        if self._is_source_enabled("cls"):
+            items = self._fetch_with_fallback(
+                fetcher=self._cls_fetcher,
+                source_name="财联社",
+                source_key="cls",
+                ticker=ticker,
+                name=name,
+                quota=quotas.get("cls", 0),
                 lookback_hours=lookback_hours,
             )
             all_items.extend(items)
@@ -546,6 +586,8 @@ class AShareTextCoordinator(TextProvider):
             TextSourceType.IRM,
             TextSourceType.RATING,
             TextSourceType.NEWS,
+            TextSourceType.ANNOUNCEMENT,
+            TextSourceType.CLS,
         ]
 
     def get_fetch_stats(self) -> dict[str, dict[str, int]]:

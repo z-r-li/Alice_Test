@@ -30,6 +30,8 @@ class TextSourceType(str, Enum):
     IRM = "irm"
     RATING = "rating"
     WEB_SEARCH = "web"
+    ANNOUNCEMENT = "announcement"  # 公告（巨潮资讯），#65/#66 新增
+    CLS = "cls"  # 财联社电报，#65/#66 新增
 
 
 class FetchResult(BaseModel):

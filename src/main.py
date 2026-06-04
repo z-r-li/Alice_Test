@@ -30,9 +30,18 @@ from .data_ingestion.quotes import (
 from .data_ingestion.text import TextProviderFactory, TextSourceType
 from .data_ingestion.text.a_share.coordinator import AShareTextCoordinator
 from .data_ingestion.preprocessor import TextPreprocessor
-from .engines import ConsensusEngine, ThesisProjector, GapCalculator, AuditResult
+from .data_ingestion.financials import get_financials_provider
+from .engines import (
+    ConsensusEngine,
+    ThesisProjector,
+    GapCalculator,
+    AuditResult,
+    FinancialAnalysisEngine,
+    ThesisPipeline,
+)
+from .engines.thesis_pipeline import PipelineResult
 from .llm import DeepSeekClient
-from .persistence import CSVReportWriter, AuditReportStore
+from .persistence import CSVReportWriter, AuditReportStore, ArtifactStore
 from .utils import setup_logger, AuditLogger, TextSanitizer
 
 
@@ -83,6 +92,37 @@ class AliceTestPipeline:
         # 初始化 A 股文本协调器
         self._text_coordinator = AShareTextCoordinator(
             config=self._config.data_sources.text.a_share,
+            logger=self._py_logger,
+        )
+
+        # P1: S1–S5 多阶段流水线 + S4 财报分析 + 阶段产物持久化
+        self._artifact_store = ArtifactStore(self._config.output.artifacts_dir)
+        self._thesis_pipeline = self._build_thesis_pipeline()
+
+    def _build_thesis_pipeline(self) -> ThesisPipeline | None:
+        """构建多阶段信念流水线（pipeline.enabled=False 时回退单次 ThesisProjector）"""
+        if not self._config.pipeline.enabled:
+            return None
+
+        a_cfg = self._config.data_sources.a_shares
+        fin_cfg = self._config.financial_analysis
+
+        fin_factory = None
+        if fin_cfg.enabled:
+            def fin_factory(ticker: str):
+                return get_financials_provider(
+                    ticker,
+                    use_mock=fin_cfg.use_mock,
+                    a_share_provider=a_cfg.provider,
+                    tushare_token=(a_cfg.token or None),
+                )
+
+        return ThesisPipeline(
+            self._llm_client,
+            financials_provider_factory=fin_factory,
+            financial_engine=FinancialAnalysisEngine(),
+            sanitizer=self._sanitizer,
+            artifact_store=self._artifact_store,
             logger=self._py_logger,
         )
 
@@ -254,9 +294,21 @@ class AliceTestPipeline:
         consensus = self._consensus_engine.analyze(raw_data)
 
         # Step 3: Module B - 信念投影
-        thesis_projection = self._thesis_projector.project(target)
+        # 默认走 S1–S5 多阶段流水线（ThesisPipeline），任一阶段失败其内部回退单次投影；
+        # pipeline.enabled=False 时直接用单次 ThesisProjector。
+        pipeline_result: PipelineResult | None = None
+        if self._thesis_pipeline is not None:
+            pipeline_result = self._thesis_pipeline.run(
+                target,
+                quote=raw_data.quote,
+                texts=raw_data.texts,
+                audit_date=raw_data.date,
+            )
+            thesis_projection = pipeline_result.to_projection_result()
+        else:
+            thesis_projection = self._thesis_projector.project(target)
 
-        # Step 4: Gap 计算与信号判定
+        # Step 4: Gap 计算与信号判定（脊柱 gap = our_growth − implied_growth 不变）
         result = self._gap_calculator.compute_audit_result(
             ticker=target.ticker,
             name=target.name,
@@ -264,9 +316,29 @@ class AliceTestPipeline:
             pe_ttm=raw_data.quote.pe_ttm,
             consensus=consensus,
             thesis_projection=thesis_projection,
+            audit_date=raw_data.date,
         )
 
+        # P1: 附带多阶段流水线产物引用（向后兼容字段，不影响原 CSV 14 列）
+        if pipeline_result is not None:
+            result.artifact_dir = pipeline_result.artifact_dir
+            result.evidence_summary = self._summarize_evidence(pipeline_result)
+            if self._verbose and pipeline_result.due_diligence_queue:
+                self._py_logger.info(
+                    f"  [{target.ticker}] 尽调队列 {len(pipeline_result.due_diligence_queue)} 项"
+                )
+
         return result
+
+    @staticmethod
+    def _summarize_evidence(pr: PipelineResult) -> str:
+        """证据链 / 尽调队列一句话摘要（写入 AuditResult.evidence_summary）"""
+        if not pr.used_pipeline:
+            return "单次投影（流水线回退）"
+        n = len(pr.evidence)
+        supported = sum(1 for e in pr.evidence if e.supports)
+        dd = len(pr.due_diligence_queue)
+        return f"证据链 {n} 环节（支持 {supported}）；尽调队列 {dd} 项"
 
     def _ingest_data(self, target: TargetConfig) -> TickerRawData:
         """
@@ -348,7 +420,16 @@ class AliceTestPipeline:
             # 判断市场类型
             market = target.get_market()
 
-            if market == "a_share":
+            if crawler_config.use_mock:
+                # 开发/离线模式：统一使用 Mock 文本数据，跳过真实数据源
+                texts = TextProviderFactory.fetch_texts(
+                    ticker=target.ticker,
+                    name=target.name,
+                    lookback_hours=crawler_config.lookback_hours,
+                    max_items=crawler_config.max_items_per_ticker,
+                    use_mock=True,
+                )
+            elif market == "a_share":
                 # A 股使用协调器
                 texts = self._text_coordinator.fetch_texts(
                     ticker=target.ticker,

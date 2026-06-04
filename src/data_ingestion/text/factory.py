@@ -79,9 +79,10 @@ class TextProviderFactory:
 
     _a_share_provider: TextProvider | None = None
     _hk_us_provider: TextProvider | None = None
+    _mock_provider: TextProvider | None = None
 
     @classmethod
-    def get_provider(cls, ticker: str) -> TextProvider:
+    def get_provider(cls, ticker: str, use_mock: bool = False) -> TextProvider:
         """
         根据 ticker 返回对应的 Provider 实例
 
@@ -96,6 +97,10 @@ class TextProviderFactory:
             >>> provider.get_source_name()
             'a_share_aggregated'
         """
+        # 开发/离线模式：use_mock=True 时所有市场统一走 Mock Provider
+        if use_mock:
+            return cls._get_mock_provider()
+
         market = TextProvider.detect_market(ticker)
 
         if market == "a_share":
@@ -155,6 +160,22 @@ class TextProviderFactory:
         return cls._hk_us_provider
 
     @classmethod
+    def _get_mock_provider(cls) -> TextProvider:
+        """获取或创建 Mock Provider（单例）
+
+        用于 use_mock 开发/离线模式：支持所有市场，返回固定的假数据，
+        不触达任何真实数据源或网络。
+        """
+        if cls._mock_provider is None:
+            # 延迟导入避免循环依赖
+            from .mock_provider import MockTextProvider
+
+            cls._mock_provider = MockTextProvider()
+            logger.info("创建 Mock TextProvider (MockTextProvider)")
+
+        return cls._mock_provider
+
+    @classmethod
     def fetch_texts(
         cls,
         ticker: str,
@@ -162,6 +183,7 @@ class TextProviderFactory:
         lookback_hours: int = 48,
         max_items: int = 10,
         source_types: list[TextSourceType] | None = None,
+        use_mock: bool = False,
     ) -> list[TextItem]:
         """
         便捷方法：自动选择 Provider 并获取文本
@@ -192,7 +214,7 @@ class TextProviderFactory:
         # 延迟导入避免循环依赖
         from ..models import TextItem
 
-        provider = cls.get_provider(ticker)
+        provider = cls.get_provider(ticker, use_mock=use_mock)
         return provider.fetch_texts(
             ticker=ticker,
             name=name,
@@ -214,4 +236,5 @@ class TextProviderFactory:
         """
         cls._a_share_provider = None
         cls._hk_us_provider = None
+        cls._mock_provider = None
         logger.debug("TextProviderFactory 缓存已重置")
