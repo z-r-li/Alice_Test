@@ -14,18 +14,30 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
-# Create mock akshare module before importing the fetcher
-mock_akshare = MagicMock()
-sys.modules["akshare"] = mock_akshare
-
 from src.data_ingestion.models import TextItem
 from src.data_ingestion.text.a_share.sse_interactive_fetcher import SSEInteractiveFetcher
 from src.data_ingestion.text.models import TextSourceType
+
+# akshare 的 MagicMock 占位符。SSEInteractiveFetcher 在方法内部惰性 `import akshare`，
+# 因此导入 fetcher 时并不会真正加载 akshare，无需在 import 时注入。
+# 真正的注入由下方的 autouse fixture 完成：每个测试都会重建一个全新的 mock，
+# 并通过 patch.dict 仅在该测试期间放入 sys.modules（结束后自动还原），
+# 避免在 import 时篡改 sys.modules 导致跨测试/跨文件泄漏。
+mock_akshare = MagicMock()
+
+
+@pytest.fixture(autouse=True)
+def _mock_akshare_module():
+    """为每个测试注入独立的 akshare mock，并在结束后还原 sys.modules。"""
+    global mock_akshare
+    mock_akshare = MagicMock()
+    with patch.dict(sys.modules, {"akshare": mock_akshare}):
+        yield mock_akshare
 
 
 @pytest.fixture

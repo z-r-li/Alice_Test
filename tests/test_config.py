@@ -580,14 +580,15 @@ class TestTextSourceConfig:
             "data_sources": {
                 "text": {
                     "hk_us": {
-                        "search_provider": "google_custom_search",
+                        # serpapi 是非默认的合法 provider，用于验证用户显式配置被保留
+                        "search_provider": "serpapi",
                         "trusted_domains": ["bloomberg.com", "wsj.com"]
                     }
                 }
             }
         })
 
-        assert config.data_sources.text.hk_us.search_provider == "google_custom_search"
+        assert config.data_sources.text.hk_us.search_provider == "serpapi"
         assert "bloomberg.com" in config.data_sources.text.hk_us.trusted_domains
         assert "wsj.com" in config.data_sources.text.hk_us.trusted_domains
 
@@ -597,7 +598,7 @@ class TestTextSourceConfig:
 
         config = TextSourceConfig()
 
-        assert config.hk_us.search_provider == "serpapi"
+        assert config.hk_us.search_provider == "serper"
         assert config.hk_us.search_api_key == ""
         assert "bloomberg.com" in config.hk_us.trusted_domains
         assert "reuters.com" in config.hk_us.trusted_domains
