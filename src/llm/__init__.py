@@ -15,6 +15,14 @@ from .models import (
     ThesisProjectionResult,
     LLMResponse,
     AuditSignal,
+    # P1 多阶段流水线模型 (S1–S5)
+    RefinedThesis,
+    Evidence,
+    LogicChainLink,
+    LogicChain,
+    ProxyAssignment,
+    ProxyMapping,
+    ThesisProjection,
 )
 from .prompts import PromptTemplates
 
@@ -30,6 +38,14 @@ __all__ = [
     "ThesisProjectionResult",
     "LLMResponse",
     "AuditSignal",
+    # P1 多阶段流水线模型 (S1–S5)
+    "RefinedThesis",
+    "Evidence",
+    "LogicChainLink",
+    "LogicChain",
+    "ProxyAssignment",
+    "ProxyMapping",
+    "ThesisProjection",
     # Prompts
     "PromptTemplates",
 ]

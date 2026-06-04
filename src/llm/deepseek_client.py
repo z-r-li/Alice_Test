@@ -11,10 +11,28 @@ from typing import Literal, TypeVar, Type
 
 from openai import OpenAI
 
-from .models import LLMResponse, ConsensusResult, ThesisProjectionResult
+from .models import (
+    LLMResponse,
+    ConsensusResult,
+    ThesisProjectionResult,
+    RefinedThesis,
+    LogicChain,
+    ProxyMapping,
+    Evidence,
+    ThesisProjection,
+)
 from .prompts import PromptTemplates
 
-T = TypeVar("T", ConsensusResult, ThesisProjectionResult)
+T = TypeVar(
+    "T",
+    ConsensusResult,
+    ThesisProjectionResult,
+    RefinedThesis,
+    LogicChain,
+    ProxyMapping,
+    Evidence,
+    ThesisProjection,
+)
 
 # 默认配置
 DEFAULT_MODEL = "deepseek-chat"
@@ -458,6 +476,99 @@ class DeepSeekClient:
                 confidence="低",
                 reasoning="内容审核限制，无法进行信念投影分析，使用保守默认值",
             )
+
+    # =========================================================================
+    # P1 多阶段流水线 (S1–S5) 逐阶段调用
+    #
+    # 均走 chat_with_json_output（temperature=0、JSON-only、from_dict + validate +
+    # 失败重试）。这些方法不吞异常：任一阶段失败（内容审核 / JSON 解析 / API）都向上抛出，
+    # 由 ThesisPipeline 捕获后回退到单次 get_thesis_projection（向后兼容脊柱不变）。
+    # 调用方（引擎 / 流水线）须在传入前对外部文本做脱敏（sanitizer）。
+    # =========================================================================
+
+    def get_refined_thesis(
+        self,
+        ticker: str,
+        ticker_name: str,
+        user_thesis: str,
+        industry: str = "未知",
+    ) -> RefinedThesis:
+        """S1：把原始 thesis 提炼为可证伪命题（含 kill-criteria）"""
+        system, user = PromptTemplates.format_refinement_prompt(
+            ticker=ticker,
+            ticker_name=ticker_name,
+            user_thesis=user_thesis,
+            industry=industry,
+        )
+        return self.chat_with_json_output(system, user, RefinedThesis)
+
+    def get_logic_chain(
+        self,
+        ticker: str,
+        ticker_name: str,
+        proposition: str,
+        success_conditions: list[str],
+        kill_criteria: list[str],
+        horizon: str,
+    ) -> LogicChain:
+        """S2：把命题拆解为因果逻辑链路"""
+        system, user = PromptTemplates.format_logic_chain_prompt(
+            ticker=ticker,
+            ticker_name=ticker_name,
+            proposition=proposition,
+            success_conditions=success_conditions,
+            kill_criteria=kill_criteria,
+            horizon=horizon,
+        )
+        return self.chat_with_json_output(system, user, LogicChain)
+
+    def get_proxy_mapping(
+        self,
+        ticker: str,
+        ticker_name: str,
+        links: list[dict],
+    ) -> ProxyMapping:
+        """S3：为每个链路环节匹配 proxy（无 proxy → due_diligence）"""
+        system, user = PromptTemplates.format_proxy_prompt(
+            ticker=ticker, ticker_name=ticker_name, links=links
+        )
+        return self.chat_with_json_output(system, user, ProxyMapping)
+
+    def get_evidence_interpretation(
+        self,
+        ticker: str,
+        ticker_name: str,
+        statement: str,
+        condition: str,
+        material: str,
+    ) -> Evidence:
+        """S4：定性 link 的证据判断（仅依据围栏素材，不臆造）"""
+        system, user = PromptTemplates.format_evidence_prompt(
+            ticker=ticker,
+            ticker_name=ticker_name,
+            statement=statement,
+            condition=condition,
+            material=material,
+        )
+        return self.chat_with_json_output(system, user, Evidence)
+
+    def get_thesis_synthesis(
+        self,
+        ticker: str,
+        ticker_name: str,
+        proposition: str,
+        evidence_items: list[dict],
+    ) -> ThesisProjection:
+        """S5：把逐环节证据综合映射回命题（可选思考模式，同 Module B 配置）"""
+        system, user = PromptTemplates.format_synthesis_prompt(
+            ticker=ticker,
+            ticker_name=ticker_name,
+            proposition=proposition,
+            evidence_items=evidence_items,
+        )
+        return self.chat_with_json_output(
+            system, user, ThesisProjection, use_thinking=self._thinking_enabled
+        )
 
 
 # =============================================================================

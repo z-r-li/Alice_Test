@@ -150,8 +150,13 @@ class AShareTextSourceConfig(BaseModel):
         quota_weights: 各数据源的配额权重
     """
 
-    enabled_sources: list[Literal["research", "irm", "rating", "news"]] = Field(
-        default_factory=lambda: ["research", "irm", "rating", "news"],
+    enabled_sources: list[
+        Literal["research", "irm", "rating", "news", "announcement", "cls"]
+    ] = Field(
+        # #65/#66：默认扩充「公告 / 财联社」两个源，缓解「信息不足以形成 consensus」
+        default_factory=lambda: [
+            "research", "irm", "rating", "news", "announcement", "cls"
+        ],
         description="启用的数据源列表",
     )
 
@@ -161,8 +166,18 @@ class AShareTextSourceConfig(BaseModel):
             "irm": 3,
             "rating": 2,
             "news": 3,
+            "announcement": 2,
+            "cls": 2,
         },
         description="各数据源的配额权重",
+    )
+
+    lookback_hours: int | None = Field(
+        default=None,
+        description=(
+            "A 股文本回溯窗口覆盖（小时）；None 时沿用调用方/爬虫配置传入值。"
+            "#65/#66：48h 常因太短信息不足，可调长（如 168 / 336）。"
+        ),
     )
 
 
@@ -410,6 +425,10 @@ class OutputConfig(BaseModel):
         default="./output/audit_report.csv",
         description="输出文件路径",
     )
+    artifacts_dir: str = Field(
+        default="./output/artifacts",
+        description="S1–S5 阶段产物（RefinedThesis/LogicChain/Evidence/...）的 JSON 持久化目录",
+    )
 
 
 class TargetConfig(BaseModel):
@@ -497,6 +516,27 @@ class GapThresholdConfig(BaseModel):
         return self
 
 
+class FinancialAnalysisConfig(BaseModel):
+    """S4 财务分析配置（改进计划 §4.1）"""
+
+    enabled: bool = Field(
+        default=True, description="是否启用 S4 财报/估值分析（关闭则定量环节转尽调）"
+    )
+    use_mock: bool = Field(
+        default=False,
+        description="开发/离线模式：用 MockFinancialsProvider 假财报。独立于文本 use_mock。",
+    )
+
+
+class PipelineConfig(BaseModel):
+    """S1–S5 多阶段信念流水线配置（改进计划 §4.1）"""
+
+    enabled: bool = Field(
+        default=True,
+        description="True: 用多阶段 ThesisPipeline（默认）；False: 回退单次 ThesisProjector",
+    )
+
+
 class AppConfig(BaseModel):
     """
     应用总配置
@@ -528,6 +568,10 @@ class AppConfig(BaseModel):
     data_sources: DataSourcesConfig = Field(default_factory=DataSourcesConfig)
     targets: list[TargetConfig] = Field(default_factory=list)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
+    financial_analysis: FinancialAnalysisConfig = Field(
+        default_factory=FinancialAnalysisConfig
+    )
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     gap_thresholds: GapThresholdConfig = Field(default_factory=GapThresholdConfig)
 

@@ -6,7 +6,7 @@ LLM 响应数据模型定义
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -445,3 +445,328 @@ class AuditSignal(BaseModel):
             bool: OPPORTUNITY 或 OVERHEATED 时返回 True
         """
         return self.signal in ("OPPORTUNITY", "OVERHEATED")
+
+
+# ============================================================
+# P1 多阶段流水线数据模型 (S1–S5)
+#
+# 对应《新框架与Alice_Test改进计划》§4.2 与 AGENT.md §4。
+# 凡经 DeepSeekClient.chat_with_json_output 由 LLM 产出的模型，
+# 必须实现 from_dict() + validate()（见 deepseek_client._parse_json_response：
+# 解析后调用 result_class.from_dict(data)，再调用 result.validate()）。
+# 关键路径 temperature=0、仅返回有效 JSON；缺数据标「需尽调」绝不编造。
+# ============================================================
+
+_PROXY_TYPES = ("quantitative", "qualitative", "due_diligence", "none")
+
+
+class RefinedThesis(BaseModel):
+    """S1 完善：可证伪命题
+
+    把模糊信念锐化为可证伪 (falsifiable) 命题：成立条件 + 证伪条件 (kill-criteria)
+    + 时间跨度（参 总结_11_1_25 Checklist A）。
+    """
+
+    proposition: str = Field(..., min_length=1, description="可证伪命题")
+    success_conditions: list[str] = Field(
+        default_factory=list, description="成立条件（命题为真需满足）"
+    )
+    kill_criteria: list[str] = Field(
+        default_factory=list, description="证伪条件 (kill-criteria)，观测到即推翻命题"
+    )
+    horizon: str = Field(default="", description="时间跨度，如 '3-5年'")
+    original_thesis: str | None = Field(default=None, description="原始 thesis（溯源用）")
+
+    @field_validator("proposition", "horizon")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RefinedThesis":
+        def _as_list(value: Any) -> list[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [value.strip()] if value.strip() else []
+            return [str(x).strip() for x in value if str(x).strip()]
+
+        return cls(
+            proposition=str(data.get("proposition", data.get("命题", ""))),
+            success_conditions=_as_list(
+                data.get("success_conditions", data.get("成立条件"))
+            ),
+            kill_criteria=_as_list(
+                data.get(
+                    "kill_criteria",
+                    data.get("falsification_criteria", data.get("证伪条件")),
+                )
+            ),
+            horizon=str(
+                data.get("horizon", data.get("time_horizon", data.get("时间跨度", "")))
+            ),
+            original_thesis=(
+                str(data["original_thesis"]) if data.get("original_thesis") else None
+            ),
+        )
+
+    def validate(self) -> bool:
+        if not self.proposition or not self.proposition.strip():
+            return False
+        # 可证伪性是 S1 的核心：必须给出至少一条 kill-criteria 与成立条件
+        if not self.kill_criteria:
+            return False
+        if not self.success_conditions:
+            return False
+        return True
+
+
+class Evidence(BaseModel):
+    """S4 证据：每个 link 的证据单元
+
+    `data` 为本地抓取/计算的原始数据（绝不让 LLM 编造数字）；
+    finding/supports/confidence 为对该 link 条件的结构化判断。
+    无 proxy / 数据缺失时置 needs_due_diligence=True 并如实标注，不臆造支持度。
+    """
+
+    data: dict[str, Any] = Field(
+        default_factory=dict, description="原始/计算后数据（本地注入，禁止 LLM 编造）"
+    )
+    finding: str = Field(..., min_length=1, description="分析结论")
+    supports: bool = Field(default=False, description="是否支持该 link 条件")
+    confidence: str = Field(
+        default="中", pattern="^(高|中|低)$", description="置信度 (高|中|低)"
+    )
+    needs_due_diligence: bool = Field(
+        default=False, description="是否需转人工尽调（无 proxy / 数据缺失）"
+    )
+
+    @field_validator("finding")
+    @classmethod
+    def _strip_finding(cls, v: str) -> str:
+        return v.strip()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Evidence":
+        supports = data.get("supports", data.get("是否支持", False))
+        if isinstance(supports, str):
+            supports = supports.strip().lower() in ("true", "1", "yes", "是", "支持")
+        raw_data = data.get("data", {})
+        if not isinstance(raw_data, dict):
+            raw_data = {"value": raw_data}
+        return cls(
+            data=raw_data,
+            finding=str(
+                data.get("finding", data.get("结论", data.get("analysis", "")))
+            ),
+            supports=bool(supports),
+            confidence=str(data.get("confidence", data.get("置信度", "中"))),
+            needs_due_diligence=bool(
+                data.get("needs_due_diligence", data.get("需尽调", False))
+            ),
+        )
+
+    def validate(self) -> bool:
+        if not self.finding or not self.finding.strip():
+            return False
+        if self.confidence not in {"高", "中", "低"}:
+            return False
+        return True
+
+
+class LogicChainLink(BaseModel):
+    """S2 逻辑链路环节（S3 填 proxy，S4 填 evidence）"""
+
+    statement: str = Field(..., min_length=1, description="该环节陈述")
+    weight: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="对 thesis 的重要性 (0-1)"
+    )
+    condition: str = Field(..., min_length=1, description="需满足的条件")
+    proxy_type: Literal["quantitative", "qualitative", "due_diligence", "none"] | None = (
+        Field(default=None, description="proxy 类型（S3 填写）")
+    )
+    proxy_spec: str | None = Field(
+        default=None, description="数据源 / 计算方式 / 尽调说明（S3 填写）"
+    )
+    evidence: Evidence | None = Field(default=None, description="该环节证据（S4 填写）")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "LogicChainLink":
+        evidence = data.get("evidence")
+        evidence_obj = (
+            Evidence.from_dict(evidence) if isinstance(evidence, dict) else None
+        )
+        proxy_type = data.get("proxy_type", data.get("proxy"))
+        return cls(
+            statement=str(data.get("statement", data.get("陈述", ""))),
+            weight=float(data.get("weight", data.get("权重", 0.0)) or 0.0),
+            condition=str(data.get("condition", data.get("条件", ""))),
+            proxy_type=proxy_type if proxy_type in _PROXY_TYPES else None,
+            proxy_spec=(str(data["proxy_spec"]) if data.get("proxy_spec") else None),
+            evidence=evidence_obj,
+        )
+
+    def validate(self) -> bool:
+        if not self.statement or not self.statement.strip():
+            return False
+        if not self.condition or not self.condition.strip():
+            return False
+        if not (0.0 <= self.weight <= 1.0):
+            return False
+        if self.proxy_type is not None and self.proxy_type not in _PROXY_TYPES:
+            return False
+        return True
+
+
+class LogicChain(BaseModel):
+    """S2 输出：逻辑链路（多个 link）"""
+
+    links: list[LogicChainLink] = Field(
+        default_factory=list, description="链路环节列表"
+    )
+    thesis_ref: str | None = Field(default=None, description="所对应命题（溯源）")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "LogicChain":
+        raw_links = data.get("links") or data.get("链路") or data.get("chain") or []
+        links = [
+            LogicChainLink.from_dict(x) for x in raw_links if isinstance(x, dict)
+        ]
+        thesis_ref = str(data["thesis_ref"]) if data.get("thesis_ref") else None
+        return cls(links=links, thesis_ref=thesis_ref)
+
+    def validate(self) -> bool:
+        if not self.links:
+            return False
+        return all(link.validate() for link in self.links)
+
+
+class ProxyAssignment(BaseModel):
+    """S3 单个 link 的 proxy 分配"""
+
+    link_index: int = Field(..., ge=0, description="对应链路环节序号 (0-based)")
+    proxy_type: Literal["quantitative", "qualitative", "due_diligence", "none"] = Field(
+        ..., description="proxy 类型"
+    )
+    proxy_spec: str | None = Field(
+        default=None, description="数据源 / 计算方式 / 尽调说明"
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ProxyAssignment":
+        return cls(
+            link_index=int(
+                data.get("link_index", data.get("index", data.get("链路序号", 0)))
+            ),
+            proxy_type=str(data.get("proxy_type", data.get("类型", "none"))),
+            proxy_spec=(str(data["proxy_spec"]) if data.get("proxy_spec") else None),
+        )
+
+    def validate(self) -> bool:
+        if self.link_index < 0:
+            return False
+        if self.proxy_type not in _PROXY_TYPES:
+            return False
+        return True
+
+
+class ProxyMapping(BaseModel):
+    """S3 输出：逐 link 的 proxy 映射（合并回 LogicChain）"""
+
+    assignments: list[ProxyAssignment] = Field(
+        default_factory=list, description="逐环节 proxy 分配"
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ProxyMapping":
+        raw = (
+            data.get("assignments")
+            or data.get("mappings")
+            or data.get("proxies")
+            or []
+        )
+        assignments = [
+            ProxyAssignment.from_dict(x) for x in raw if isinstance(x, dict)
+        ]
+        return cls(assignments=assignments)
+
+    def validate(self) -> bool:
+        if not self.assignments:
+            return False
+        return all(a.validate() for a in self.assignments)
+
+
+class ThesisProjection(BaseModel):
+    """S5 输出：带证据链的信念投影（升级版 Module B）
+
+    核心四字段与 ThesisProjectionResult 对齐，额外携带逐 link 证据链与上游 artifact 引用；
+    经 to_projection_result() 退化为 ThesisProjectionResult 喂给 GapCalculator（脊柱不变）。
+    """
+
+    thesis_aligned: bool = Field(..., description="是否与用户信念一致")
+    our_growth: float = Field(
+        ..., ge=-50.0, le=100.0, description="预期年化增长率 (%)"
+    )
+    confidence: str = Field(
+        ..., pattern="^(高|中|低)$", description="置信度 (高|中|低)"
+    )
+    reasoning: str = Field(..., min_length=1, description="综合推理说明")
+    evidence_chain: list[Evidence] = Field(
+        default_factory=list, description="逐 link 证据链（本地附加）"
+    )
+    refined_thesis: RefinedThesis | None = Field(
+        default=None, description="S1 命题（溯源）"
+    )
+    logic_chain: LogicChain | None = Field(
+        default=None, description="S2/S3 链路（溯源）"
+    )
+
+    @field_validator("reasoning")
+    @classmethod
+    def _strip_reasoning(cls, v: str) -> str:
+        return v.strip()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ThesisProjection":
+        our_growth = data.get("our_growth", data.get("expected_growth_rate", 0.0))
+        thesis_aligned = data.get("thesis_aligned", False)
+        if isinstance(thesis_aligned, str):
+            thesis_aligned = thesis_aligned.strip().lower() in (
+                "true",
+                "1",
+                "yes",
+                "是",
+            )
+        evidence_raw = data.get("evidence_chain", [])
+        evidence_chain = (
+            [Evidence.from_dict(e) for e in evidence_raw if isinstance(e, dict)]
+            if isinstance(evidence_raw, list)
+            else []
+        )
+        return cls(
+            thesis_aligned=bool(thesis_aligned),
+            our_growth=float(our_growth),
+            confidence=str(data.get("confidence", "中")),
+            reasoning=str(data.get("reasoning", "")),
+            evidence_chain=evidence_chain,
+        )
+
+    def validate(self) -> bool:
+        if not isinstance(self.thesis_aligned, bool):
+            return False
+        if not (-50.0 <= self.our_growth <= 100.0):
+            return False
+        if self.confidence not in {"高", "中", "低"}:
+            return False
+        if not self.reasoning or len(self.reasoning.strip()) < 10:
+            return False
+        return True
+
+    def to_projection_result(self) -> "ThesisProjectionResult":
+        """退化为向后兼容的 ThesisProjectionResult，喂给 GapCalculator（脊柱不变）"""
+        return ThesisProjectionResult(
+            thesis_aligned=self.thesis_aligned,
+            our_growth=self.our_growth,
+            confidence=self.confidence,
+            reasoning=self.reasoning,
+        )

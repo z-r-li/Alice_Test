@@ -56,6 +56,10 @@ class AuditResult:
     # 状态
     status: Literal["ok", "data_error", "llm_error"] = "ok"
 
+    # P1: 多阶段流水线产物引用（向后兼容扩展，默认 None；不改动原 CSV 14 列）
+    artifact_dir: str | None = None  # S1–S5 产物 JSON 目录
+    evidence_summary: str | None = None  # 证据链 / 尽调队列一句话摘要
+
 
 class GapCalculator:
     """Gap 计算器与信号判定"""
