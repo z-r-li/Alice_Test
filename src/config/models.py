@@ -517,7 +517,7 @@ class GapThresholdConfig(BaseModel):
 
 
 class FinancialAnalysisConfig(BaseModel):
-    """S4 财务分析配置（改进计划 §4.1）"""
+    """S4 财务分析配置"""
 
     enabled: bool = Field(
         default=True, description="是否启用 S4 财报/估值分析（关闭则定量环节转尽调）"
@@ -529,7 +529,7 @@ class FinancialAnalysisConfig(BaseModel):
 
 
 class PipelineConfig(BaseModel):
-    """S1–S5 多阶段信念流水线配置（改进计划 §4.1）"""
+    """S1–S5 多阶段信念流水线配置"""
 
     enabled: bool = Field(
         default=True,

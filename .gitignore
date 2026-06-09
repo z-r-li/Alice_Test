@@ -31,3 +31,7 @@ htmlcov/
 
 # Config (may contain sensitive data)
 config.yaml
+
+# Local Cowork/Claude Code sync context (never push to GitHub)
+CLAUDE.md
+.claude/

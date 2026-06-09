@@ -3,7 +3,7 @@ main.py 多阶段流水线接线测试（离线）
 
 用 FakeLLMClient + mock 文本/财报 + 桩行情，验证 AliceTestPipeline 默认走 ThesisPipeline、
 产出带 artifact_dir / evidence_summary 的 AuditResult、脊柱 gap 不变、阶段产物落盘，
-且原 CSV 14 列不受新字段影响。对应改进计划 P1 Step 8。
+且原 CSV 14 列不受新字段影响。对应 P1 Step 8。
 """
 from datetime import datetime
 

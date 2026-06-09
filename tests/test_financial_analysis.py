@@ -3,7 +3,7 @@ FinancialAnalysisEngine (S4) 测试
 
 离线：用手工构造的 FinancialReport 与 MockFinancialsProvider，覆盖趋势/CAGR、
 forward PE 各 basis、PEG、支持度启发式，以及「数据缺失→需尽调、绝不编造」的护栏。
-对应改进计划 P1 Step 4。
+对应 P1 Step 4。
 """
 import pytest
 

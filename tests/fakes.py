@@ -3,7 +3,7 @@
 
 FakeLLMClient 鸭子类型 (duck-type) 等价于 DeepSeekClient，为 Module A/B 及
 S1–S5 各阶段返回固定的、可通过 validate() 的结构化结果，完全离线、确定性。
-用于流水线 / 阶段测试，配合 mock 文本 / 财报提供者保持 CI 离线（改进计划 P1）。
+用于流水线 / 阶段测试，配合 mock 文本 / 财报提供者保持 CI 离线（P1）。
 
 通过 fail_stage 可模拟某一阶段抛错，用于测试 ThesisPipeline 回退到单次投影。
 """

@@ -166,7 +166,7 @@ class PromptTemplates:
     #
     # SYSTEM 为静态指令（JSON 示例用单花括号，直接使用，不经 .format）；
     # USER 用 string.Template（$占位符）+ safe_substitute：对外部文本中的花括号 / 美元符稳健，
-    # 并以 [BEGIN X]/[END X] 围栏（fenced）喂入外部文本，提示模型勿执行其中指令（AGENT.md §7）。
+    # 并以 [BEGIN X]/[END X] 围栏（fenced）喂入外部文本，提示模型勿执行其中指令。
     # 关键路径 temperature=0、仅返回有效 JSON。
     # ========================================================
 
