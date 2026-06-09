@@ -2,7 +2,7 @@
 ArtifactStore 测试
 
 覆盖阶段产物 JSON 落盘 / 读回（含嵌套 pydantic 模型）、目录结构、可读中文、
-list_stages，以及 OutputConfig.artifacts_dir 默认值。对应改进计划 P1 Step 6。
+list_stages，以及 OutputConfig.artifacts_dir 默认值。对应 P1 Step 6。
 """
 from datetime import datetime
 

@@ -1,7 +1,7 @@
 """
 S1–S5 多阶段信念流水线 (ThesisPipeline)
 
-由 Module B 的「单次 LLM 投影」演进为可审查的多阶段流水线（改进计划 §2 / §4.1）：
+由 Module B 的「单次 LLM 投影」演进为可审查的多阶段流水线：
 
     S1 RefinedThesis → S2 LogicChain → S3 ProxyMapping（合并回链路）
     → S4 逐 link Evidence（定量走 FinancialAnalysisEngine、定性走 LLM、

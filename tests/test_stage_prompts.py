@@ -4,7 +4,7 @@ S1–S5 Prompt 模板 + DeepSeekClient 阶段方法 + FakeLLMClient 测试
 离线覆盖：format_* 产出 (system, user) 且围栏 / 占位符正确、对含花括号/美元符的外部文本稳健；
 FakeLLMClient 各阶段返回可通过 validate() 的模型；DeepSeekClient 暴露阶段方法。
 另含一个 @pytest.mark.integration 的真实 DeepSeek 调用（无 DEEPSEEK_API_KEY 时跳过）。
-对应改进计划 P1 Step 5。
+对应 P1 Step 5。
 """
 import os
 

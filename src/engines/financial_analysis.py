@@ -1,10 +1,10 @@
 """
 S4 财务分析引擎 (FinancialAnalysisEngine)
 
-「技术面 / 财报分析」就活在这一阶段（改进计划 §2 Stage 4）。摄入财务报表，
+「技术面 / 财报分析」就活在这一阶段（S4）。摄入财务报表，
 计算 forward PE / PEG / 收入·毛利·现金流趋势，产出可追溯的 `Evidence`。
 
-护栏（AGENT.md §7）：
+护栏：
 - `Evidence.data` 只放本地抓取/计算的真实数字；缺数据标 needs_due_diligence，绝不编造。
 - forward PE 优先用 provider 前瞻值（yfinance）；A 股无前瞻数据时，按「给定增长 / 历史盈利
   CAGR」推导并显式标注 basis，无法推导则标 unavailable + 需尽调。

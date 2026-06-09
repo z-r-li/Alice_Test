@@ -450,7 +450,6 @@ class AuditSignal(BaseModel):
 # ============================================================
 # P1 多阶段流水线数据模型 (S1–S5)
 #
-# 对应《新框架与Alice_Test改进计划》§4.2 与 AGENT.md §4。
 # 凡经 DeepSeekClient.chat_with_json_output 由 LLM 产出的模型，
 # 必须实现 from_dict() + validate()（见 deepseek_client._parse_json_response：
 # 解析后调用 result_class.from_dict(data)，再调用 result.validate()）。

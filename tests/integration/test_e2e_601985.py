@@ -1,5 +1,5 @@
 """
-端到端：601985.SH（改进计划 P1 完成判据）
+端到端：601985.SH（P1 完成判据）
 
 离线 e2e（CI 默认运行）：FakeLLMClient + MockTextProvider + MockFinancialsProvider +
 桩行情，跑通 AliceTestPipeline.run() 全链路（摄入 → 共识 → S1–S5 流水线 → Gap → AuditResult

@@ -3,7 +3,7 @@ ThesisPipeline (S1–S5) 测试
 
 用 FakeLLMClient + MockFinancialsProvider + MockTextProvider 离线验证：
 五阶段产物落盘、定量环节用真实财报数据、无 proxy 环节进尽调队列且不编造、
-认知差脊柱不变、整体失败回退单次投影。对应改进计划 P1 Step 7。
+认知差脊柱不变、整体失败回退单次投影。对应 P1 Step 7。
 """
 from datetime import datetime
 

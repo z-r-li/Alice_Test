@@ -3,7 +3,7 @@ S1–S5 多阶段流水线数据模型测试
 
 覆盖 from_dict 解析（中/英/PRD 别名字段）、嵌套构造、validate() 通过/失败分支、
 Field 约束触发的 ValidationError，以及 ThesisProjection 向后兼容的
-to_projection_result()。对应改进计划 P1 Step 2。
+to_projection_result()。对应 P1 Step 2。
 """
 import pytest
 from pydantic import ValidationError

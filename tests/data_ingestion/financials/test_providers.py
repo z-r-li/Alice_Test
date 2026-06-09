@@ -2,7 +2,7 @@
 财报数据提供者测试
 
 离线单元测试基于 MockFinancialsProvider；另含一个 @pytest.mark.integration 的
-AkShare 实测用例（东方财富接口，对 601985.SH）。对应改进计划 P1 Step 3。
+AkShare 实测用例（东方财富接口，对 601985.SH）。对应 P1 Step 3。
 """
 import pytest
 

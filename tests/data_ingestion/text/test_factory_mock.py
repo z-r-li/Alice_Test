@@ -2,7 +2,7 @@
 TextProviderFactory use_mock 路由测试
 
 验证 use_mock=True 时工厂统一返回 MockTextProvider（覆盖 A 股 / 港股 / 美股），
-且不影响默认（非 mock）选择逻辑。对应改进计划 P1 Step 1：打通离线 mock 文本路径。
+且不影响默认（非 mock）选择逻辑。对应 P1 Step 1：打通离线 mock 文本路径。
 """
 import pytest
 
