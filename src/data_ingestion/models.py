@@ -85,7 +85,8 @@ class QuoteData(BaseModel):
 
     date: datetime = Field(..., description="交易日期")
     ticker: str = Field(..., min_length=1, description="证券代码")
-    price_close: float = Field(..., gt=0, description="收盘价")
+    # ge=0：0.0 仅作行情缺失时的占位（main 降级路径，status=data_error），正常行情恒 > 0
+    price_close: float = Field(..., ge=0, description="收盘价（0.0=占位，见 status）")
     pe_ttm: float | None = Field(default=None, description="市盈率 (TTM)")
     pb: float | None = Field(default=None, description="市净率")
     turnover_rate: float | None = Field(default=None, ge=0, description="换手率")

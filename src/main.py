@@ -26,6 +26,8 @@ from .data_ingestion.quotes import (
     TushareQuotesProvider,
     AkShareQuotesProvider,
     YFinanceQuotesProvider,
+    AShareYFinanceQuotesProvider,
+    FallbackQuotesProvider,
 )
 from .data_ingestion.text import TextProviderFactory, TextSourceType
 from .data_ingestion.text.a_share.coordinator import AShareTextCoordinator
@@ -483,7 +485,12 @@ class AliceTestPipeline:
                 token = self._config.data_sources.a_shares.get_token()
                 return TushareQuotesProvider(api_token=token)
             else:
-                return AkShareQuotesProvider()
+                # 东财行情在部分网络不可达（连接被远端重置），降级走
+                # Yahoo A 股镜像（601985.SH→601985.SS，带 PE/PB），均为真实数据
+                return FallbackQuotesProvider(
+                    AkShareQuotesProvider(),
+                    AShareYFinanceQuotesProvider(),
+                )
         else:
             # 港股 (.HK) 或美股 (无后缀)
             return YFinanceQuotesProvider()

@@ -114,7 +114,12 @@ def test_e2e_601985_live_milestone(tmp_path):
     artifacts_dir = tmp_path / "artifacts"
     config = load_config_from_dict({
         "llm_api": {"model": "deepseek-chat", "temperature": 0},
-        "data_sources": {"crawler": {"use_mock": True}},  # 文本 mock（周末/节假日可取不到）
+        "data_sources": {
+            # 行情与财报一致走 AkShare（无需 token；默认 tushare 会在无
+            # TUSHARE_TOKEN 的环境直接失败，而本测试 skipif 只要求 DEEPSEEK_API_KEY）
+            "a_shares": {"provider": "akshare"},
+            "crawler": {"use_mock": True},  # 文本 mock（周末/节假日可取不到）
+        },
         "financial_analysis": {"use_mock": False},  # 真实 AkShare 财报
         "output": {"path": str(csv_path), "artifacts_dir": str(artifacts_dir)},
         "targets": [

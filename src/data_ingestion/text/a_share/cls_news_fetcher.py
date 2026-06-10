@@ -1,13 +1,15 @@
 """
 财联社 (CLS) 电报新闻获取器（#65/#66 新增共识数据源）
 
-数据源: 财联社 — AkShare `stock_telegraph_cls`（全市场电报）
+数据源: 财联社 — AkShare 全市场电报接口（1.18+ 名为 `stock_info_global_cls`，
+旧版名为 `stock_telegraph_cls`，按序探测兼容两者）。
 策略: 财联社电报是全市场流，按标的名称 / 代码做子串过滤，取与该标的相关的条目。
-用途: 补充高时效财经新闻源；任何失败优雅降级为空列表。
+用途: 补充高时效财经新闻源；任何失败（含接口挂起超时）优雅降级为空列表。
 """
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -23,6 +25,43 @@ logger = logging.getLogger("alice_test")
 class CLSNewsFetcher(TextProvider):
     """财联社电报新闻获取器"""
 
+    # akshare 接口曾更名：1.18+ 为 stock_info_global_cls，旧版为 stock_telegraph_cls
+    AK_FUNC_CANDIDATES = ("stock_info_global_cls", "stock_telegraph_cls")
+    # 该端点在部分网络环境会长时间无响应（实测可挂起 >5min），硬超时后降级
+    FETCH_TIMEOUT_S = 30.0
+
+    @classmethod
+    def _fetch_df(cls) -> pd.DataFrame | None:
+        """调用 akshare 财联社接口（接口名兼容 + daemon 线程硬超时）"""
+        import akshare as ak
+
+        fn = None
+        for func_name in cls.AK_FUNC_CANDIDATES:
+            fn = getattr(ak, func_name, None)
+            if fn is not None:
+                break
+        if fn is None:
+            raise AttributeError(
+                f"akshare 缺少财联社电报接口（尝试过 {cls.AK_FUNC_CANDIDATES}）"
+            )
+
+        box: dict = {}
+
+        def _call() -> None:
+            try:
+                box["df"] = fn()
+            except Exception as e:  # 在工作线程内捕获，主线程统一抛出
+                box["exc"] = e
+
+        worker = threading.Thread(target=_call, daemon=True)
+        worker.start()
+        worker.join(cls.FETCH_TIMEOUT_S)
+        if worker.is_alive():
+            raise TimeoutError(f"财联社电报接口超过 {cls.FETCH_TIMEOUT_S}s 无响应")
+        if "exc" in box:
+            raise box["exc"]
+        return box.get("df")
+
     def fetch_texts(
         self,
         ticker: str,
@@ -37,9 +76,7 @@ class CLSNewsFetcher(TextProvider):
 
         symbol = self.extract_symbol(ticker)
         try:
-            import akshare as ak
-
-            df = ak.stock_telegraph_cls()
+            df = self._fetch_df()
         except Exception as e:
             logger.warning(f"[{ticker}] 财联社电报获取失败: {e}")
             return []
