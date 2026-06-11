@@ -4,6 +4,7 @@ AkShare 行情数据提供者 - A股市场备选
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime
 
 import akshare as ak
@@ -18,9 +19,26 @@ class AkShareQuotesProvider(QuotesProvider):
     # 支持的市场后缀
     SUPPORTED_SUFFIXES = (".SH", ".SZ")
 
+    # 东财接口偶发 RemoteDisconnected，退避重试
+    MAX_FETCH_RETRIES = 2  # 共 3 次尝试
+    RETRY_BACKOFF_S = 2.0
+
     def __init__(self):
         """初始化 AkShare 客户端（无需 API Token）"""
         pass
+
+    @classmethod
+    def _hist_with_retry(cls, **kwargs):
+        """带退避重试的 ak.stock_zh_a_hist"""
+        last_exc: Exception | None = None
+        for attempt in range(cls.MAX_FETCH_RETRIES + 1):
+            try:
+                return ak.stock_zh_a_hist(**kwargs)
+            except Exception as e:
+                last_exc = e
+                if attempt < cls.MAX_FETCH_RETRIES:
+                    time.sleep(cls.RETRY_BACKOFF_S * (attempt + 1))
+        raise last_exc
 
     def get_quote(self, ticker: str, date: datetime | None = None) -> QuoteData:
         """
@@ -59,7 +77,7 @@ class AkShareQuotesProvider(QuotesProvider):
                 end_date = end_dt.strftime("%Y%m%d")
 
             # 获取历史行情数据
-            hist_df = ak.stock_zh_a_hist(
+            hist_df = self._hist_with_retry(
                 symbol=symbol,
                 period="daily",
                 start_date=start_date,
@@ -148,7 +166,7 @@ class AkShareQuotesProvider(QuotesProvider):
             end_str = end_date.strftime("%Y%m%d")
 
             # 获取历史行情数据
-            hist_df = ak.stock_zh_a_hist(
+            hist_df = self._hist_with_retry(
                 symbol=symbol,
                 period="daily",
                 start_date=start_str,

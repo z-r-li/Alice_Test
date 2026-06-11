@@ -64,7 +64,7 @@ class TestCLSNewsFetcher:
             "内容": ["中国核电...", "无关...", "601985 核电..."],
             "发布时间": [_dt(2), _dt(3), _dt(4)],
         })
-        _patch_ak(monkeypatch, "stock_telegraph_cls", lambda: df)
+        _patch_ak(monkeypatch, "stock_info_global_cls", lambda: df)
         items = CLSNewsFetcher().fetch_texts(
             "601985.SH", "中国核电", lookback_hours=48, max_items=10
         )
@@ -78,7 +78,34 @@ class TestCLSNewsFetcher:
         def boom():
             raise RuntimeError("cls down")
 
-        _patch_ak(monkeypatch, "stock_telegraph_cls", boom)
+        _patch_ak(monkeypatch, "stock_info_global_cls", boom)
+        assert CLSNewsFetcher().fetch_texts("601985.SH", "中国核电") == []
+
+    def test_legacy_function_name_fallback(self, monkeypatch):
+        # akshare 旧版只有 stock_telegraph_cls：新名缺失时应回退到旧名
+        df = pd.DataFrame({
+            "标题": ["中国核电电报"],
+            "内容": ["中国核电..."],
+            "发布时间": [_dt(2)],
+        })
+        monkeypatch.delattr("akshare.stock_info_global_cls", raising=False)
+        _patch_ak(monkeypatch, "stock_telegraph_cls", lambda: df)
+        items = CLSNewsFetcher().fetch_texts(
+            "601985.SH", "中国核电", lookback_hours=48, max_items=10
+        )
+        assert len(items) == 1
+        assert items[0].source == "财联社"
+
+    def test_hanging_endpoint_times_out_and_degrades(self, monkeypatch):
+        # 端点挂起（实测部分网络 >5min 无响应）→ 硬超时 → 优雅降级为空列表
+        import time as _time
+
+        def hang():
+            _time.sleep(1.0)
+            return pd.DataFrame()
+
+        _patch_ak(monkeypatch, "stock_info_global_cls", hang)
+        monkeypatch.setattr(CLSNewsFetcher, "FETCH_TIMEOUT_S", 0.1)
         assert CLSNewsFetcher().fetch_texts("601985.SH", "中国核电") == []
 
 
