@@ -552,6 +552,24 @@ class DeepSeekClient:
         )
         return self.chat_with_json_output(system, user, Evidence)
 
+    def get_quant_evidence_interpretation(
+        self,
+        ticker: str,
+        ticker_name: str,
+        statement: str,
+        condition: str,
+        metrics_summary: str,
+    ) -> Evidence:
+        """S4：定量 link 的条件判断（仅依据引擎计算指标，不得引入新数字）"""
+        system, user = PromptTemplates.format_quant_evidence_prompt(
+            ticker=ticker,
+            ticker_name=ticker_name,
+            statement=statement,
+            condition=condition,
+            metrics_summary=metrics_summary,
+        )
+        return self.chat_with_json_output(system, user, Evidence)
+
     def get_thesis_synthesis(
         self,
         ticker: str,

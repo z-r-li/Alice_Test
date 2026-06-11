@@ -15,7 +15,14 @@ from src.data_ingestion.models import QuoteData
 from src.data_ingestion.text import MockTextProvider
 from src.engines import GapCalculator, ThesisPipeline
 from src.engines.thesis_pipeline import PipelineResult
-from src.llm.models import ConsensusResult, ThesisProjection, ThesisProjectionResult
+from src.llm.models import (
+    ConsensusResult,
+    Evidence,
+    LogicChain,
+    LogicChainLink,
+    ThesisProjection,
+    ThesisProjectionResult,
+)
 from src.persistence import ArtifactStore
 from tests.fakes import FakeLLMClient
 
@@ -87,6 +94,57 @@ class TestFullRun:
         assert "revenue_cagr" in q_ev.data
         assert q_ev.data["revenue_cagr"] is not None  # 来自 MockFinancialsProvider
 
+    def test_quantitative_judgment_receives_condition_and_metrics(
+        self, target, quote, texts
+    ):
+        """缺口①：定量判断的 LLM 输入必须含 statement / condition / 引擎指标摘要"""
+        fake = FakeLLMClient(n_links=3, include_due_diligence=True)
+        _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        assert "get_quant_evidence_interpretation" in fake.calls
+        kwargs = fake.last_quant_kwargs
+        assert kwargs["statement"] == "环节1：影响命题的关键因素 1"
+        assert kwargs["condition"] == "条件1 需成立"
+        # 指标摘要来自引擎真实计算值（MockFinancialsProvider）
+        assert "营收 CAGR" in kwargs["metrics_summary"]
+        assert "forward PE" in kwargs["metrics_summary"]
+
+    def test_quantitative_data_only_contains_engine_values(self, target, quote, texts):
+        """缺口①：Evidence.data 只放引擎计算值，LLM 的 data 字段必须被丢弃"""
+        fake = FakeLLMClient(n_links=3)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        q_ev = result.projection.evidence_chain[0]
+        assert "llm_injected" not in q_ev.data  # fake 注入的字段被丢弃
+        assert "revenue_cagr" in q_ev.data  # 引擎计算值保留
+        # finding / supports / confidence 来自 LLM 判断
+        assert q_ev.finding == "引擎指标显示「条件1 需成立」基本满足。"
+        assert q_ev.supports is True
+        assert q_ev.confidence == "中"
+
+    def test_quantitative_llm_failure_falls_back_to_heuristic(
+        self, target, quote, texts
+    ):
+        """缺口①：LLM 判断失败 → 回退引擎启发式 + needs_due_diligence=True"""
+        fake = FakeLLMClient(fail_stage="get_quant_evidence_interpretation", n_links=3)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        assert result.used_pipeline is True  # 单环节失败不应整体回退
+        q_ev = result.projection.evidence_chain[0]
+        assert q_ev.needs_due_diligence is True
+        assert "revenue_cagr" in q_ev.data  # 引擎值仍在
+        # 回退环节进入尽调队列
+        assert any(item["index"] == 0 for item in result.due_diligence_queue)
+
+    def test_quantitative_irrelevant_metrics_marked_due_diligence(
+        self, target, quote, texts
+    ):
+        """缺口①：LLM 判断指标与条件无关 → 转尽调而非强行给 supports"""
+        fake = FakeLLMClient(n_links=3, quant_irrelevant=True)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        q_ev = result.projection.evidence_chain[0]
+        assert q_ev.needs_due_diligence is True
+        assert q_ev.supports is False
+        assert q_ev.confidence == "低"
+        assert any(item["index"] == 0 for item in result.due_diligence_queue)
+
     def test_due_diligence_link_queued_without_fabrication(self, target, quote, texts):
         result = _pipeline().run(target, quote=quote, texts=texts)
         assert len(result.due_diligence_queue) >= 1
@@ -123,6 +181,53 @@ class TestSpinePreserved:
         assert audit.gap == pytest.approx(18.0 - 8.0)
         assert audit.our_growth == 18.0
         assert audit.implied_growth == 8.0
+
+
+class TestWeightedSynthesis:
+    def test_synthesis_receives_link_weights(self, target, quote, texts):
+        """缺口②：S5 的 evidence_items 必须带 S2 的 weight"""
+        fake = FakeLLMClient(n_links=3)
+        _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        items = fake.last_synthesis_items
+        assert items is not None and len(items) == 3
+        assert all("weight" in it for it in items)
+        assert items[0]["weight"] == pytest.approx(0.33)
+
+    def test_weighted_support_formula(self):
+        """weighted_support = Σ(weight × supports × 置信系数)，高/中/低=1.0/0.6/0.3"""
+        chain = LogicChain(links=[
+            LogicChainLink(statement="A", weight=0.5, condition="a",
+                           evidence=Evidence(finding="支持", supports=True, confidence="高")),
+            LogicChainLink(statement="B", weight=0.3, condition="b",
+                           evidence=Evidence(finding="支持", supports=True, confidence="低")),
+            LogicChainLink(statement="C", weight=0.2, condition="c",
+                           evidence=Evidence(finding="不支持", supports=False, confidence="高")),
+        ])
+        # 0.5×1.0 + 0.3×0.3 + 0(不支持) = 0.59
+        assert ThesisPipeline.weighted_support(chain) == pytest.approx(0.59)
+
+    def test_weighted_support_zero_without_evidence(self):
+        chain = LogicChain(
+            links=[LogicChainLink(statement="A", weight=0.5, condition="a")]
+        )
+        assert ThesisPipeline.weighted_support(chain) == 0.0
+
+    def test_pipeline_sets_and_persists_weighted_support(
+        self, tmp_path, target, quote, texts
+    ):
+        store = ArtifactStore(base_dir=tmp_path)
+        result = _pipeline(store=store).run(
+            target, quote=quote, texts=texts, audit_date=datetime(2026, 6, 11)
+        )
+        # link0 定量: 支持/中(0.6)、link1 定性: 支持/中(0.6)、link2 尽调: 不支持
+        expected = 0.33 * 0.6 + 0.33 * 0.6
+        assert result.projection.weighted_support == pytest.approx(expected, abs=1e-4)
+        # 写进 S5 阶段产物且可读回
+        loaded = store.load_stage(
+            "601985.SH", datetime(2026, 6, 11), "thesis_projection",
+            model_cls=ThesisProjection, index=5,
+        )
+        assert loaded.weighted_support == pytest.approx(expected, abs=1e-4)
 
 
 class TestFallback:

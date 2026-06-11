@@ -127,6 +127,24 @@ class TestBuildEvidence:
         assert ev.data["forward_pe"] is None
 
 
+class TestMetricsSummary:
+    def test_summary_contains_engine_values_only(self):
+        engine = FinancialAnalysisEngine()
+        m = engine.analyze_report(_growing_report(), trailing_pe=15.0)
+        summary = engine.metrics_summary(m)
+        assert f"营收 CAGR: {m.revenue_cagr:.2f}%" in summary
+        assert f"forward PE: {m.forward_pe:.2f}" in summary
+        assert "经营现金流为正: 是" in summary
+
+    def test_summary_marks_missing_values_not_fabricated(self):
+        engine = FinancialAnalysisEngine()
+        m = FinancialMetrics(ticker="X.SH")  # 全空指标
+        summary = engine.metrics_summary(m)
+        assert "无数据" in summary
+        # 不应出现任何编造的数字行
+        assert "CAGR: 0.00" not in summary
+
+
 class TestAnalyzeTicker:
     def test_with_mock_provider(self):
         engine = FinancialAnalysisEngine(MockFinancialsProvider())
