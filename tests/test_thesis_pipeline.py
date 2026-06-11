@@ -15,7 +15,14 @@ from src.data_ingestion.models import QuoteData
 from src.data_ingestion.text import MockTextProvider
 from src.engines import GapCalculator, ThesisPipeline
 from src.engines.thesis_pipeline import PipelineResult
-from src.llm.models import ConsensusResult, ThesisProjection, ThesisProjectionResult
+from src.llm.models import (
+    ConsensusResult,
+    Evidence,
+    LogicChain,
+    LogicChainLink,
+    ThesisProjection,
+    ThesisProjectionResult,
+)
 from src.persistence import ArtifactStore
 from tests.fakes import FakeLLMClient
 
@@ -174,6 +181,53 @@ class TestSpinePreserved:
         assert audit.gap == pytest.approx(18.0 - 8.0)
         assert audit.our_growth == 18.0
         assert audit.implied_growth == 8.0
+
+
+class TestWeightedSynthesis:
+    def test_synthesis_receives_link_weights(self, target, quote, texts):
+        """缺口②：S5 的 evidence_items 必须带 S2 的 weight"""
+        fake = FakeLLMClient(n_links=3)
+        _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        items = fake.last_synthesis_items
+        assert items is not None and len(items) == 3
+        assert all("weight" in it for it in items)
+        assert items[0]["weight"] == pytest.approx(0.33)
+
+    def test_weighted_support_formula(self):
+        """weighted_support = Σ(weight × supports × 置信系数)，高/中/低=1.0/0.6/0.3"""
+        chain = LogicChain(links=[
+            LogicChainLink(statement="A", weight=0.5, condition="a",
+                           evidence=Evidence(finding="支持", supports=True, confidence="高")),
+            LogicChainLink(statement="B", weight=0.3, condition="b",
+                           evidence=Evidence(finding="支持", supports=True, confidence="低")),
+            LogicChainLink(statement="C", weight=0.2, condition="c",
+                           evidence=Evidence(finding="不支持", supports=False, confidence="高")),
+        ])
+        # 0.5×1.0 + 0.3×0.3 + 0(不支持) = 0.59
+        assert ThesisPipeline.weighted_support(chain) == pytest.approx(0.59)
+
+    def test_weighted_support_zero_without_evidence(self):
+        chain = LogicChain(
+            links=[LogicChainLink(statement="A", weight=0.5, condition="a")]
+        )
+        assert ThesisPipeline.weighted_support(chain) == 0.0
+
+    def test_pipeline_sets_and_persists_weighted_support(
+        self, tmp_path, target, quote, texts
+    ):
+        store = ArtifactStore(base_dir=tmp_path)
+        result = _pipeline(store=store).run(
+            target, quote=quote, texts=texts, audit_date=datetime(2026, 6, 11)
+        )
+        # link0 定量: 支持/中(0.6)、link1 定性: 支持/中(0.6)、link2 尽调: 不支持
+        expected = 0.33 * 0.6 + 0.33 * 0.6
+        assert result.projection.weighted_support == pytest.approx(expected, abs=1e-4)
+        # 写进 S5 阶段产物且可读回
+        loaded = store.load_stage(
+            "601985.SH", datetime(2026, 6, 11), "thesis_projection",
+            model_cls=ThesisProjection, index=5,
+        )
+        assert loaded.weighted_support == pytest.approx(expected, abs=1e-4)
 
 
 class TestFallback:

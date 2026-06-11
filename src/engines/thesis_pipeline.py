@@ -33,6 +33,9 @@ from ..llm.models import (
 from ..utils.sanitizer import TextSanitizer, get_sanitizer
 from .financial_analysis import FinancialAnalysisEngine
 
+# 加权支持分的置信系数（高/中/低）
+_CONFIDENCE_FACTOR = {"高": 1.0, "中": 0.6, "低": 0.3}
+
 
 @dataclass
 class PipelineResult:
@@ -167,10 +170,11 @@ class ThesisPipeline:
             {"evidence": evidence_list, "due_diligence_queue": dd_queue}, 4,
         )
 
-        # S5 综合
+        # S5 综合（带 S2 权重，按 weight 加权）
         evidence_items = [
             {
                 "statement": l.statement,
+                "weight": l.weight,
                 "proxy_type": l.proxy_type,
                 "supports": (l.evidence.supports if l.evidence else None),
                 "confidence": (l.evidence.confidence if l.evidence else None),
@@ -185,6 +189,7 @@ class ThesisPipeline:
         projection.evidence_chain = evidence_list
         projection.refined_thesis = refined
         projection.logic_chain = chain
+        projection.weighted_support = self.weighted_support(chain)
         self._persist(ticker, audit_date, "thesis_projection", projection, 5)
 
         artifact_dir = (
@@ -231,6 +236,20 @@ class ThesisPipeline:
             finding=f"该环节无可量化/定性 proxy（{ptype or 'none'}）：{spec}，需人工尽调。",
             supports=False, confidence="低", needs_due_diligence=True,
         )
+
+    @staticmethod
+    def weighted_support(chain: LogicChain) -> float:
+        """确定性加权支持分：Σ(weight × supports × 置信系数)，高/中/低 = 1.0/0.6/0.3。
+
+        与 S5 的 LLM 综合相互独立，写进阶段产物供人工对照综合结论是否离谱。
+        """
+        total = 0.0
+        for link in chain.links:
+            ev = link.evidence
+            if ev is None or not ev.supports:
+                continue
+            total += link.weight * _CONFIDENCE_FACTOR.get(ev.confidence, 0.3)
+        return round(total, 4)
 
     def _quantitative_evidence(
         self, link, metrics, ticker: str, safe_name: str

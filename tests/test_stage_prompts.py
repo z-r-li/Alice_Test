@@ -119,6 +119,33 @@ class TestStagePromptFormatting:
         assert "our_growth" in system
         assert "营收稳健增长" in user and "环节1" in user
 
+    def test_synthesis_prompt_renders_weights(self):
+        """缺口②：证据行带 [w=x.xx]，系统指令要求按 weight 加权综合"""
+        items = [
+            {"statement": "高权重环节", "weight": 0.6, "proxy_type": "quantitative",
+             "supports": False, "confidence": "高", "finding": "不支持"},
+            {"statement": "低权重环节", "weight": 0.15, "proxy_type": "qualitative",
+             "supports": True, "confidence": "中", "finding": "支持"},
+        ]
+        system, user = PromptTemplates.format_synthesis_prompt(
+            ticker="601985.SH", ticker_name="中国核电",
+            proposition="命题X", evidence_items=items,
+        )
+        assert "[w=0.60]" in user and "[w=0.15]" in user
+        # 系统指令含加权综合要求：高权重环节不支持 → our_growth/confidence 下调
+        assert "weight" in system and "[w=x.xx]" in system
+        assert "下调" in system
+
+    def test_synthesis_prompt_backward_compatible_without_weight(self):
+        """旧调用方不带 weight 时不渲染 [w=]、不报错"""
+        items = [{"statement": "环节1", "supports": True, "confidence": "中",
+                  "finding": "OK"}]
+        _, user = PromptTemplates.format_synthesis_prompt(
+            ticker="X", ticker_name="N", proposition="P", evidence_items=items,
+        )
+        assert "[w=" not in user
+        assert "环节1" in user
+
 
 class TestFakeLLMClient:
     def test_each_stage_returns_valid_model(self):

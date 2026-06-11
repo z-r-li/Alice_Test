@@ -710,6 +710,11 @@ class ThesisProjection(BaseModel):
         ..., pattern="^(高|中|低)$", description="置信度 (高|中|低)"
     )
     reasoning: str = Field(..., min_length=1, description="综合推理说明")
+    weighted_support: float | None = Field(
+        default=None,
+        description="确定性加权支持分 Σ(weight×supports×置信系数)（本地计算附加，"
+        "供人工对照 LLM 综合是否离谱；旧产物无此字段）",
+    )
     evidence_chain: list[Evidence] = Field(
         default_factory=list, description="逐 link 证据链（本地附加）"
     )
@@ -742,11 +747,15 @@ class ThesisProjection(BaseModel):
             if isinstance(evidence_raw, list)
             else []
         )
+        weighted_support = data.get("weighted_support")
         return cls(
             thesis_aligned=bool(thesis_aligned),
             our_growth=float(our_growth),
             confidence=str(data.get("confidence", "中")),
             reasoning=str(data.get("reasoning", "")),
+            weighted_support=(
+                float(weighted_support) if weighted_support is not None else None
+            ),
             evidence_chain=evidence_chain,
         )
 

@@ -345,6 +345,11 @@ $metrics_summary
 - confidence：置信度（高 | 中 | 低）；证据越完整、越一致则越高；多数环节需尽调时应降低
 - reasoning：2-4 句综合推理，必须可追溯到下列证据，禁止无证据的断言
 
+# 加权综合
+每条证据行首的 [w=x.xx] 为该环节对命题的重要性权重 (0-1)。必须按 weight 加权综合：
+- 高权重环节不被支持（或证据缺失/需尽调）时，our_growth 与 confidence 必须相应下调；
+- 仅低权重环节被支持不足以支撑高增长结论。
+
 # 护栏
 - 证据不足或多数环节标注需尽调时，confidence 取低，并在 reasoning 中如实说明缺口。
 
@@ -474,11 +479,13 @@ $evidence_block
         proposition: str,
         evidence_items: list[dict],
     ) -> tuple[str, str]:
-        """S5：格式化综合 Prompt；evidence_items 为含 statement/proxy_type/supports/confidence/finding 的 dict 列表"""
+        """S5：格式化综合 Prompt；evidence_items 为含 statement/weight/proxy_type/supports/confidence/finding 的 dict 列表（weight 可缺省，向后兼容）"""
         lines = []
         for i, ev in enumerate(evidence_items):
+            weight = ev.get("weight")
+            wtag = f"[w={weight:.2f}] " if weight is not None else ""
             lines.append(
-                f"{i}. 环节: {ev.get('statement', '')} | proxy: {ev.get('proxy_type', '-')} "
+                f"{i}. {wtag}环节: {ev.get('statement', '')} | proxy: {ev.get('proxy_type', '-')} "
                 f"| 支持: {ev.get('supports')} | 置信: {ev.get('confidence', '-')} "
                 f"| 结论: {ev.get('finding', '')}"
             )
