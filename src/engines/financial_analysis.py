@@ -272,32 +272,6 @@ class FinancialAnalysisEngine:
         return self.build_evidence(metrics, condition=condition)
 
     @staticmethod
-    def metrics_summary(m: FinancialMetrics) -> str:
-        """生成逐行键值的指标摘要（仅含引擎计算值，供围栏喂入 LLM 做条件判断）"""
-
-        def _num(v: float | None, suffix: str = "") -> str:
-            return f"{v:.2f}{suffix}" if v is not None else "无数据"
-
-        lines = [
-            f"标的: {m.ticker}（报告期数 {m.periods_used}，数据状态 {m.status}）",
-            f"营收最新值: {_num(m.revenue_latest)}",
-            f"营收同比: {_num(m.revenue_yoy, '%')}",
-            f"营收 CAGR: {_num(m.revenue_cagr, '%')}（趋势 {m.revenue_trend}）",
-            f"盈利 CAGR: {_num(m.earnings_cagr, '%')}",
-            f"毛利率: {_num(m.gross_margin_latest, '%')}（趋势 {m.gross_margin_trend}）",
-            f"净利率: {_num(m.net_margin_latest, '%')}（趋势 {m.net_margin_trend}）",
-            "经营现金流为正: "
-            + ("是" if m.ocf_latest_positive else "无数据" if m.ocf_latest_positive is None else "否")
-            + f"（趋势 {m.ocf_trend}）",
-            f"trailing PE: {_num(m.trailing_pe)}",
-            f"forward PE: {_num(m.forward_pe)}（basis {m.forward_pe_basis}）",
-            f"PEG: {_num(m.peg_ratio)}",
-        ]
-        if m.notes:
-            lines.append("备注: " + "；".join(m.notes))
-        return "\n".join(lines)
-
-    @staticmethod
     def _summarize(m: FinancialMetrics) -> str:
         """生成中文财务摘要（供 Evidence.finding）"""
         parts: list[str] = []

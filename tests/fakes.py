@@ -33,17 +33,13 @@ class FakeLLMClient:
         our_growth: float = 18.0,
         implied_growth: float = 8.0,
         fail_stage: str | None = None,
-        quant_irrelevant: bool = False,
     ):
         self.n_links = n_links
         self.include_due_diligence = include_due_diligence
         self.our_growth = our_growth
         self.implied_growth = implied_growth
         self.fail_stage = fail_stage
-        self.quant_irrelevant = quant_irrelevant  # 模拟「指标与条件无关」的 LLM 判断
         self.calls: list[str] = []  # 记录调用顺序，供测试断言
-        self.last_quant_kwargs: dict | None = None  # 最近一次定量判断入参
-        self.last_synthesis_items: list[dict] | None = None  # 最近一次 S5 证据项
         self._thinking_enabled = False
 
     def _mark(self, name: str) -> None:
@@ -134,37 +130,10 @@ class FakeLLMClient:
             confidence="中",
         )
 
-    def get_quant_evidence_interpretation(
-        self, ticker, ticker_name, statement, condition, metrics_summary
-    ) -> Evidence:
-        self._mark("get_quant_evidence_interpretation")
-        self.last_quant_kwargs = {
-            "ticker": ticker,
-            "ticker_name": ticker_name,
-            "statement": statement,
-            "condition": condition,
-            "metrics_summary": metrics_summary,
-        }
-        if self.quant_irrelevant:
-            return Evidence(
-                data={"llm_injected": True},  # 流水线必须丢弃，data 只认引擎值
-                finding="指标为公司级财务，与该环节条件无关，无法检验。",
-                supports=False,
-                confidence="低",
-                needs_due_diligence=True,
-            )
-        return Evidence(
-            data={"llm_injected": True},  # 流水线必须丢弃，data 只认引擎值
-            finding=f"引擎指标显示「{condition}」基本满足。",
-            supports=True,
-            confidence="中",
-        )
-
     def get_thesis_synthesis(
         self, ticker, ticker_name, proposition, evidence_items
     ) -> ThesisProjection:
         self._mark("get_thesis_synthesis")
-        self.last_synthesis_items = evidence_items
         return ThesisProjection(
             thesis_aligned=True,
             our_growth=self.our_growth,

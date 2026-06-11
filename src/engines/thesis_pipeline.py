@@ -33,9 +33,6 @@ from ..llm.models import (
 from ..utils.sanitizer import TextSanitizer, get_sanitizer
 from .financial_analysis import FinancialAnalysisEngine
 
-# 加权支持分的置信系数（高/中/低）
-_CONFIDENCE_FACTOR = {"高": 1.0, "中": 0.6, "低": 0.3}
-
 
 @dataclass
 class PipelineResult:
@@ -170,11 +167,10 @@ class ThesisPipeline:
             {"evidence": evidence_list, "due_diligence_queue": dd_queue}, 4,
         )
 
-        # S5 综合（带 S2 权重，按 weight 加权）
+        # S5 综合
         evidence_items = [
             {
                 "statement": l.statement,
-                "weight": l.weight,
                 "proxy_type": l.proxy_type,
                 "supports": (l.evidence.supports if l.evidence else None),
                 "confidence": (l.evidence.confidence if l.evidence else None),
@@ -189,7 +185,6 @@ class ThesisPipeline:
         projection.evidence_chain = evidence_list
         projection.refined_thesis = refined
         projection.logic_chain = chain
-        projection.weighted_support = self.weighted_support(chain)
         self._persist(ticker, audit_date, "thesis_projection", projection, 5)
 
         artifact_dir = (
@@ -212,8 +207,8 @@ class ThesisPipeline:
         ptype = link.proxy_type
 
         if ptype == "quantitative" and metrics is not None:
-            # 定量：引擎计算指标 + 廉价 LLM 条件判断（data 仅含真实计算值）
-            return self._quantitative_evidence(link, metrics, ticker, safe_name)
+            # 定量：财报引擎规则化证据（data 仅含真实计算值）
+            return self._fin_engine.build_evidence(metrics, condition=link.condition)
 
         if ptype == "qualitative":
             try:
@@ -235,51 +230,6 @@ class ThesisPipeline:
             data={},
             finding=f"该环节无可量化/定性 proxy（{ptype or 'none'}）：{spec}，需人工尽调。",
             supports=False, confidence="低", needs_due_diligence=True,
-        )
-
-    @staticmethod
-    def weighted_support(chain: LogicChain) -> float:
-        """确定性加权支持分：Σ(weight × supports × 置信系数)，高/中/低 = 1.0/0.6/0.3。
-
-        与 S5 的 LLM 综合相互独立，写进阶段产物供人工对照综合结论是否离谱。
-        """
-        total = 0.0
-        for link in chain.links:
-            ev = link.evidence
-            if ev is None or not ev.supports:
-                continue
-            total += link.weight * _CONFIDENCE_FACTOR.get(ev.confidence, 0.3)
-        return round(total, 4)
-
-    def _quantitative_evidence(
-        self, link, metrics, ticker: str, safe_name: str
-    ) -> Evidence:
-        """定量环节证据：引擎指标不变，由 LLM 判断指标是否支持该环节条件。
-
-        - Evidence.data 永远只放引擎计算值（LLM 不得引入新数字）；
-        - 指标与条件明显无关时 LLM 应判 needs_due_diligence=True，不强行给 supports；
-        - LLM 调用失败回退到引擎启发式，并标 needs_due_diligence=True。
-        """
-        base = self._fin_engine.build_evidence(metrics, condition=link.condition)
-        if metrics.status == "data_error":
-            return base  # 引擎已如实标尽调，无需再让 LLM 判断
-        try:
-            judged = self._llm.get_quant_evidence_interpretation(
-                ticker=ticker, ticker_name=safe_name,
-                statement=link.statement, condition=link.condition,
-                metrics_summary=self._fin_engine.metrics_summary(metrics),
-            )
-        except Exception as e:
-            self._logger.warning(
-                f"[{ticker}] 定量证据条件判断失败，回退启发式并转尽调: {e}"
-            )
-            return base.model_copy(update={"needs_due_diligence": True})
-        return Evidence(
-            data=base.data,
-            finding=judged.finding,
-            supports=judged.supports,
-            confidence=judged.confidence,
-            needs_due_diligence=judged.needs_due_diligence or base.needs_due_diligence,
         )
 
     def _financial_metrics(self, ticker: str, pe_ttm: float | None):

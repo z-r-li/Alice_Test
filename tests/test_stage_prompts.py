@@ -81,32 +81,6 @@ class TestStagePromptFormatting:
         assert "[BEGIN MATERIAL]" in user and "[END MATERIAL]" in user
         assert "某研报：用电需求强劲" in user
 
-    def test_quant_evidence_prompt_fences_metrics_summary(self):
-        summary = "营收 CAGR: 10.00%（趋势 improving）\nforward PE: 12.50（basis provider）"
-        system, user = PromptTemplates.format_quant_evidence_prompt(
-            ticker="601985.SH",
-            ticker_name="中国核电",
-            statement="上游成本可控",
-            condition="铀价涨幅低于电价涨幅",
-            metrics_summary=summary,
-        )
-        # 系统指令：约束 LLM 不引入新数字、无关指标必须转尽调
-        assert "needs_due_diligence" in system
-        assert "禁止引入任何新数字" in system
-        # 用户消息：statement / condition / 指标摘要 全部在场且围栏喂入
-        assert "上游成本可控" in user
-        assert "铀价涨幅低于电价涨幅" in user
-        assert "[BEGIN METRICS]" in user and "[END METRICS]" in user
-        assert "营收 CAGR: 10.00%" in user and "forward PE: 12.50" in user
-
-    def test_quant_evidence_prompt_robust_to_braces_and_dollar(self):
-        nasty = "条件 {evil} $danger"
-        system, user = PromptTemplates.format_quant_evidence_prompt(
-            ticker="X", ticker_name="N", statement="s",
-            condition=nasty, metrics_summary="PEG: 1.20",
-        )
-        assert nasty in user
-
     def test_synthesis_prompt_renders_evidence_block(self):
         items = [
             {"statement": "环节1", "proxy_type": "quantitative", "supports": True,
@@ -118,33 +92,6 @@ class TestStagePromptFormatting:
         )
         assert "our_growth" in system
         assert "营收稳健增长" in user and "环节1" in user
-
-    def test_synthesis_prompt_renders_weights(self):
-        """缺口②：证据行带 [w=x.xx]，系统指令要求按 weight 加权综合"""
-        items = [
-            {"statement": "高权重环节", "weight": 0.6, "proxy_type": "quantitative",
-             "supports": False, "confidence": "高", "finding": "不支持"},
-            {"statement": "低权重环节", "weight": 0.15, "proxy_type": "qualitative",
-             "supports": True, "confidence": "中", "finding": "支持"},
-        ]
-        system, user = PromptTemplates.format_synthesis_prompt(
-            ticker="601985.SH", ticker_name="中国核电",
-            proposition="命题X", evidence_items=items,
-        )
-        assert "[w=0.60]" in user and "[w=0.15]" in user
-        # 系统指令含加权综合要求：高权重环节不支持 → our_growth/confidence 下调
-        assert "weight" in system and "[w=x.xx]" in system
-        assert "下调" in system
-
-    def test_synthesis_prompt_backward_compatible_without_weight(self):
-        """旧调用方不带 weight 时不渲染 [w=]、不报错"""
-        items = [{"statement": "环节1", "supports": True, "confidence": "中",
-                  "finding": "OK"}]
-        _, user = PromptTemplates.format_synthesis_prompt(
-            ticker="X", ticker_name="N", proposition="P", evidence_items=items,
-        )
-        assert "[w=" not in user
-        assert "环节1" in user
 
 
 class TestFakeLLMClient:
@@ -205,7 +152,6 @@ class TestClientStageMethodsExist:
             "get_logic_chain",
             "get_proxy_mapping",
             "get_evidence_interpretation",
-            "get_quant_evidence_interpretation",
             "get_thesis_synthesis",
         ):
             assert hasattr(DeepSeekClient, name)

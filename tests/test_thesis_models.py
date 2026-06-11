@@ -217,39 +217,6 @@ class TestThesisProjection:
         assert pr.thesis_aligned is True
         assert pr.validate() is True
 
-    def test_old_serialization_without_weighted_support_still_parses(self):
-        """缺口②向后兼容：旧产物（无 weighted_support 字段）仍可解析"""
-        legacy_json = (
-            '{"thesis_aligned": true, "our_growth": 7.0, "confidence": "低", '
-            '"reasoning": "证据存在缺口，综合判断给出保守增长估计。", '
-            '"evidence_chain": [{"finding": "营收增长", "supports": true, '
-            '"confidence": "中", "needs_due_diligence": false, "data": {}}]}'
-        )
-        tp = ThesisProjection.model_validate_json(legacy_json)
-        assert tp.weighted_support is None
-        assert tp.validate() is True
-        # from_dict 路径同样兼容
-        tp2 = ThesisProjection.from_dict({
-            "thesis_aligned": True, "our_growth": 7.0, "confidence": "低",
-            "reasoning": "证据存在缺口，综合判断给出保守增长估计。",
-        })
-        assert tp2.weighted_support is None
-        assert tp2.validate() is True
-
-    def test_weighted_support_round_trip(self):
-        tp = ThesisProjection(
-            thesis_aligned=True, our_growth=10.0, confidence="中",
-            reasoning="加权支持分与综合结论方向一致，给出中等置信。",
-            weighted_support=0.59,
-        )
-        restored = ThesisProjection.model_validate_json(tp.model_dump_json())
-        assert restored.weighted_support == 0.59
-        assert ThesisProjection.from_dict(
-            {"thesis_aligned": True, "our_growth": 10.0, "confidence": "中",
-             "reasoning": "加权支持分与综合结论方向一致，给出中等置信。",
-             "weighted_support": 0.59}
-        ).weighted_support == 0.59
-
     def test_model_dump_json_round_trip(self):
         """可被 JSON 序列化/反序列化（ArtifactStore 持久化所需）"""
         tp = ThesisProjection(
