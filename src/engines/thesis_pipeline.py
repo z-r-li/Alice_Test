@@ -207,8 +207,8 @@ class ThesisPipeline:
         ptype = link.proxy_type
 
         if ptype == "quantitative" and metrics is not None:
-            # 定量：财报引擎规则化证据（data 仅含真实计算值）
-            return self._fin_engine.build_evidence(metrics, condition=link.condition)
+            # 定量：引擎计算指标 + 廉价 LLM 条件判断（data 仅含真实计算值）
+            return self._quantitative_evidence(link, metrics, ticker, safe_name)
 
         if ptype == "qualitative":
             try:
@@ -230,6 +230,37 @@ class ThesisPipeline:
             data={},
             finding=f"该环节无可量化/定性 proxy（{ptype or 'none'}）：{spec}，需人工尽调。",
             supports=False, confidence="低", needs_due_diligence=True,
+        )
+
+    def _quantitative_evidence(
+        self, link, metrics, ticker: str, safe_name: str
+    ) -> Evidence:
+        """定量环节证据：引擎指标不变，由 LLM 判断指标是否支持该环节条件。
+
+        - Evidence.data 永远只放引擎计算值（LLM 不得引入新数字）；
+        - 指标与条件明显无关时 LLM 应判 needs_due_diligence=True，不强行给 supports；
+        - LLM 调用失败回退到引擎启发式，并标 needs_due_diligence=True。
+        """
+        base = self._fin_engine.build_evidence(metrics, condition=link.condition)
+        if metrics.status == "data_error":
+            return base  # 引擎已如实标尽调，无需再让 LLM 判断
+        try:
+            judged = self._llm.get_quant_evidence_interpretation(
+                ticker=ticker, ticker_name=safe_name,
+                statement=link.statement, condition=link.condition,
+                metrics_summary=self._fin_engine.metrics_summary(metrics),
+            )
+        except Exception as e:
+            self._logger.warning(
+                f"[{ticker}] 定量证据条件判断失败，回退启发式并转尽调: {e}"
+            )
+            return base.model_copy(update={"needs_due_diligence": True})
+        return Evidence(
+            data=base.data,
+            finding=judged.finding,
+            supports=judged.supports,
+            confidence=judged.confidence,
+            needs_due_diligence=judged.needs_due_diligence or base.needs_due_diligence,
         )
 
     def _financial_metrics(self, ticker: str, pe_ttm: float | None):

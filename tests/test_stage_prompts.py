@@ -81,6 +81,32 @@ class TestStagePromptFormatting:
         assert "[BEGIN MATERIAL]" in user and "[END MATERIAL]" in user
         assert "某研报：用电需求强劲" in user
 
+    def test_quant_evidence_prompt_fences_metrics_summary(self):
+        summary = "营收 CAGR: 10.00%（趋势 improving）\nforward PE: 12.50（basis provider）"
+        system, user = PromptTemplates.format_quant_evidence_prompt(
+            ticker="601985.SH",
+            ticker_name="中国核电",
+            statement="上游成本可控",
+            condition="铀价涨幅低于电价涨幅",
+            metrics_summary=summary,
+        )
+        # 系统指令：约束 LLM 不引入新数字、无关指标必须转尽调
+        assert "needs_due_diligence" in system
+        assert "禁止引入任何新数字" in system
+        # 用户消息：statement / condition / 指标摘要 全部在场且围栏喂入
+        assert "上游成本可控" in user
+        assert "铀价涨幅低于电价涨幅" in user
+        assert "[BEGIN METRICS]" in user and "[END METRICS]" in user
+        assert "营收 CAGR: 10.00%" in user and "forward PE: 12.50" in user
+
+    def test_quant_evidence_prompt_robust_to_braces_and_dollar(self):
+        nasty = "条件 {evil} $danger"
+        system, user = PromptTemplates.format_quant_evidence_prompt(
+            ticker="X", ticker_name="N", statement="s",
+            condition=nasty, metrics_summary="PEG: 1.20",
+        )
+        assert nasty in user
+
     def test_synthesis_prompt_renders_evidence_block(self):
         items = [
             {"statement": "环节1", "proxy_type": "quantitative", "supports": True,
@@ -152,6 +178,7 @@ class TestClientStageMethodsExist:
             "get_logic_chain",
             "get_proxy_mapping",
             "get_evidence_interpretation",
+            "get_quant_evidence_interpretation",
             "get_thesis_synthesis",
         ):
             assert hasattr(DeepSeekClient, name)

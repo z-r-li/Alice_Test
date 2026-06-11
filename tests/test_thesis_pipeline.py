@@ -87,6 +87,57 @@ class TestFullRun:
         assert "revenue_cagr" in q_ev.data
         assert q_ev.data["revenue_cagr"] is not None  # 来自 MockFinancialsProvider
 
+    def test_quantitative_judgment_receives_condition_and_metrics(
+        self, target, quote, texts
+    ):
+        """缺口①：定量判断的 LLM 输入必须含 statement / condition / 引擎指标摘要"""
+        fake = FakeLLMClient(n_links=3, include_due_diligence=True)
+        _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        assert "get_quant_evidence_interpretation" in fake.calls
+        kwargs = fake.last_quant_kwargs
+        assert kwargs["statement"] == "环节1：影响命题的关键因素 1"
+        assert kwargs["condition"] == "条件1 需成立"
+        # 指标摘要来自引擎真实计算值（MockFinancialsProvider）
+        assert "营收 CAGR" in kwargs["metrics_summary"]
+        assert "forward PE" in kwargs["metrics_summary"]
+
+    def test_quantitative_data_only_contains_engine_values(self, target, quote, texts):
+        """缺口①：Evidence.data 只放引擎计算值，LLM 的 data 字段必须被丢弃"""
+        fake = FakeLLMClient(n_links=3)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        q_ev = result.projection.evidence_chain[0]
+        assert "llm_injected" not in q_ev.data  # fake 注入的字段被丢弃
+        assert "revenue_cagr" in q_ev.data  # 引擎计算值保留
+        # finding / supports / confidence 来自 LLM 判断
+        assert q_ev.finding == "引擎指标显示「条件1 需成立」基本满足。"
+        assert q_ev.supports is True
+        assert q_ev.confidence == "中"
+
+    def test_quantitative_llm_failure_falls_back_to_heuristic(
+        self, target, quote, texts
+    ):
+        """缺口①：LLM 判断失败 → 回退引擎启发式 + needs_due_diligence=True"""
+        fake = FakeLLMClient(fail_stage="get_quant_evidence_interpretation", n_links=3)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        assert result.used_pipeline is True  # 单环节失败不应整体回退
+        q_ev = result.projection.evidence_chain[0]
+        assert q_ev.needs_due_diligence is True
+        assert "revenue_cagr" in q_ev.data  # 引擎值仍在
+        # 回退环节进入尽调队列
+        assert any(item["index"] == 0 for item in result.due_diligence_queue)
+
+    def test_quantitative_irrelevant_metrics_marked_due_diligence(
+        self, target, quote, texts
+    ):
+        """缺口①：LLM 判断指标与条件无关 → 转尽调而非强行给 supports"""
+        fake = FakeLLMClient(n_links=3, quant_irrelevant=True)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        q_ev = result.projection.evidence_chain[0]
+        assert q_ev.needs_due_diligence is True
+        assert q_ev.supports is False
+        assert q_ev.confidence == "低"
+        assert any(item["index"] == 0 for item in result.due_diligence_queue)
+
     def test_due_diligence_link_queued_without_fabrication(self, target, quote, texts):
         result = _pipeline().run(target, quote=quote, texts=texts)
         assert len(result.due_diligence_queue) >= 1
