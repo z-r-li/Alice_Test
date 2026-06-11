@@ -321,6 +321,11 @@ class AliceTestPipeline:
             audit_date=raw_data.date,
         )
 
+        # 数据摄入降级（如行情全失败时的占位 price_close=0.0）必须传播到结果状态，
+        # 否则基于占位数据的运行会被统计与落盘为 status="ok"
+        if raw_data.status != "ok":
+            result.status = "data_error"
+
         # P1: 附带多阶段流水线产物引用（向后兼容字段，不影响原 CSV 14 列）
         if pipeline_result is not None:
             result.artifact_dir = pipeline_result.artifact_dir

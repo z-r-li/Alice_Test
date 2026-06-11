@@ -30,6 +30,17 @@ class _FakeQuotesProvider:
         return True
 
 
+class _FailingQuotesProvider:
+    def get_quote(self, ticker, date=None):
+        raise RuntimeError("all quote sources down")
+
+    def get_historical_quotes(self, ticker, start_date, end_date):
+        return []
+
+    def is_market_supported(self, ticker):
+        return True
+
+
 def _make_pipeline(monkeypatch, tmp_path, *, pipeline_enabled=True):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     from src.main import AliceTestPipeline
@@ -93,6 +104,18 @@ class TestMainPipelineWiring:
             rows = list(_csv.reader(f))
         assert rows[0] == CSVReportWriter.CSV_COLUMNS
         assert len(rows[0]) == 14  # 原始列数不变
+
+    def test_quote_failure_propagates_data_error_status(self, monkeypatch, tmp_path):
+        # 行情全失败 → 占位 price_close=0.0 继续分析，但结果状态必须是 data_error，
+        # 不得被统计/落盘为 ok（运行摘要计为 ✗、退出码 2）
+        pipeline, config = _make_pipeline(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            pipeline, "_select_quotes_provider",
+            lambda ticker: _FailingQuotesProvider(),
+        )
+        result = pipeline._process_single_target(config.targets[0])
+        assert result.status == "data_error"
+        assert result.price == 0.0  # 占位价格如实保留
 
     def test_pipeline_disabled_falls_back_to_projector(self, monkeypatch, tmp_path):
         pipeline, config = _make_pipeline(monkeypatch, tmp_path, pipeline_enabled=False)
