@@ -24,6 +24,7 @@ from .announcement_fetcher import AnnouncementFetcher
 from .cls_news_fetcher import CLSNewsFetcher
 from .cninfo_irm_fetcher import CNInfoIRMFetcher
 from .news_fetcher import NewsFetcher
+from .profit_forecast_fetcher import ProfitForecastFetcher
 from .rating_change_fetcher import RatingChangeFetcher
 from .research_fetcher import ResearchFetcher
 from .sse_interactive_fetcher import SSEInteractiveFetcher
@@ -70,6 +71,7 @@ class AShareTextCoordinator(TextProvider):
         "news": 3,
         "announcement": 2,
         "cls": 2,
+        "forecast": 3,  # #65 新增可达源（盈利预测一致预期）
     }
 
     # 数据源优先级（数值越大越靠前）
@@ -123,6 +125,7 @@ class AShareTextCoordinator(TextProvider):
         self._rating_fetcher = RatingChangeFetcher()
         self._announcement_fetcher = AnnouncementFetcher()  # #65/#66
         self._cls_fetcher = CLSNewsFetcher()  # #65/#66
+        self._forecast_fetcher = ProfitForecastFetcher()  # #65 盈利预测一致预期
 
         # 统计信息
         self._fetch_stats: dict[str, dict[str, int]] = {
@@ -132,6 +135,7 @@ class AShareTextCoordinator(TextProvider):
             "news": {"success": 0, "failure": 0},
             "announcement": {"success": 0, "failure": 0},
             "cls": {"success": 0, "failure": 0},
+            "forecast": {"success": 0, "failure": 0},
         }
 
         # 最近一次 fetch_texts 的素材覆盖度元数据（#65 / §五 #9），经 get_last_coverage() 取用
@@ -191,6 +195,7 @@ class AShareTextCoordinator(TextProvider):
             ("irm", self._get_irm_source_name(ticker), irm_fetcher),
             ("rating", "机构评级", self._rating_fetcher),
             ("news", "新闻", None),
+            ("forecast", "盈利预测", self._forecast_fetcher),  # #65 新增可达源
             ("announcement", "公告", self._announcement_fetcher),  # #65/#66
             ("cls", "财联社", self._cls_fetcher),  # #65/#66
         ]
@@ -643,6 +648,7 @@ class AShareTextCoordinator(TextProvider):
             TextSourceType.NEWS,
             TextSourceType.ANNOUNCEMENT,
             TextSourceType.CLS,
+            TextSourceType.FORECAST,
         ]
 
     def get_fetch_stats(self) -> dict[str, dict[str, int]]:

@@ -152,11 +152,13 @@ class AShareTextSourceConfig(BaseModel):
     """
 
     enabled_sources: list[
-        Literal["research", "irm", "rating", "news", "announcement", "cls"]
+        Literal[
+            "research", "irm", "rating", "news", "announcement", "cls", "forecast"
+        ]
     ] = Field(
-        # #65/#66：默认扩充「公告 / 财联社」两个源，缓解「信息不足以形成 consensus」
+        # #65/#66：默认扩充「公告 / 财联社」；#65：再加「盈利预测」(可达，喂 implied_growth)
         default_factory=lambda: [
-            "research", "irm", "rating", "news", "announcement", "cls"
+            "research", "irm", "rating", "news", "announcement", "cls", "forecast"
         ],
         description="启用的数据源列表",
     )
@@ -169,6 +171,7 @@ class AShareTextSourceConfig(BaseModel):
             "news": 3,
             "announcement": 2,
             "cls": 2,
+            "forecast": 3,
         },
         description="各数据源的配额权重",
     )

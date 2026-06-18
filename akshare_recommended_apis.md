@@ -11,8 +11,9 @@
 | 3 | `stock_irm_cninfo` | 互动易 | ⭐⭐⭐ | ✅ 已实现 | 深市投资者提问 |
 | 4 | `stock_irm_ans_cninfo` | 互动易 | ⭐⭐⭐ | ✅ 已实现 | 深市公司回答 |
 | 5 | `stock_sns_sseinfo` | 互动易 | ⭐⭐⭐ | ✅ 已实现 | 沪市问答合一 |
-| 6 | `stock_institute_recommend` | 机构 | ⭐⭐⭐ | 🔲 可选 | 机构推荐汇总 |
+| 6 | `stock_institute_recommend` | 机构 | ⭐⭐⭐ | 🔲 可选 | 机构推荐汇总（市场级，非个股） |
 | 7 | `stock_institute_recommend_detail` | 机构 | ⭐⭐⭐ | ✅ 已实现 | 评级变动记录 |
+| 8 | `stock_profit_forecast_em` | 盈利预测 | ⭐⭐⭐ | ✅ 已实现 | #65：个股机构一致盈利预测（datacenter.eastmoney，喂 implied_growth）|
 
 ## 实现说明
 
@@ -42,6 +43,14 @@
 
 - **实现文件**: `src/data_ingestion/text/a_share/rating_change_fetcher.py`
 - **功能**: 获取机构评级变动记录，生成评级变化摘要
+
+### 机构盈利预测 (`stock_profit_forecast_em`) — #65 新增
+
+- **实现文件**: `src/data_ingestion/text/a_share/profit_forecast_fetcher.py`
+- **功能**: 获取个股机构一致盈利预测（forward EPS / 净利润 / 评级），作为 sentiment /
+  implied_growth 的共识素材；走 datacenter.eastmoney（本网络可达）。盈利预测属「当前一致预期」，
+  按报告日期取最新若干条、不做 48h 硬过滤；列名宽松匹配，任何失败优雅降级为空列表。
+- **可达性**: REACHABLE（协调器 `SOURCE_REACHABILITY`）。symbol 形如 `SH601985` / `SZ000001`。
 
 ## 数据协调器
 

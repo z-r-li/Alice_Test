@@ -14,6 +14,10 @@ from src.data_ingestion.models import TextItem
 from src.data_ingestion.text.a_share.announcement_fetcher import AnnouncementFetcher
 from src.data_ingestion.text.a_share.cls_news_fetcher import CLSNewsFetcher
 from src.data_ingestion.text.a_share.coordinator import AShareTextCoordinator
+from src.data_ingestion.text.a_share.profit_forecast_fetcher import (
+    ProfitForecastFetcher,
+)
+from src.data_ingestion.text.models import SourceReachability
 
 
 def _dt(hours_ago: int) -> str:
@@ -107,6 +111,92 @@ class TestCLSNewsFetcher:
         _patch_ak(monkeypatch, "stock_info_global_cls", hang)
         monkeypatch.setattr(CLSNewsFetcher, "FETCH_TIMEOUT_S", 0.1)
         assert CLSNewsFetcher().fetch_texts("601985.SH", "中国核电") == []
+
+
+class TestProfitForecastFetcher:
+    """#65：东财机构盈利预测获取器（可达，喂 implied_growth 素材）。"""
+
+    def test_parses_forecast_rows(self, monkeypatch):
+        df = pd.DataFrame({
+            "机构": ["中信证券", "华泰证券"],
+            "研究员": ["张三", "李四"],
+            "报告日期": [
+                (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d"),
+                (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d"),
+            ],
+            "评级": ["买入", "增持"],
+            "2025预测每股收益": ["0.45", "0.50"],
+            "2026预测每股收益": ["0.55", "0.62"],
+        })
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", lambda **k: df)
+        items = ProfitForecastFetcher().fetch_texts(
+            "601985.SH", "中国核电", lookback_hours=48, max_items=10
+        )
+        assert len(items) == 2
+        assert all(i.source == "东财盈利预测" and i.type == "research" for i in items)
+        # 不做 48h 硬过滤：盈利预测是一致预期，>48h 仍保留
+        assert items[0].published_at >= items[1].published_at  # 倒序，最新在前
+        assert "中信证券" in items[0].title or "中信证券" in items[0].summary
+        assert "2025预测每股收益" in items[0].summary
+        # 评级不带「评级:」冒号写法（避免被协调器误判为评级变动）
+        assert "评级:" not in items[0].summary
+
+    def test_em_symbol_format(self):
+        assert ProfitForecastFetcher._em_symbol("601985.SH") == "SH601985"
+        assert ProfitForecastFetcher._em_symbol("000001.SZ") == "SZ000001"
+
+    def test_filters_market_wide_table_to_target(self, monkeypatch):
+        df = pd.DataFrame({
+            "股票代码": ["601985", "600000"],
+            "股票简称": ["中国核电", "浦发银行"],
+            "机构": ["甲", "乙"],
+            "2025预测净利润": ["100", "200"],
+        })
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", lambda **k: df)
+        items = ProfitForecastFetcher().fetch_texts("601985.SH", "中国核电")
+        assert len(items) == 1  # 仅保留本标的，避免串标的
+        assert "甲" in items[0].summary
+
+    def test_non_a_share_returns_empty(self):
+        assert ProfitForecastFetcher().fetch_texts("AAPL", "Apple") == []
+
+    def test_graceful_failure_returns_empty(self, monkeypatch):
+        def boom(**k):
+            raise RuntimeError("forecast endpoint down")
+
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", boom)
+        assert ProfitForecastFetcher().fetch_texts("601985.SH", "中国核电") == []
+
+    def test_empty_df_returns_empty(self, monkeypatch):
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", lambda **k: pd.DataFrame())
+        assert ProfitForecastFetcher().fetch_texts("601985.SH", "中国核电") == []
+
+
+class TestCoordinatorForecastSource:
+    """#65：协调器接入盈利预测源（可达、计入覆盖度）。"""
+
+    def test_default_config_enables_forecast(self):
+        cfg = AShareTextSourceConfig()
+        assert "forecast" in cfg.enabled_sources
+        assert cfg.quota_weights["forecast"] == 3
+
+    def test_forecast_aggregated_and_marked_reachable(self, monkeypatch):
+        cfg = AShareTextSourceConfig(
+            enabled_sources=["forecast"], quota_weights={"forecast": 3}
+        )
+        coord = AShareTextCoordinator(config=cfg)
+        fc = TextItem(source="东财盈利预测", type="research", title="盈利预测 · 中信",
+                      summary="机构 中信｜预测评级 买入", published_at=datetime.now(),
+                      url=None)
+        monkeypatch.setattr(coord._forecast_fetcher, "fetch_texts", lambda **k: [fc])
+
+        items = coord.fetch_texts("601985.SH", "中国核电", max_items=10)
+        assert any(i.source == "东财盈利预测" for i in items)
+        cov = coord.get_last_coverage()
+        assert "forecast" in cov.covered_sources
+        frow = next(c for c in cov.per_source if c.source == "forecast")
+        assert frow.reachability == SourceReachability.REACHABLE
+        assert frow.attempted is True and frow.hit_count == 1
 
 
 class TestCoordinatorNewSources:
