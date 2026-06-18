@@ -181,6 +181,15 @@ class AShareTextSourceConfig(BaseModel):
         ),
     )
 
+    skip_unreachable_sources: bool = Field(
+        default=True,
+        description=(
+            "#65：本部署网络不可达的源（sina/cninfo/push2his 系，如公告/深市互动易）"
+            "静默跳过并计入「未覆盖」，避免无谓超时/挂起。部署到可达网络的 P2 机器时设 False "
+            "以尝试全部源。"
+        ),
+    )
+
 
 class BrowsingConfig(BaseModel):
     """

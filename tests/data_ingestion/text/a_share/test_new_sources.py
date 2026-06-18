@@ -124,9 +124,11 @@ class TestCoordinatorNewSources:
         assert "cls" in quotas and quotas["cls"] > 0
 
     def test_lookback_override_applied(self, monkeypatch):
+        # 公告(cninfo)在 #65 reachability 下被判不可达；本测验证 lookback 透传机制，
+        # 故关掉「不可达跳过」让其照常抓取（等价 P2 可达机器路径）。
         cfg = AShareTextSourceConfig(
             enabled_sources=["announcement"], quota_weights={"announcement": 1},
-            lookback_hours=336,
+            lookback_hours=336, skip_unreachable_sources=False,
         )
         coord = AShareTextCoordinator(config=cfg)
         captured = {}
@@ -140,9 +142,12 @@ class TestCoordinatorNewSources:
         assert captured["lookback_hours"] == 336  # 配置覆盖了传入的 48
 
     def test_aggregates_new_source_items(self, monkeypatch):
+        # 验证协调器能聚合新源的 items；公告(cninfo)默认被判不可达跳过，
+        # 这里关掉跳过以测「两源都被聚合」的机制（P2 可达机器路径）。
         cfg = AShareTextSourceConfig(
             enabled_sources=["announcement", "cls"],
             quota_weights={"announcement": 1, "cls": 1},
+            skip_unreachable_sources=False,
         )
         coord = AShareTextCoordinator(config=cfg)
         ann = TextItem(source="巨潮公告", type="news", title="公告A",
