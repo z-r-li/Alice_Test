@@ -856,6 +856,38 @@ class TestCoverageMetadata:
         assert "research" in cov.uncovered_sources
         assert cov.total_items == len(results)
 
+    def test_coverage_reset_on_non_a_share(
+        self, coordinator: AShareTextCoordinator, mock_news_data
+    ):
+        """非 A 股早退要清空 last_coverage，避免 get_last_coverage() 返回上一标的的陈旧值。"""
+        mock_akshare.stock_news_em.return_value = mock_news_data
+        coordinator.fetch_texts("601985.SH", "中国核电", max_items=10)
+        assert coordinator.get_last_coverage() is not None
+        coordinator.fetch_texts("0700.HK", "腾讯控股", max_items=10)  # 非 A 股
+        assert coordinator.get_last_coverage() is None
+
+    def test_fetch_result_failure_recorded_as_failed_not_empty(self):
+        """研报/新闻 FetchResult.success=False（内部已捕获的失败）→ 覆盖度记 failed 而非 empty。"""
+        config = AShareTextSourceConfig(
+            enabled_sources=["research", "news"],
+            quota_weights={"research": 4, "news": 6},
+        )
+        coordinator = AShareTextCoordinator(config=config)
+        now = datetime.now()
+        mock_akshare.stock_research_report_em.side_effect = Exception("研报 API 错误")
+        mock_akshare.stock_news_em.return_value = pd.DataFrame({
+            "发布时间": [(now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")],
+            "新闻标题": ["测试新闻"], "新闻内容": ["内容"],
+            "文章来源": ["东方财富"], "新闻链接": ["http://x"],
+        })
+        coordinator.fetch_texts("601985.SH", "中国核电", max_items=10)
+        cov = coordinator.get_last_coverage()
+        research = next(c for c in cov.per_source if c.source == "research")
+        news = next(c for c in cov.per_source if c.source == "news")
+        assert research.status == "failed"  # 失败被如实标 failed
+        assert research.attempted is True and research.hit_count == 0
+        assert news.status == "ok"
+
     def test_thin_coverage_marked_when_all_empty(self):
         """所有源为空 → 覆盖度标过薄降级，且不崩。"""
         config = AShareTextSourceConfig(
@@ -894,6 +926,18 @@ class TestTextCoverageModel:
         assert set(cov.uncovered_sources) == {"research", "announcement"}
         assert cov.is_thin is False  # 3 >= 阈值 3
         assert cov.thin_reason is None
+
+    def test_build_excludes_no_quota_from_uncovered(self):
+        """no_quota（未分到配额、未抓取）不算未覆盖——它是配额产物，非覆盖缺口。"""
+        rows = [
+            TextSourceCoverage(source="news", reachability=SourceReachability.REACHABLE,
+                               attempted=True, hit_count=2, status="ok"),
+            TextSourceCoverage(source="cls", reachability=SourceReachability.UNCERTAIN,
+                               attempted=False, hit_count=0, status="no_quota"),
+        ]
+        cov = TextCoverage.build(ticker="X", per_source=rows, total_items=2)
+        assert cov.covered_sources == ["news"]
+        assert "cls" not in cov.uncovered_sources
 
     def test_build_thin_reason_lists_skipped_and_failed(self):
         rows = [

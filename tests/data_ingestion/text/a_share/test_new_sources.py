@@ -173,6 +173,19 @@ class TestProfitForecastFetcher:
         assert len(items) == 1  # 仅保留本标的，避免串标的
         assert "甲" in items[0].summary
 
+    def test_filter_code_authoritative_ignores_name_substring(self, monkeypatch):
+        """代码列权威：精确匹配代码，名称子串（如「中国核电」⊂「中国核电建」）不串入。"""
+        df = pd.DataFrame({
+            "代码": ["601985", "601986"],
+            "名称": ["中国核电", "中国核电建"],  # 第二行名称含目标名作为子串
+            "机构": ["甲", "乙"],
+            "2025预测每股收益": ["1", "2"],
+        })
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", lambda **k: df)
+        items = ProfitForecastFetcher().fetch_texts("601985.SH", "中国核电")
+        assert len(items) == 1  # 仅精确代码匹配，不被名称子串串标的
+        assert "甲" in items[0].summary
+
     def test_non_a_share_returns_empty(self):
         assert ProfitForecastFetcher().fetch_texts("AAPL", "Apple") == []
 

@@ -171,6 +171,7 @@ class AShareTextCoordinator(TextProvider):
         # 检查市场支持
         if not self.supports_market(ticker):
             self._logger.warning(f"[{ticker}] 非 A 股，AShareTextCoordinator 不支持")
+            self._last_coverage = None  # 清掉上一标的的覆盖度，避免 get_last_coverage() 返回陈旧值
             return []
 
         # #65/#66：A 股可在配置中设置更长回溯窗口（缓解 48h 太短、信息不足）
@@ -453,26 +454,24 @@ class AShareTextCoordinator(TextProvider):
             return []
 
         try:
-            if source_key == "research":
-                # 研报使用特殊接口
-                result = self._research_fetcher.fetch(
+            if source_key in ("research", "news"):
+                # 研报/新闻走 FetchResult 接口：success=False 是 fetcher 内部已捕获的失败，
+                # 记为 failure（而非 success），让覆盖度能把「失败」与「空」区分开（#65 review）。
+                f = self._research_fetcher if source_key == "research" else self._news_fetcher
+                result = f.fetch(
                     ticker=ticker,
                     symbol=self.extract_symbol(ticker),
                     name=name,
                     lookback_hours=lookback_hours,
                     max_items=quota,
                 )
-                items = result.items if result.success else []
-            elif source_key == "news":
-                # 新闻使用特殊接口
-                result = self._news_fetcher.fetch(
-                    ticker=ticker,
-                    symbol=self.extract_symbol(ticker),
-                    name=name,
-                    lookback_hours=lookback_hours,
-                    max_items=quota,
-                )
-                items = result.items if result.success else []
+                if not result.success:
+                    self._fetch_stats[source_key]["failure"] += 1
+                    self._logger.warning(
+                        f"[{ticker}] {source_name} 获取失败: {result.error_message}"
+                    )
+                    return []
+                items = result.items
             elif fetcher is not None:
                 # 其他数据源使用标准 fetch_texts 接口
                 items = fetcher.fetch_texts(

@@ -190,23 +190,21 @@ class ProfitForecastFetcher(TextProvider):
     def _filter_to_target(
         df: pd.DataFrame, symbol: str, name: str
     ) -> pd.DataFrame:
-        """按「代码/名称」过滤到本标的；含代码/名称列但无命中则返回空（避免串标的）。
+        """按本标的过滤全市场表（向量化）。
 
-        无代码/名称列时（如 per-stock 直查返回），原样返回交由后续解析。
+        代码列权威：精确等于股票代码（代码唯一，避免「同名/含名子串」串标的，#65 review）；
+        无代码列时退回名称子串匹配；两者皆无（如 per-stock 直查返回）则原样返回。
+        含代码/名称列但无命中 → 返回空（避免串标的）。
         """
         code_col = next((c for c in df.columns if str(c) in _CODE_COLS), None)
+        if code_col is not None and symbol:
+            return df[df[code_col].astype(str).str.strip() == symbol]
         name_col = next((c for c in df.columns if str(c) in _NAME_COLS), None)
-        if not code_col and not name_col:
-            return df
-        mask: list[bool] = []
-        for _, row in df.iterrows():
-            ok = False
-            if code_col and symbol and symbol in str(row[code_col]):
-                ok = True
-            if name_col and name and str(name) in str(row[name_col]):
-                ok = True
-            mask.append(ok)
-        return df[pd.Series(mask, index=df.index)]
+        if name_col is not None and name:
+            return df[
+                df[name_col].astype(str).str.contains(str(name), regex=False, na=False)
+            ]
+        return df
 
     def get_source_name(self) -> str:
         return "东财盈利预测"

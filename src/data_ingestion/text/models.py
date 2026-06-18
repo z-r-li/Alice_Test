@@ -94,9 +94,16 @@ class TextCoverage(BaseModel):
         total_items: int,
         thin_threshold: int = 3,
     ) -> "TextCoverage":
-        """从逐源覆盖 + 最终条数构造覆盖度元数据（计算覆盖/未覆盖/过薄标注）。"""
+        """从逐源覆盖 + 最终条数构造覆盖度元数据（计算覆盖/未覆盖/过薄标注）。
+
+        no_quota（启用但本次未分到配额、未发起抓取）不算「未覆盖」——它不是覆盖缺口，
+        而是配额分配的产物；仍保留在 per_source 中供审查。
+        """
         covered = [c.source for c in per_source if c.hit_count > 0]
-        uncovered = [c.source for c in per_source if c.hit_count == 0]
+        uncovered = [
+            c.source for c in per_source
+            if c.hit_count == 0 and c.status != "no_quota"
+        ]
         is_thin = total_items < thin_threshold
         reason: str | None = None
         if is_thin:
