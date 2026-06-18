@@ -22,7 +22,12 @@ import pytest
 from src.config.models import AShareTextSourceConfig
 from src.data_ingestion.models import TextItem
 from src.data_ingestion.text.a_share.coordinator import AShareTextCoordinator
-from src.data_ingestion.text.models import TextSourceType
+from src.data_ingestion.text.models import (
+    SourceReachability,
+    TextCoverage,
+    TextSourceCoverage,
+    TextSourceType,
+)
 
 # akshare 的 MagicMock 占位符。各 fetcher 都是在方法内部惰性 `import akshare`，
 # 因此导入 coordinator 时并不会真正加载 akshare，无需在 import 时注入。
@@ -716,6 +721,246 @@ class TestMiscellaneous:
         assert coordinator.detect_market("000001.SZ") == "a_share"
         assert coordinator.detect_market("0700.HK") == "hk"
         assert coordinator.detect_market("AAPL") == "us"
+
+
+class TestReachabilityClassification:
+    """#65：各源在本网络下的可达性分类。"""
+
+    def test_reachable_eastmoney_sources(self, coordinator: AShareTextCoordinator):
+        for src in ("research", "news", "rating", "forecast"):
+            assert (
+                coordinator._classify_reachability(src, "601985.SH")
+                == SourceReachability.REACHABLE
+            )
+
+    def test_unreachable_cninfo_announcement(self, coordinator: AShareTextCoordinator):
+        assert (
+            coordinator._classify_reachability("announcement", "601985.SH")
+            == SourceReachability.UNREACHABLE
+        )
+
+    def test_uncertain_cls(self, coordinator: AShareTextCoordinator):
+        assert (
+            coordinator._classify_reachability("cls", "601985.SH")
+            == SourceReachability.UNCERTAIN
+        )
+
+    def test_irm_market_dependent(self, coordinator: AShareTextCoordinator):
+        # 沪市走上证 e互动（可达）；深市走巨潮 IRM（cninfo 不可达）
+        assert (
+            coordinator._classify_reachability("irm", "601985.SH")
+            == SourceReachability.REACHABLE
+        )
+        assert (
+            coordinator._classify_reachability("irm", "000001.SZ")
+            == SourceReachability.UNREACHABLE
+        )
+
+
+class TestCoverageMetadata:
+    """#65 / §五 #9：素材覆盖度元数据 + 不可达源静默跳过。"""
+
+    def test_coverage_none_before_fetch(self, coordinator: AShareTextCoordinator):
+        assert coordinator.get_last_coverage() is None
+
+    def test_coverage_recorded_with_per_source_and_total(
+        self, coordinator: AShareTextCoordinator, mock_news_data, mock_rating_data,
+        mock_sse_qa_data,
+    ):
+        mock_akshare.stock_research_report_em.return_value = pd.DataFrame()  # 空
+        mock_akshare.stock_news_em.return_value = mock_news_data
+        mock_akshare.stock_sns_sseinfo.return_value = mock_sse_qa_data
+        mock_akshare.stock_institute_recommend_detail.return_value = mock_rating_data
+
+        results = coordinator.fetch_texts(
+            ticker="601985.SH", name="中国核电", lookback_hours=48, max_items=10,
+        )
+        cov = coordinator.get_last_coverage()
+        assert isinstance(cov, TextCoverage)
+        assert cov.ticker == "601985.SH"
+        assert cov.total_items == len(results)
+        # 启用的 4 个源都有覆盖记录
+        recorded = {c.source for c in cov.per_source}
+        assert {"research", "irm", "rating", "news"} <= recorded
+        # news/rating/irm 命中，research 空
+        assert "news" in cov.covered_sources
+        assert "research" in cov.uncovered_sources
+
+    def test_unreachable_source_skipped_silently_and_uncovered(self):
+        """启用公告（cninfo 不可达）→ 静默跳过、不调用其 akshare 接口、计入未覆盖。"""
+        config = AShareTextSourceConfig(
+            enabled_sources=["news", "announcement"],
+            quota_weights={"news": 3, "announcement": 2},
+        )
+        coordinator = AShareTextCoordinator(config=config)
+        now = datetime.now()
+        mock_akshare.stock_news_em.return_value = pd.DataFrame({
+            "发布时间": [(now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")],
+            "新闻标题": ["测试新闻"], "新闻内容": ["内容"],
+            "文章来源": ["东方财富"], "新闻链接": ["http://x.com"],
+        })
+
+        coordinator.fetch_texts(ticker="601985.SH", name="中国核电", max_items=10)
+
+        # 不可达源未被真正抓取（其 akshare 接口未被调用）
+        mock_akshare.stock_zh_a_disclosure_report_cninfo.assert_not_called()
+        cov = coordinator.get_last_coverage()
+        ann = next(c for c in cov.per_source if c.source == "announcement")
+        assert ann.attempted is False
+        assert ann.status == "skipped_unreachable"
+        assert "announcement" in cov.uncovered_sources
+
+    def test_unreachable_attempted_when_skip_disabled(self):
+        """P2 可达机器：skip_unreachable_sources=False → 不可达源也尝试抓取。"""
+        config = AShareTextSourceConfig(
+            enabled_sources=["announcement"],
+            quota_weights={"announcement": 2},
+            skip_unreachable_sources=False,
+        )
+        coordinator = AShareTextCoordinator(config=config)
+        mock_akshare.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
+
+        coordinator.fetch_texts(ticker="601985.SH", name="中国核电", max_items=10)
+
+        mock_akshare.stock_zh_a_disclosure_report_cninfo.assert_called()
+        cov = coordinator.get_last_coverage()
+        ann = next(c for c in cov.per_source if c.source == "announcement")
+        assert ann.attempted is True
+
+    def test_nonempty_consensus_when_some_sources_empty(self):
+        """部分源为空时仍产出非空共识，并在覆盖度中标注命中/未覆盖。"""
+        config = AShareTextSourceConfig(
+            enabled_sources=["research", "news"],
+            quota_weights={"research": 4, "news": 6},
+        )
+        coordinator = AShareTextCoordinator(config=config)
+        now = datetime.now()
+        mock_akshare.stock_research_report_em.return_value = pd.DataFrame()  # 空
+        mock_akshare.stock_news_em.return_value = pd.DataFrame({
+            "发布时间": [
+                (now - timedelta(hours=h)).strftime("%Y-%m-%d %H:%M:%S")
+                for h in (1, 2, 3)
+            ],
+            "新闻标题": ["新闻A", "新闻B", "新闻C"],
+            "新闻内容": ["甲", "乙", "丙"],
+            "文章来源": ["东方财富", "新浪", "凤凰"],
+            "新闻链接": ["http://a", "http://b", "http://c"],
+        })
+
+        results = coordinator.fetch_texts(
+            ticker="601985.SH", name="中国核电", max_items=10
+        )
+        assert len(results) > 0  # 非空共识
+        cov = coordinator.get_last_coverage()
+        assert "news" in cov.covered_sources
+        assert "research" in cov.uncovered_sources
+        assert cov.total_items == len(results)
+
+    def test_coverage_reset_on_non_a_share(
+        self, coordinator: AShareTextCoordinator, mock_news_data
+    ):
+        """非 A 股早退要清空 last_coverage，避免 get_last_coverage() 返回上一标的的陈旧值。"""
+        mock_akshare.stock_news_em.return_value = mock_news_data
+        coordinator.fetch_texts("601985.SH", "中国核电", max_items=10)
+        assert coordinator.get_last_coverage() is not None
+        coordinator.fetch_texts("0700.HK", "腾讯控股", max_items=10)  # 非 A 股
+        assert coordinator.get_last_coverage() is None
+
+    def test_fetch_result_failure_recorded_as_failed_not_empty(self):
+        """研报/新闻 FetchResult.success=False（内部已捕获的失败）→ 覆盖度记 failed 而非 empty。"""
+        config = AShareTextSourceConfig(
+            enabled_sources=["research", "news"],
+            quota_weights={"research": 4, "news": 6},
+        )
+        coordinator = AShareTextCoordinator(config=config)
+        now = datetime.now()
+        mock_akshare.stock_research_report_em.side_effect = Exception("研报 API 错误")
+        mock_akshare.stock_news_em.return_value = pd.DataFrame({
+            "发布时间": [(now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")],
+            "新闻标题": ["测试新闻"], "新闻内容": ["内容"],
+            "文章来源": ["东方财富"], "新闻链接": ["http://x"],
+        })
+        coordinator.fetch_texts("601985.SH", "中国核电", max_items=10)
+        cov = coordinator.get_last_coverage()
+        research = next(c for c in cov.per_source if c.source == "research")
+        news = next(c for c in cov.per_source if c.source == "news")
+        assert research.status == "failed"  # 失败被如实标 failed
+        assert research.attempted is True and research.hit_count == 0
+        assert news.status == "ok"
+
+    def test_thin_coverage_marked_when_all_empty(self):
+        """所有源为空 → 覆盖度标过薄降级，且不崩。"""
+        config = AShareTextSourceConfig(
+            enabled_sources=["research", "news"],
+            quota_weights={"research": 4, "news": 3},
+        )
+        coordinator = AShareTextCoordinator(config=config)
+        mock_akshare.stock_research_report_em.return_value = pd.DataFrame()
+        mock_akshare.stock_news_em.return_value = pd.DataFrame()
+
+        results = coordinator.fetch_texts(
+            ticker="601985.SH", name="中国核电", max_items=10
+        )
+        assert results == []
+        cov = coordinator.get_last_coverage()
+        assert cov.is_thin is True
+        assert cov.thin_reason is not None
+        assert cov.covered_sources == []
+
+
+class TestTextCoverageModel:
+    """#65：TextCoverage.build 覆盖/未覆盖拆分与过薄标注。"""
+
+    def test_build_splits_covered_and_uncovered(self):
+        rows = [
+            TextSourceCoverage(source="news", reachability=SourceReachability.REACHABLE,
+                               attempted=True, hit_count=3, status="ok"),
+            TextSourceCoverage(source="research", reachability=SourceReachability.REACHABLE,
+                               attempted=True, hit_count=0, status="empty"),
+            TextSourceCoverage(source="announcement",
+                               reachability=SourceReachability.UNREACHABLE,
+                               attempted=False, hit_count=0, status="skipped_unreachable"),
+        ]
+        cov = TextCoverage.build(ticker="601985.SH", per_source=rows, total_items=3)
+        assert cov.covered_sources == ["news"]
+        assert set(cov.uncovered_sources) == {"research", "announcement"}
+        assert cov.is_thin is False  # 3 >= 阈值 3
+        assert cov.thin_reason is None
+
+    def test_build_excludes_no_quota_from_uncovered(self):
+        """no_quota（未分到配额、未抓取）不算未覆盖——它是配额产物，非覆盖缺口。"""
+        rows = [
+            TextSourceCoverage(source="news", reachability=SourceReachability.REACHABLE,
+                               attempted=True, hit_count=2, status="ok"),
+            TextSourceCoverage(source="cls", reachability=SourceReachability.UNCERTAIN,
+                               attempted=False, hit_count=0, status="no_quota"),
+        ]
+        cov = TextCoverage.build(ticker="X", per_source=rows, total_items=2)
+        assert cov.covered_sources == ["news"]
+        assert "cls" not in cov.uncovered_sources
+
+    def test_build_thin_reason_lists_skipped_and_failed(self):
+        rows = [
+            TextSourceCoverage(source="research", reachability=SourceReachability.REACHABLE,
+                               attempted=True, hit_count=0, status="failed"),
+            TextSourceCoverage(source="announcement",
+                               reachability=SourceReachability.UNREACHABLE,
+                               attempted=False, hit_count=0, status="skipped_unreachable"),
+        ]
+        cov = TextCoverage.build(ticker="X", per_source=rows, total_items=1)
+        assert cov.is_thin is True
+        assert "research" in cov.thin_reason  # failed 列出
+        assert "announcement" in cov.thin_reason  # skipped 列出
+        assert "1 条" in cov.thin_reason
+
+    def test_build_round_trip_serializable(self):
+        rows = [TextSourceCoverage(source="news",
+                                   reachability=SourceReachability.REACHABLE,
+                                   attempted=True, hit_count=2, status="ok")]
+        cov = TextCoverage.build(ticker="X", per_source=rows, total_items=2)
+        restored = TextCoverage.model_validate_json(cov.model_dump_json())
+        assert restored.total_items == 2
+        assert restored.per_source[0].reachability == SourceReachability.REACHABLE
 
 
 class TestIntegration:

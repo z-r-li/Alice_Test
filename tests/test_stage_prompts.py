@@ -58,6 +58,63 @@ class TestStagePromptFormatting:
         assert "命题X" in user
         assert "条件A" in user and "证伪C" in user
 
+    def test_logic_chain_prompt_mandates_engine_verifiable_driver(self):
+        """#8：S2 系统指令必须强制至少 1 条公司级财务驱动环节，并给出白名单 + 正/反例。"""
+        system, _ = PromptTemplates.format_logic_chain_prompt(
+            ticker="601985.SH",
+            ticker_name="中国核电",
+            proposition="命题X",
+            success_conditions=["条件A"],
+            kill_criteria=["证伪C"],
+            horizon="3-5年",
+        )
+        # 强制驱动要求 + 白名单措辞（与 S3 一致）
+        assert "至少 1 条" in system and "公司级财务驱动项" in system
+        assert "白名单" in system
+        assert "forward PE" in system and "PEG" in system and "毛利率" in system
+        # 正例（白名单内的公司级财务 condition）
+        assert "营收 CAGR" in system or "总营收 CAGR" in system
+        assert "净利率趋势上行" in system
+        assert "经营性现金流持续为正" in system
+        # 反例（越界口径不算驱动）
+        assert any(k in system for k in ("在手订单", "装机", "回购", "分部"))
+        # 因果驱动 / 反循环论证：不得把命题结论或 kill_criteria 当作带权环节
+        assert "循环论证" in system
+        assert "kill_criteria" in system or "证伪条件" in system
+
+    def test_logic_chain_prompt_enforce_driver_appends_retry_instruction(self):
+        """#8：enforce_driver=True（重试路径）在系统指令末尾追加强制驱动指令。"""
+        base, _ = PromptTemplates.format_logic_chain_prompt(
+            ticker="X", ticker_name="N", proposition="P",
+            success_conditions=[], kill_criteria=[], horizon="3y",
+        )
+        retry, _ = PromptTemplates.format_logic_chain_prompt(
+            ticker="X", ticker_name="N", proposition="P",
+            success_conditions=[], kill_criteria=[], horizon="3y",
+            enforce_driver=True,
+        )
+        assert retry != base
+        assert retry.startswith(base)  # 仅在末尾追加，不改原指令
+        assert "重试要求" in retry
+        assert "上一轮" in retry and "白名单" in retry
+        assert "务必确保至少 1 条" in retry
+
+    def test_synthesis_prompt_no_anchor_note_forces_explicit_caveat(self):
+        """#8：no_quantitative_anchor=True 时 S5 USER 前置「无定量锚」约束，逼 S5 显式说明。"""
+        items = [{"statement": "环节1", "supports": False, "confidence": "低",
+                  "finding": "无法判断"}]
+        _, user_plain = PromptTemplates.format_synthesis_prompt(
+            ticker="X", ticker_name="N", proposition="P", evidence_items=items,
+        )
+        _, user_flagged = PromptTemplates.format_synthesis_prompt(
+            ticker="X", ticker_name="N", proposition="P", evidence_items=items,
+            no_quantitative_anchor=True,
+        )
+        assert "无可验证驱动" not in user_plain  # 默认不污染
+        assert "无可验证驱动" in user_flagged
+        assert "无定量锚" in user_flagged
+        assert "环节1" in user_flagged  # 原证据块仍在
+
     def test_proxy_prompt_renders_links_block(self):
         links = [
             {"statement": "上游成本可控", "weight": 0.3, "condition": "铀价稳定"},
@@ -208,6 +265,20 @@ class TestFakeLLMClient:
         with pytest.raises(RuntimeError):
             fake.get_logic_chain("X", "N", "p", [], [], "3y")
         assert "get_refined_thesis" in fake.calls
+
+    def test_fake_logic_chain_records_enforce_driver(self):
+        """#8：FakeLLMClient.get_logic_chain 接受并记录 enforce_driver（重试路径用）。"""
+        fake = FakeLLMClient(n_links=3)
+        fake.get_logic_chain("X", "N", "p", [], [], "3y")
+        fake.get_logic_chain("X", "N", "p", [], [], "3y", enforce_driver=True)
+        assert fake.logic_chain_calls == [False, True]
+        assert fake._driver_enforced is True
+
+    def test_fake_synthesis_records_no_anchor_flag(self):
+        """#8：FakeLLMClient.get_thesis_synthesis 接受并记录 no_quantitative_anchor。"""
+        fake = FakeLLMClient()
+        fake.get_thesis_synthesis("X", "N", "P", [], no_quantitative_anchor=True)
+        assert fake.last_synthesis_no_anchor is True
 
 
 class TestClientStageMethodsExist:

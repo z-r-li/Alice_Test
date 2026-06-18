@@ -152,11 +152,13 @@ class AShareTextSourceConfig(BaseModel):
     """
 
     enabled_sources: list[
-        Literal["research", "irm", "rating", "news", "announcement", "cls"]
+        Literal[
+            "research", "irm", "rating", "news", "announcement", "cls", "forecast"
+        ]
     ] = Field(
-        # #65/#66：默认扩充「公告 / 财联社」两个源，缓解「信息不足以形成 consensus」
+        # #65/#66：默认扩充「公告 / 财联社」；#65：再加「盈利预测」(可达，喂 implied_growth)
         default_factory=lambda: [
-            "research", "irm", "rating", "news", "announcement", "cls"
+            "research", "irm", "rating", "news", "announcement", "cls", "forecast"
         ],
         description="启用的数据源列表",
     )
@@ -169,6 +171,7 @@ class AShareTextSourceConfig(BaseModel):
             "news": 3,
             "announcement": 2,
             "cls": 2,
+            "forecast": 3,
         },
         description="各数据源的配额权重",
     )
@@ -178,6 +181,15 @@ class AShareTextSourceConfig(BaseModel):
         description=(
             "A 股文本回溯窗口覆盖（小时）；None 时沿用调用方/爬虫配置传入值。"
             "#65/#66：48h 常因太短信息不足，可调长（如 168 / 336）。"
+        ),
+    )
+
+    skip_unreachable_sources: bool = Field(
+        default=True,
+        description=(
+            "#65：本部署网络不可达的源（sina/cninfo/push2his 系，如公告/深市互动易）"
+            "静默跳过并计入「未覆盖」，避免无谓超时/挂起。部署到可达网络的 P2 机器时设 False "
+            "以尝试全部源。"
         ),
     )
 

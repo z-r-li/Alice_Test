@@ -512,8 +512,13 @@ class DeepSeekClient:
         success_conditions: list[str],
         kill_criteria: list[str],
         horizon: str,
+        enforce_driver: bool = False,
     ) -> LogicChain:
-        """S2：把命题拆解为因果逻辑链路"""
+        """S2：把命题拆解为因果逻辑链路。
+
+        enforce_driver=True 为流水线重试路径：上轮链路无任何引擎可验证驱动环节，
+        本次在系统指令末尾追加强驱动要求，逼出 ≥1 条白名单内的公司级财务驱动 condition。
+        """
         system, user = PromptTemplates.format_logic_chain_prompt(
             ticker=ticker,
             ticker_name=ticker_name,
@@ -521,6 +526,7 @@ class DeepSeekClient:
             success_conditions=success_conditions,
             kill_criteria=kill_criteria,
             horizon=horizon,
+            enforce_driver=enforce_driver,
         )
         return self.chat_with_json_output(system, user, LogicChain)
 
@@ -578,13 +584,19 @@ class DeepSeekClient:
         ticker_name: str,
         proposition: str,
         evidence_items: list[dict],
+        no_quantitative_anchor: bool = False,
     ) -> ThesisProjection:
-        """S5：把逐环节证据综合映射回命题（可选思考模式，同 Module B 配置）"""
+        """S5：把逐环节证据综合映射回命题（可选思考模式，同 Module B 配置）。
+
+        no_quantitative_anchor=True 时（thesis 经重试仍无引擎可验证驱动），把「无定量锚」
+        约束前置进 USER 消息，强制 S5 显式说明 our_growth 受限于 thesis 无可验证驱动。
+        """
         system, user = PromptTemplates.format_synthesis_prompt(
             ticker=ticker,
             ticker_name=ticker_name,
             proposition=proposition,
             evidence_items=evidence_items,
+            no_quantitative_anchor=no_quantitative_anchor,
         )
         return self.chat_with_json_output(
             system, user, ThesisProjection, use_thinking=self._thinking_enabled

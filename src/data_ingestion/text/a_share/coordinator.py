@@ -14,11 +14,17 @@ from typing import TYPE_CHECKING
 from ....config.models import AShareTextSourceConfig
 from ...models import TextItem
 from ..base import TextProvider
-from ..models import TextSourceType
+from ..models import (
+    SourceReachability,
+    TextCoverage,
+    TextSourceCoverage,
+    TextSourceType,
+)
 from .announcement_fetcher import AnnouncementFetcher
 from .cls_news_fetcher import CLSNewsFetcher
 from .cninfo_irm_fetcher import CNInfoIRMFetcher
 from .news_fetcher import NewsFetcher
+from .profit_forecast_fetcher import ProfitForecastFetcher
 from .rating_change_fetcher import RatingChangeFetcher
 from .research_fetcher import ResearchFetcher
 from .sse_interactive_fetcher import SSEInteractiveFetcher
@@ -65,6 +71,7 @@ class AShareTextCoordinator(TextProvider):
         "news": 3,
         "announcement": 2,
         "cls": 2,
+        "forecast": 3,  # #65 新增可达源（盈利预测一致预期）
     }
 
     # 数据源优先级（数值越大越靠前）
@@ -76,6 +83,21 @@ class AShareTextCoordinator(TextProvider):
         "announcement": 1,
         "cls": 1,
     }
+
+    # 各源在本部署网络下的可达性（#65）。host 静态分类：
+    # datacenter.eastmoney / akshare 系可达；cninfo 系不可达；财联社挂起风险高归 uncertain。
+    # irm 例外（市场相关）：沪市走上证 e互动（可达）、深市走巨潮 IRM（cninfo 不可达），见 _classify_reachability。
+    SOURCE_REACHABILITY: dict[str, SourceReachability] = {
+        "research": SourceReachability.REACHABLE,   # stock_research_report_em
+        "news": SourceReachability.REACHABLE,       # stock_news_em
+        "rating": SourceReachability.REACHABLE,     # stock_institute_recommend_detail
+        "forecast": SourceReachability.REACHABLE,   # stock_profit_forecast_em（#65 新增源）
+        "announcement": SourceReachability.UNREACHABLE,  # stock_zh_a_disclosure_report_cninfo
+        "cls": SourceReachability.UNCERTAIN,        # 财联社（挂起风险高，有 30s 超时护栏）
+    }
+
+    # 素材过薄阈值（最终条数 < 此值时覆盖度元数据标降级）
+    THIN_COVERAGE_THRESHOLD: int = 3
 
     # 标题相似度阈值（超过此值视为重复）
     TITLE_SIMILARITY_THRESHOLD: float = 0.8
@@ -103,6 +125,7 @@ class AShareTextCoordinator(TextProvider):
         self._rating_fetcher = RatingChangeFetcher()
         self._announcement_fetcher = AnnouncementFetcher()  # #65/#66
         self._cls_fetcher = CLSNewsFetcher()  # #65/#66
+        self._forecast_fetcher = ProfitForecastFetcher()  # #65 盈利预测一致预期
 
         # 统计信息
         self._fetch_stats: dict[str, dict[str, int]] = {
@@ -112,7 +135,11 @@ class AShareTextCoordinator(TextProvider):
             "news": {"success": 0, "failure": 0},
             "announcement": {"success": 0, "failure": 0},
             "cls": {"success": 0, "failure": 0},
+            "forecast": {"success": 0, "failure": 0},
         }
+
+        # 最近一次 fetch_texts 的素材覆盖度元数据（#65 / §五 #9），经 get_last_coverage() 取用
+        self._last_coverage: TextCoverage | None = None
 
     def fetch_texts(
         self,
@@ -144,6 +171,7 @@ class AShareTextCoordinator(TextProvider):
         # 检查市场支持
         if not self.supports_market(ticker):
             self._logger.warning(f"[{ticker}] 非 A 股，AShareTextCoordinator 不支持")
+            self._last_coverage = None  # 清掉上一标的的覆盖度，避免 get_last_coverage() 返回陈旧值
             return []
 
         # #65/#66：A 股可在配置中设置更长回溯窗口（缓解 48h 太短、信息不足）
@@ -156,98 +184,61 @@ class AShareTextCoordinator(TextProvider):
 
         all_items: list[TextItem] = []
         quotas = self._calculate_quotas(max_items)
+        coverage_rows: list[TextSourceCoverage] = []
 
         self._logger.debug(f"[{ticker}] 配额分配: {quotas}")
 
-        # 1. 研报
-        if self._is_source_enabled("research"):
-            items = self._fetch_with_fallback(
-                fetcher=None,  # 使用特殊处理
-                source_name="研报",
-                source_key="research",
-                ticker=ticker,
-                name=name,
-                quota=quotas.get("research", 0),
-                lookback_hours=lookback_hours,
+        # 各源规格：(source_key, 显示名, fetcher)。research / news 走特殊接口（fetcher=None，
+        # 由 _fetch_with_fallback 按 source_key 分派）；irm 按市场动态选择 fetcher。
+        irm_fetcher = self._get_irm_fetcher(ticker)
+        source_specs = [
+            ("research", "研报", None),
+            ("irm", self._get_irm_source_name(ticker), irm_fetcher),
+            ("rating", "机构评级", self._rating_fetcher),
+            ("news", "新闻", None),
+            ("forecast", "盈利预测", self._forecast_fetcher),  # #65 新增可达源
+            ("announcement", "公告", self._announcement_fetcher),  # #65/#66
+            ("cls", "财联社", self._cls_fetcher),  # #65/#66
+        ]
+        for source_key, source_name, fetcher in source_specs:
+            if not self._is_source_enabled(source_key):
+                continue
+            all_items.extend(
+                self._collect(
+                    source_key=source_key,
+                    source_name=source_name,
+                    fetcher=fetcher,
+                    ticker=ticker,
+                    name=name,
+                    quota=quotas.get(source_key, 0),
+                    lookback_hours=lookback_hours,
+                    coverage_rows=coverage_rows,
+                )
             )
-            all_items.extend(items)
-
-        # 2. 互动易（根据市场选择）
-        if self._is_source_enabled("irm"):
-            irm_fetcher = self._get_irm_fetcher(ticker)
-            irm_source_name = self._get_irm_source_name(ticker)
-            items = self._fetch_with_fallback(
-                fetcher=irm_fetcher,
-                source_name=irm_source_name,
-                source_key="irm",
-                ticker=ticker,
-                name=name,
-                quota=quotas.get("irm", 0),
-                lookback_hours=lookback_hours,
-            )
-            all_items.extend(items)
-
-        # 3. 机构评级
-        if self._is_source_enabled("rating"):
-            items = self._fetch_with_fallback(
-                fetcher=self._rating_fetcher,
-                source_name="机构评级",
-                source_key="rating",
-                ticker=ticker,
-                name=name,
-                quota=quotas.get("rating", 0),
-                lookback_hours=lookback_hours,
-            )
-            all_items.extend(items)
-
-        # 4. 新闻
-        if self._is_source_enabled("news"):
-            items = self._fetch_with_fallback(
-                fetcher=None,  # 使用特殊处理
-                source_name="新闻",
-                source_key="news",
-                ticker=ticker,
-                name=name,
-                quota=quotas.get("news", 0),
-                lookback_hours=lookback_hours,
-            )
-            all_items.extend(items)
-
-        # 5. 公告（巨潮资讯）— #65/#66 新增
-        if self._is_source_enabled("announcement"):
-            items = self._fetch_with_fallback(
-                fetcher=self._announcement_fetcher,
-                source_name="公告",
-                source_key="announcement",
-                ticker=ticker,
-                name=name,
-                quota=quotas.get("announcement", 0),
-                lookback_hours=lookback_hours,
-            )
-            all_items.extend(items)
-
-        # 6. 财联社电报 — #65/#66 新增
-        if self._is_source_enabled("cls"):
-            items = self._fetch_with_fallback(
-                fetcher=self._cls_fetcher,
-                source_name="财联社",
-                source_key="cls",
-                ticker=ticker,
-                name=name,
-                quota=quotas.get("cls", 0),
-                lookback_hours=lookback_hours,
-            )
-            all_items.extend(items)
 
         # 去重、排序、截断
         items = self._deduplicate(all_items)
         items = self._sort_by_relevance(items)
         final_items = items[:max_items]
 
-        self._logger.info(
-            f"[{ticker}] 聚合完成: 原始 {len(all_items)} 条, "
-            f"去重后 {len(items)} 条, 最终 {len(final_items)} 条"
+        # #65 / §五 #9：记录素材覆盖度元数据（各源命中条数 + 总覆盖度 + 过薄降级标注）
+        self._last_coverage = TextCoverage.build(
+            ticker=ticker,
+            per_source=coverage_rows,
+            total_items=len(final_items),
+            thin_threshold=self.THIN_COVERAGE_THRESHOLD,
         )
+
+        cov = self._last_coverage
+        msg = (
+            f"[{ticker}] 聚合完成: 原始 {len(all_items)} 条, 去重后 {len(items)} 条, "
+            f"最终 {len(final_items)} 条; 覆盖源 {cov.covered_sources or '无'}, "
+            f"未覆盖 {cov.uncovered_sources or '无'}"
+        )
+        if cov.is_thin:
+            self._logger.warning(f"{msg}; 素材过薄降级: {cov.thin_reason}")
+        else:
+            self._logger.info(msg)
 
         return final_items
 
@@ -364,6 +355,76 @@ class AShareTextCoordinator(TextProvider):
         else:
             return "巨潮互动易"
 
+    def _classify_reachability(self, source_key: str, ticker: str) -> SourceReachability:
+        """该源在本部署网络下的可达性（#65）。irm 按市场区分：沪市可达、深市(cninfo)不可达。"""
+        if source_key == "irm":
+            return (
+                SourceReachability.REACHABLE
+                if ticker.upper().endswith(".SH")
+                else SourceReachability.UNREACHABLE
+            )
+        return self.SOURCE_REACHABILITY.get(source_key, SourceReachability.UNCERTAIN)
+
+    def _skip_unreachable(self) -> bool:
+        """是否对不可达源静默跳过（默认 True；可达网络的 P2 机器可在配置中关掉）。"""
+        return getattr(self._config, "skip_unreachable_sources", True)
+
+    def _collect(
+        self,
+        *,
+        source_key: str,
+        source_name: str,
+        fetcher: TextProvider | None,
+        ticker: str,
+        name: str,
+        quota: int,
+        lookback_hours: int,
+        coverage_rows: list[TextSourceCoverage],
+    ) -> list[TextItem]:
+        """对单个源做「可达性判定 → 抓取 → 记录覆盖度」，返回该源贡献的 items。
+
+        - 配额为 0：不抓取，记 no_quota（不计为不可达）。
+        - 不可达且开启跳过：静默跳过、记 skipped_unreachable（计入未覆盖），绝不阻塞其他源。
+        - 否则正常抓取（_fetch_with_fallback 已吞异常优雅降级），记 ok/empty/failed + 命中条数。
+        """
+        reachability = self._classify_reachability(source_key, ticker)
+
+        if quota <= 0:
+            coverage_rows.append(
+                TextSourceCoverage(
+                    source=source_key, reachability=reachability,
+                    attempted=False, hit_count=0, status="no_quota",
+                )
+            )
+            return []
+
+        if reachability == SourceReachability.UNREACHABLE and self._skip_unreachable():
+            coverage_rows.append(
+                TextSourceCoverage(
+                    source=source_key, reachability=reachability,
+                    attempted=False, hit_count=0, status="skipped_unreachable",
+                )
+            )
+            self._logger.debug(
+                f"[{ticker}] {source_name} 本网络不可达，静默跳过（计入未覆盖）"
+            )
+            return []
+
+        fail_before = self._fetch_stats[source_key]["failure"]
+        items = self._fetch_with_fallback(
+            fetcher=fetcher, source_name=source_name, source_key=source_key,
+            ticker=ticker, name=name, quota=quota, lookback_hours=lookback_hours,
+        )
+        failed = self._fetch_stats[source_key]["failure"] > fail_before
+        status = "failed" if failed else ("ok" if items else "empty")
+        coverage_rows.append(
+            TextSourceCoverage(
+                source=source_key, reachability=reachability,
+                attempted=True, hit_count=len(items), status=status,
+            )
+        )
+        return items
+
     def _fetch_with_fallback(
         self,
         fetcher: TextProvider | None,
@@ -393,26 +454,24 @@ class AShareTextCoordinator(TextProvider):
             return []
 
         try:
-            if source_key == "research":
-                # 研报使用特殊接口
-                result = self._research_fetcher.fetch(
+            if source_key in ("research", "news"):
+                # 研报/新闻走 FetchResult 接口：success=False 是 fetcher 内部已捕获的失败，
+                # 记为 failure（而非 success），让覆盖度能把「失败」与「空」区分开（#65 review）。
+                f = self._research_fetcher if source_key == "research" else self._news_fetcher
+                result = f.fetch(
                     ticker=ticker,
                     symbol=self.extract_symbol(ticker),
                     name=name,
                     lookback_hours=lookback_hours,
                     max_items=quota,
                 )
-                items = result.items if result.success else []
-            elif source_key == "news":
-                # 新闻使用特殊接口
-                result = self._news_fetcher.fetch(
-                    ticker=ticker,
-                    symbol=self.extract_symbol(ticker),
-                    name=name,
-                    lookback_hours=lookback_hours,
-                    max_items=quota,
-                )
-                items = result.items if result.success else []
+                if not result.success:
+                    self._fetch_stats[source_key]["failure"] += 1
+                    self._logger.warning(
+                        f"[{ticker}] {source_name} 获取失败: {result.error_message}"
+                    )
+                    return []
+                items = result.items
             elif fetcher is not None:
                 # 其他数据源使用标准 fetch_texts 接口
                 items = fetcher.fetch_texts(
@@ -588,6 +647,7 @@ class AShareTextCoordinator(TextProvider):
             TextSourceType.NEWS,
             TextSourceType.ANNOUNCEMENT,
             TextSourceType.CLS,
+            TextSourceType.FORECAST,
         ]
 
     def get_fetch_stats(self) -> dict[str, dict[str, int]]:
@@ -598,6 +658,14 @@ class AShareTextCoordinator(TextProvider):
             dict: 各数据源的成功/失败次数
         """
         return self._fetch_stats.copy()
+
+    def get_last_coverage(self) -> TextCoverage | None:
+        """获取最近一次 fetch_texts 的素材覆盖度元数据（#65 / §五 #9）。
+
+        Returns:
+            TextCoverage | None: 各源命中条数 + 总覆盖度 + 过薄降级标注；未跑过则为 None。
+        """
+        return self._last_coverage
 
     def reset_stats(self) -> None:
         """重置统计信息"""

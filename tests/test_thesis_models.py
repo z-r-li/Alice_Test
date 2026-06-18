@@ -250,6 +250,42 @@ class TestThesisProjection:
              "weighted_support": 0.59}
         ).weighted_support == 0.59
 
+    def test_no_quantitative_anchor_defaults_false(self):
+        """#8 向后兼容：旧产物（无 no_quantitative_anchor 字段）默认 False / None。"""
+        legacy_json = (
+            '{"thesis_aligned": true, "our_growth": 0.0, "confidence": "低", '
+            '"reasoning": "证据全部需尽调，给出零增长的保守估计。"}'
+        )
+        tp = ThesisProjection.model_validate_json(legacy_json)
+        assert tp.no_quantitative_anchor is False
+        assert tp.no_anchor_reason is None
+        tp2 = ThesisProjection.from_dict({
+            "thesis_aligned": True, "our_growth": 0.0, "confidence": "低",
+            "reasoning": "证据全部需尽调，给出零增长的保守估计。",
+        })
+        assert tp2.no_quantitative_anchor is False
+        assert tp2.no_anchor_reason is None
+
+    def test_no_quantitative_anchor_round_trip(self):
+        """#8：no_quantitative_anchor + 原因可序列化/反序列化、from_dict 可解析。"""
+        tp = ThesisProjection(
+            thesis_aligned=False, our_growth=0.0, confidence="低",
+            reasoning="thesis 无引擎可验证驱动，our_growth 无定量锚，给出零增长。",
+            no_quantitative_anchor=True,
+            no_anchor_reason="S2 经一次重试后仍无白名单内公司级财务驱动项 (n_quant=0)",
+        )
+        restored = ThesisProjection.model_validate_json(tp.model_dump_json())
+        assert restored.no_quantitative_anchor is True
+        assert "n_quant=0" in restored.no_anchor_reason
+        from_d = ThesisProjection.from_dict({
+            "thesis_aligned": False, "our_growth": 0.0, "confidence": "低",
+            "reasoning": "thesis 无引擎可验证驱动，our_growth 无定量锚，给出零增长。",
+            "no_quantitative_anchor": True,
+            "no_anchor_reason": "S2 经一次重试后仍无白名单内公司级财务驱动项 (n_quant=0)",
+        })
+        assert from_d.no_quantitative_anchor is True
+        assert from_d.no_anchor_reason.startswith("S2 经一次重试")
+
     def test_model_dump_json_round_trip(self):
         """可被 JSON 序列化/反序列化（ArtifactStore 持久化所需）"""
         tp = ThesisProjection(

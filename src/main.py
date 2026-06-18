@@ -382,7 +382,11 @@ class AliceTestPipeline:
         n = len(pr.evidence)
         supported = sum(1 for e in pr.evidence if e.supports)
         dd = len(pr.due_diligence_queue)
-        return f"证据链 {n} 环节（支持 {supported}）；尽调队列 {dd} 项"
+        summary = f"证据链 {n} 环节（支持 {supported}）；尽调队列 {dd} 项"
+        # #8：thesis 无引擎可验证驱动时显式标注 our_growth 无定量锚（受限于 thesis，非数据缺失）
+        if pr.no_quantitative_anchor:
+            summary += "；our_growth 无定量锚（thesis 无引擎可验证驱动，经 S2 重试仍 n_quant=0）"
+        return summary
 
     def _ingest_data(self, target: TargetConfig) -> TickerRawData:
         """
@@ -481,6 +485,14 @@ class AliceTestPipeline:
                     lookback_hours=crawler_config.lookback_hours,
                     max_items=crawler_config.max_items_per_ticker,
                 )
+                # #65 / §五 #9：素材覆盖度元数据可见——过薄时显式降级标注，供共识可信度判断
+                get_cov = getattr(self._text_coordinator, "get_last_coverage", None)
+                cov = get_cov() if callable(get_cov) else None
+                if cov is not None and cov.is_thin:
+                    self._py_logger.warning(
+                        f"[{target.ticker}] A股共识素材覆盖度过薄: {cov.thin_reason}"
+                        f"（覆盖源 {cov.covered_sources or '无'}, 未覆盖 {cov.uncovered_sources}）"
+                    )
             else:
                 # 港美股使用原有工厂方法
                 texts = TextProviderFactory.fetch_texts(

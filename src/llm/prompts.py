@@ -210,9 +210,31 @@ $user_thesis
 # 任务
 把命题拆成 3-6 个因果链路环节 (links)，覆盖：上游供应 / 成本、需求侧、竞争格局定位、
 自身研发 / 资本配置效率、监管 / 政治经济学环境 等维度。每个环节给出：
-- statement：该环节陈述
+- statement：该环节陈述。须为**驱动命题成立的因果前因**，一环节只主张一件事；
+  不得把命题结论本身或 kill_criteria（证伪条件）原样当作一个带权环节——那是循环论证。
 - weight：对命题的重要性权重，0-1 之间的小数，所有 weight 之和约等于 1
 - condition：该环节需满足的、可检验的条件
+
+# 强制：至少 1 条「公司级财务驱动项」环节
+links 中**必须至少有 1 条** condition 是可由财务引擎直接检验的**公司级财务 / 估值驱动项**，
+口径只能落在下方白名单内。这保证证据链至少有一个引擎可验证的定量锚，而非全靠人工尽调。
+（其余环节仍可落在行业 / 外部口径上，但不能拿它们来顶这条强制要求。）
+
+## 可计算指标白名单（财务驱动项的唯一合法口径）
+本系统的财务引擎只能从【单一公司】的财报与估值算出以下公司级指标：
+营收（及同比 / CAGR）、净利润、毛利率、净利率、经营性现金流（趋势 / 是否为正）、
+trailing PE、forward PE、PEG。
+
+## 正例（算「公司级财务驱动项」，请至少给 1 条这类 condition）
+- 「公司近 3 年总营收 CAGR ≥ 15%」
+- 「净利率趋势上行（逐年改善）」
+- 「经营性现金流持续为正」
+- 「forward PE < 20」
+
+## 反例（越界口径，**不算**财务驱动项，不能用来满足这条强制要求）
+凡依赖白名单外数据的环节——行业 / 板块 / 同行 / 分部口径、在手订单 / 装机容量 / 产能利用率 /
+船价 / 运价指数、回购 / 重置成本 / 资本开支 / ROE / 股息、市场份额 / 渗透率 等——都**不算**
+公司级财务驱动项。这类环节可以保留（它们仍是命题的一部分），但不能作为那条强制的财务驱动环节。
 
 # 输出格式
 仅返回有效 JSON：
@@ -221,6 +243,17 @@ $user_thesis
     {"statement": "<陈述>", "weight": <0-1 小数>, "condition": "<需满足的条件>"}
   ]
 }"""
+
+    # 当上一轮 S2 拆出的链路无任何可被引擎验证的驱动环节（n_quant==0）时，
+    # 流水线做一次有界重试，把本段追加到 LOGIC_CHAIN_SYSTEM 末尾强化驱动要求。
+    LOGIC_CHAIN_DRIVER_RETRY_SUFFIX: str = """
+
+# 重试要求（上一轮无任何可被财务引擎验证的驱动环节）
+上一轮拆解出的链路中，**没有任何一条 condition** 落在「可计算指标白名单」内，
+导致整条证据链无定量锚、只能全部转人工尽调。请重新拆解，并**务必确保至少 1 条** condition
+是白名单内的公司级财务 / 估值驱动项（营收同比 / CAGR、净利润、毛利率、净利率、
+经营性现金流趋势 / 为正、trailing / forward PE、PEG）；该 condition 必须能仅凭单一公司的
+财报与估值直接检验，**不得**是行业 / 分部 / 在手订单 / 装机 / 回购等越界口径。"""
 
     LOGIC_CHAIN_USER = Template("""标的：$ticker_name ($ticker)
 
@@ -348,6 +381,15 @@ $metrics_summary
 
 请仅输出 JSON 判断。""")
 
+    # 当命题经一次 S2 重试后仍无任何引擎可验证的驱动环节（no_quantitative_anchor）时，
+    # 把本段作为约束前置进 S5 USER 消息，强制 S5 显式说明 our_growth 无定量锚、受限于 thesis。
+    SYNTHESIS_NO_ANCHOR_NOTE: str = (
+        "【重要约束：本命题无可验证驱动】本命题的逻辑链路中没有任何一条环节的条件可由财务引擎"
+        "定量检验（n_quant=0，经一次重试后仍无公司级财务驱动项）。因此 our_growth 缺乏定量锚，"
+        "不得凭空给出高增长数字；reasoning 必须显式说明「受限于 thesis 无引擎可验证的驱动环节，"
+        "增长预期无定量锚」，并据此压低 confidence。"
+    )
+
     # —— S5 综合映射回命题 ——
     SYNTHESIS_SYSTEM: str = """# 角色
 你是一位基于第一性原理的投资审计师，负责把逐环节证据综合映射回原命题 (S5)。
@@ -416,8 +458,13 @@ $evidence_block
         success_conditions: list[str],
         kill_criteria: list[str],
         horizon: str,
+        enforce_driver: bool = False,
     ) -> tuple[str, str]:
-        """S2：格式化逻辑链路拆解 Prompt"""
+        """S2：格式化逻辑链路拆解 Prompt。
+
+        enforce_driver=True 时（流水线重试路径），在系统指令末尾追加强驱动要求，
+        逼出至少 1 条白名单内的公司级财务驱动环节。
+        """
         sc = "；".join(success_conditions) if success_conditions else "（未提供）"
         kc = "；".join(kill_criteria) if kill_criteria else "（未提供）"
         user = cls.LOGIC_CHAIN_USER.safe_substitute(
@@ -428,7 +475,10 @@ $evidence_block
             kill_criteria=kc,
             horizon=horizon or "（未提供）",
         )
-        return cls.LOGIC_CHAIN_SYSTEM, user
+        system = cls.LOGIC_CHAIN_SYSTEM
+        if enforce_driver:
+            system += cls.LOGIC_CHAIN_DRIVER_RETRY_SUFFIX
+        return system, user
 
     @classmethod
     def format_proxy_prompt(
@@ -492,8 +542,13 @@ $evidence_block
         ticker_name: str,
         proposition: str,
         evidence_items: list[dict],
+        no_quantitative_anchor: bool = False,
     ) -> tuple[str, str]:
-        """S5：格式化综合 Prompt；evidence_items 为含 statement/weight/proxy_type/supports/confidence/finding 的 dict 列表（weight 可缺省，向后兼容）"""
+        """S5：格式化综合 Prompt；evidence_items 为含 statement/weight/proxy_type/supports/confidence/finding 的 dict 列表（weight 可缺省，向后兼容）。
+
+        no_quantitative_anchor=True 时（thesis 经重试仍无引擎可验证驱动），把约束前置进
+        USER 消息，强制 S5 显式说明 our_growth 无定量锚。
+        """
         lines = []
         for i, ev in enumerate(evidence_items):
             weight = ev.get("weight")
@@ -510,4 +565,6 @@ $evidence_block
             proposition=proposition,
             evidence_block=evidence_block,
         )
+        if no_quantitative_anchor:
+            user = cls.SYNTHESIS_NO_ANCHOR_NOTE + "\n\n" + user
         return cls.SYNTHESIS_SYSTEM, user

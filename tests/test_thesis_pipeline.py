@@ -324,6 +324,90 @@ class TestDueDiligenceFallback:
         assert not any(item["index"] == 1 for item in result.due_diligence_queue)
 
 
+class TestS2DriverRetry:
+    """#8：S2 必须产出可被引擎验证的驱动环节，否则一次有界重试，仍无则诚实标无锚。"""
+
+    def test_no_retry_when_driver_present(self, target, quote, texts):
+        """回归：本就有可算驱动的 thesis 不触发重试、不改既有产物结构（不回归 P0-1/2/4）。"""
+        fake = FakeLLMClient(n_links=3)  # link0 默认白名单内可算 proxy
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        assert fake.logic_chain_calls == [False]  # 只调一次 S2，无重试
+        assert result.s2_retried is False
+        assert result.no_quantitative_anchor is False
+        assert result.n_quantitative_drivers == 1
+        assert fake.last_synthesis_no_anchor is False  # S5 未被打无锚标
+        assert result.projection.no_quantitative_anchor is False
+        # 既有产物结构不变：link0 仍走定量证据路径、引擎计算值在场
+        assert result.logic_chain.links[0].proxy_type == "quantitative"
+        assert "revenue_cagr" in result.projection.evidence_chain[0].data
+        assert len(result.evidence) == 3
+
+    def test_retry_triggered_and_succeeds_with_driver(self, target, quote, texts):
+        """全外部口径 thesis → 触发重试，重试传入 enforce_driver；重试拿到驱动 → 不打无锚标。"""
+        fake = FakeLLMClient(n_links=3, driver_on_retry=True)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        # 触发了一次重试，且重试调用带 enforce_driver=True
+        assert fake.logic_chain_calls == [False, True]
+        assert result.s2_retried is True
+        # 重试后 link0 变为白名单内可算驱动 → n_quant=1，不标无锚
+        assert result.n_quantitative_drivers == 1
+        assert result.no_quantitative_anchor is False
+        assert result.projection.no_quantitative_anchor is False
+        assert fake.last_synthesis_no_anchor is False
+        assert result.logic_chain.links[0].proxy_type == "quantitative"
+        assert "get_quant_evidence_interpretation" in fake.calls
+        assert "revenue_cagr" in result.projection.evidence_chain[0].data
+
+    def test_retry_still_no_driver_marks_no_anchor_without_fabrication(
+        self, target, quote, texts
+    ):
+        """重试后仍无驱动 → 打 no_quantitative_anchor，不伪造 quantitative，S5 被显式告知。"""
+        fake = FakeLLMClient(n_links=3, quant_out_of_scope=True)  # 两轮都越界
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        assert fake.logic_chain_calls == [False, True]  # 触发了重试
+        assert result.s2_retried is True
+        assert result.n_quantitative_drivers == 0
+        # 诚实标无锚（产物 + 投影）
+        assert result.no_quantitative_anchor is True
+        assert result.projection.no_quantitative_anchor is True
+        assert "n_quant=0" in result.projection.no_anchor_reason
+        # S5 被显式告知无锚（逼其说明 our_growth 无定量锚）
+        assert fake.last_synthesis_no_anchor is True
+        # 绝不伪造 quantitative：越界环节被降级尽调、未走定量 LLM、未编造数字
+        assert result.logic_chain.links[0].proxy_type == "due_diligence"
+        assert "get_quant_evidence_interpretation" not in fake.calls
+        assert result.projection.evidence_chain[0].data == {}
+        assert result.projection.evidence_chain[0].needs_due_diligence is True
+
+    def test_no_anchor_does_not_corrupt_gap_spine(self, target, quote, texts):
+        """无锚标记是附加元数据：不进 to_projection_result / 不污染脊柱字段。"""
+        fake = FakeLLMClient(n_links=3, quant_out_of_scope=True, our_growth=0.0)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        pr = result.to_projection_result()
+        assert pr.our_growth == 0.0  # 脊柱字段照常退化
+        assert not hasattr(pr, "no_quantitative_anchor")  # 不泄漏进向后兼容结果
+
+    def test_summary_surfaces_no_anchor(self):
+        """#8：main 摘要（写入 evidence_summary，非 CSV 列）显式标注无定量锚。"""
+        from src.main import AliceTestPipeline
+        from src.llm.models import ThesisProjection
+
+        proj = ThesisProjection(
+            thesis_aligned=False, our_growth=0.0, confidence="低",
+            reasoning="thesis 无引擎可验证驱动，our_growth 无定量锚，给出零增长。",
+            no_quantitative_anchor=True,
+        )
+        pr = PipelineResult(
+            projection=proj, evidence=[], due_diligence_queue=[{"index": 0}],
+            used_pipeline=True, no_quantitative_anchor=True, s2_retried=True,
+        )
+        summary = AliceTestPipeline._summarize_evidence(pr)
+        assert "无定量锚" in summary
+        # 未标无锚时不污染
+        pr2 = PipelineResult(projection=proj, evidence=[], used_pipeline=True)
+        assert "无定量锚" not in AliceTestPipeline._summarize_evidence(pr2)
+
+
 class TestFallback:
     def test_fallback_to_single_shot_on_stage_failure(self, target, quote, texts):
         fake = FakeLLMClient(fail_stage="get_logic_chain")

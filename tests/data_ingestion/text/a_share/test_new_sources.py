@@ -14,6 +14,10 @@ from src.data_ingestion.models import TextItem
 from src.data_ingestion.text.a_share.announcement_fetcher import AnnouncementFetcher
 from src.data_ingestion.text.a_share.cls_news_fetcher import CLSNewsFetcher
 from src.data_ingestion.text.a_share.coordinator import AShareTextCoordinator
+from src.data_ingestion.text.a_share.profit_forecast_fetcher import (
+    ProfitForecastFetcher,
+)
+from src.data_ingestion.text.models import SourceReachability
 
 
 def _dt(hours_ago: int) -> str:
@@ -109,6 +113,121 @@ class TestCLSNewsFetcher:
         assert CLSNewsFetcher().fetch_texts("601985.SH", "中国核电") == []
 
 
+class TestProfitForecastFetcher:
+    """#65：东财机构盈利预测获取器（可达，喂 implied_growth 素材）。"""
+
+    def test_parses_forecast_rows(self, monkeypatch):
+        df = pd.DataFrame({
+            "机构": ["中信证券", "华泰证券"],
+            "研究员": ["张三", "李四"],
+            "报告日期": [
+                (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d"),
+                (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d"),
+            ],
+            "评级": ["买入", "增持"],
+            "2025预测每股收益": ["0.45", "0.50"],
+            "2026预测每股收益": ["0.55", "0.62"],
+        })
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", lambda **k: df)
+        items = ProfitForecastFetcher().fetch_texts(
+            "601985.SH", "中国核电", lookback_hours=48, max_items=10
+        )
+        assert len(items) == 2
+        assert all(i.source == "东财盈利预测" and i.type == "research" for i in items)
+        # 不做 48h 硬过滤：盈利预测是一致预期，>48h 仍保留
+        assert items[0].published_at >= items[1].published_at  # 倒序，最新在前
+        assert "中信证券" in items[0].title or "中信证券" in items[0].summary
+        assert "2025预测每股收益" in items[0].summary
+        # 评级不带「评级:」冒号写法（避免被协调器误判为评级变动）
+        assert "评级:" not in items[0].summary
+
+    def test_market_table_cached_across_calls(self, monkeypatch):
+        """全市场一致预期表整轮复用：多次 fetch 仅拉一次（symbol 为板块名，须取全表过滤）。"""
+        calls = {"n": 0}
+        df = pd.DataFrame({
+            "代码": ["601985"], "名称": ["中国核电"],
+            "研报数": ["5"], "2025预测每股收益": ["0.45"],
+        })
+
+        def fake(**k):
+            calls["n"] += 1
+            return df
+
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", fake)
+        f = ProfitForecastFetcher()
+        items1 = f.fetch_texts("601985.SH", "中国核电")
+        items2 = f.fetch_texts("601985.SH", "中国核电")
+        assert calls["n"] == 1  # 整表仅拉一次
+        assert len(items1) == 1 and len(items2) == 1
+        assert "研报数 5" in items1[0].summary
+
+    def test_filters_market_wide_table_to_target(self, monkeypatch):
+        df = pd.DataFrame({
+            "股票代码": ["601985", "600000"],
+            "股票简称": ["中国核电", "浦发银行"],
+            "机构": ["甲", "乙"],
+            "2025预测净利润": ["100", "200"],
+        })
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", lambda **k: df)
+        items = ProfitForecastFetcher().fetch_texts("601985.SH", "中国核电")
+        assert len(items) == 1  # 仅保留本标的，避免串标的
+        assert "甲" in items[0].summary
+
+    def test_filter_code_authoritative_ignores_name_substring(self, monkeypatch):
+        """代码列权威：精确匹配代码，名称子串（如「中国核电」⊂「中国核电建」）不串入。"""
+        df = pd.DataFrame({
+            "代码": ["601985", "601986"],
+            "名称": ["中国核电", "中国核电建"],  # 第二行名称含目标名作为子串
+            "机构": ["甲", "乙"],
+            "2025预测每股收益": ["1", "2"],
+        })
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", lambda **k: df)
+        items = ProfitForecastFetcher().fetch_texts("601985.SH", "中国核电")
+        assert len(items) == 1  # 仅精确代码匹配，不被名称子串串标的
+        assert "甲" in items[0].summary
+
+    def test_non_a_share_returns_empty(self):
+        assert ProfitForecastFetcher().fetch_texts("AAPL", "Apple") == []
+
+    def test_graceful_failure_returns_empty(self, monkeypatch):
+        def boom(**k):
+            raise RuntimeError("forecast endpoint down")
+
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", boom)
+        assert ProfitForecastFetcher().fetch_texts("601985.SH", "中国核电") == []
+
+    def test_empty_df_returns_empty(self, monkeypatch):
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", lambda **k: pd.DataFrame())
+        assert ProfitForecastFetcher().fetch_texts("601985.SH", "中国核电") == []
+
+
+class TestCoordinatorForecastSource:
+    """#65：协调器接入盈利预测源（可达、计入覆盖度）。"""
+
+    def test_default_config_enables_forecast(self):
+        cfg = AShareTextSourceConfig()
+        assert "forecast" in cfg.enabled_sources
+        assert cfg.quota_weights["forecast"] == 3
+
+    def test_forecast_aggregated_and_marked_reachable(self, monkeypatch):
+        cfg = AShareTextSourceConfig(
+            enabled_sources=["forecast"], quota_weights={"forecast": 3}
+        )
+        coord = AShareTextCoordinator(config=cfg)
+        fc = TextItem(source="东财盈利预测", type="research", title="盈利预测 · 中信",
+                      summary="机构 中信｜预测评级 买入", published_at=datetime.now(),
+                      url=None)
+        monkeypatch.setattr(coord._forecast_fetcher, "fetch_texts", lambda **k: [fc])
+
+        items = coord.fetch_texts("601985.SH", "中国核电", max_items=10)
+        assert any(i.source == "东财盈利预测" for i in items)
+        cov = coord.get_last_coverage()
+        assert "forecast" in cov.covered_sources
+        frow = next(c for c in cov.per_source if c.source == "forecast")
+        assert frow.reachability == SourceReachability.REACHABLE
+        assert frow.attempted is True and frow.hit_count == 1
+
+
 class TestCoordinatorNewSources:
     def test_default_config_enables_new_sources(self):
         cfg = AShareTextSourceConfig()
@@ -124,9 +243,11 @@ class TestCoordinatorNewSources:
         assert "cls" in quotas and quotas["cls"] > 0
 
     def test_lookback_override_applied(self, monkeypatch):
+        # 公告(cninfo)在 #65 reachability 下被判不可达；本测验证 lookback 透传机制，
+        # 故关掉「不可达跳过」让其照常抓取（等价 P2 可达机器路径）。
         cfg = AShareTextSourceConfig(
             enabled_sources=["announcement"], quota_weights={"announcement": 1},
-            lookback_hours=336,
+            lookback_hours=336, skip_unreachable_sources=False,
         )
         coord = AShareTextCoordinator(config=cfg)
         captured = {}
@@ -140,9 +261,12 @@ class TestCoordinatorNewSources:
         assert captured["lookback_hours"] == 336  # 配置覆盖了传入的 48
 
     def test_aggregates_new_source_items(self, monkeypatch):
+        # 验证协调器能聚合新源的 items；公告(cninfo)默认被判不可达跳过，
+        # 这里关掉跳过以测「两源都被聚合」的机制（P2 可达机器路径）。
         cfg = AShareTextSourceConfig(
             enabled_sources=["announcement", "cls"],
             quota_weights={"announcement": 1, "cls": 1},
+            skip_unreachable_sources=False,
         )
         coord = AShareTextCoordinator(config=cfg)
         ann = TextItem(source="巨潮公告", type="news", title="公告A",
