@@ -36,6 +36,7 @@ class FakeLLMClient:
         quant_irrelevant: bool = False,
         quant_out_of_scope: bool = False,
         qualitative_insufficient: bool = False,
+        driver_on_retry: bool = False,
     ):
         self.n_links = n_links
         self.include_due_diligence = include_due_diligence
@@ -43,14 +44,21 @@ class FakeLLMClient:
         self.implied_growth = implied_growth
         self.fail_stage = fail_stage
         self.quant_irrelevant = quant_irrelevant  # 模拟「指标与条件无关」的 LLM 判断
-        # 模拟 S3 把越界 proxy（引擎算不出）误标 quantitative，用于测代码侧兜底降级
+        # 模拟 S3 把越界 proxy（引擎算不出）误标 quantitative，用于测代码侧兜底降级。
+        # 恒越界 → 经 enforce 后 n_quant 始终为 0（首轮 + 重试都无驱动）。
         self.quant_out_of_scope = quant_out_of_scope
+        # 模拟 #8 重试成功：首轮无引擎可验证驱动（link0 越界 quantitative → 降级），
+        # 重试（enforce_driver=True）后 link0 改为白名单内可算 proxy → n_quant=1。
+        self.driver_on_retry = driver_on_retry
         # 模拟定性环节「信息不足/无法判断」(空 data + 低置信、无 needs_due_diligence)，
         # 用于测确定性入队兜底（定性 schema 本就无 needs_due_diligence 字段）
         self.qualitative_insufficient = qualitative_insufficient
         self.calls: list[str] = []  # 记录调用顺序，供测试断言
         self.last_quant_kwargs: dict | None = None  # 最近一次定量判断入参
         self.last_synthesis_items: list[dict] | None = None  # 最近一次 S5 证据项
+        self.logic_chain_calls: list[bool] = []  # 每次 get_logic_chain 的 enforce_driver
+        self.last_synthesis_no_anchor: bool | None = None  # 最近一次 S5 的无锚标记入参
+        self._driver_enforced = False  # 是否已发生过 enforce_driver 重试
         self._thinking_enabled = False
 
     def _mark(self, name: str) -> None:
@@ -99,9 +107,13 @@ class FakeLLMClient:
         )
 
     def get_logic_chain(
-        self, ticker, ticker_name, proposition, success_conditions, kill_criteria, horizon
+        self, ticker, ticker_name, proposition, success_conditions, kill_criteria,
+        horizon, enforce_driver=False,
     ) -> LogicChain:
         self._mark("get_logic_chain")
+        self.logic_chain_calls.append(enforce_driver)
+        if enforce_driver:
+            self._driver_enforced = True
         w = round(1.0 / self.n_links, 2)
         links = [
             LogicChainLink(
@@ -115,9 +127,15 @@ class FakeLLMClient:
 
     def get_proxy_mapping(self, ticker, ticker_name, links) -> ProxyMapping:
         self._mark("get_proxy_mapping")
+        # link0 是否被映射为「越界 quantitative」（经 enforce 后降级 → 不计入 n_quant）：
+        # - quant_out_of_scope：恒越界（首轮 + 重试都无驱动）；
+        # - driver_on_retry：首轮越界（触发重试），重试后改为白名单内可算 proxy。
+        out_of_scope = self.quant_out_of_scope or (
+            self.driver_on_retry and not self._driver_enforced
+        )
         assignments = []
         for i in range(len(links)):
-            if i == 0 and self.quant_out_of_scope:
+            if i == 0 and out_of_scope:
                 # 越界：指向引擎算不出的数据，却被误标 quantitative（待代码侧兜底降级）
                 ptype, spec = (
                     "quantitative",
@@ -182,10 +200,12 @@ class FakeLLMClient:
         )
 
     def get_thesis_synthesis(
-        self, ticker, ticker_name, proposition, evidence_items
+        self, ticker, ticker_name, proposition, evidence_items,
+        no_quantitative_anchor=False,
     ) -> ThesisProjection:
         self._mark("get_thesis_synthesis")
         self.last_synthesis_items = evidence_items
+        self.last_synthesis_no_anchor = no_quantitative_anchor
         return ThesisProjection(
             thesis_aligned=True,
             our_growth=self.our_growth,

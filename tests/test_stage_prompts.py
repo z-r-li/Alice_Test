@@ -266,6 +266,20 @@ class TestFakeLLMClient:
             fake.get_logic_chain("X", "N", "p", [], [], "3y")
         assert "get_refined_thesis" in fake.calls
 
+    def test_fake_logic_chain_records_enforce_driver(self):
+        """#8：FakeLLMClient.get_logic_chain 接受并记录 enforce_driver（重试路径用）。"""
+        fake = FakeLLMClient(n_links=3)
+        fake.get_logic_chain("X", "N", "p", [], [], "3y")
+        fake.get_logic_chain("X", "N", "p", [], [], "3y", enforce_driver=True)
+        assert fake.logic_chain_calls == [False, True]
+        assert fake._driver_enforced is True
+
+    def test_fake_synthesis_records_no_anchor_flag(self):
+        """#8：FakeLLMClient.get_thesis_synthesis 接受并记录 no_quantitative_anchor。"""
+        fake = FakeLLMClient()
+        fake.get_thesis_synthesis("X", "N", "P", [], no_quantitative_anchor=True)
+        assert fake.last_synthesis_no_anchor is True
+
 
 class TestClientStageMethodsExist:
     def test_deepseek_client_exposes_stage_methods(self):
