@@ -485,6 +485,14 @@ class AliceTestPipeline:
                     lookback_hours=crawler_config.lookback_hours,
                     max_items=crawler_config.max_items_per_ticker,
                 )
+                # #65 / §五 #9：素材覆盖度元数据可见——过薄时显式降级标注，供共识可信度判断
+                get_cov = getattr(self._text_coordinator, "get_last_coverage", None)
+                cov = get_cov() if callable(get_cov) else None
+                if cov is not None and cov.is_thin:
+                    self._py_logger.warning(
+                        f"[{target.ticker}] A股共识素材覆盖度过薄: {cov.thin_reason}"
+                        f"（覆盖源 {cov.covered_sources or '无'}, 未覆盖 {cov.uncovered_sources}）"
+                    )
             else:
                 # 港美股使用原有工厂方法
                 texts = TextProviderFactory.fetch_texts(
