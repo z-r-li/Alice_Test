@@ -156,6 +156,7 @@ class ThesisPipeline:
             link.evidence = self._evidence_for_link(
                 link, metrics, material, ticker, safe_name
             )
+            link.evidence = self._ensure_due_diligence(link.evidence)
             if link.evidence.needs_due_diligence:
                 dd_queue.append(
                     {
@@ -225,6 +226,21 @@ class ThesisPipeline:
                 f"[{ticker}] 环节{i} proxy 越界（非白名单指标），定量降级为尽调: {orig}"
             )
 
+    @staticmethod
+    def _ensure_due_diligence(ev: Evidence) -> Evidence:
+        """确定性兜底：空 data + 低置信的证据自动转尽调入队，不依赖 LLM 自觉。
+
+        典型场景：定性环节素材不足、LLM 给出「信息不足/无法判断」(confidence=低)，但
+        定性 schema 无 needs_due_diligence 字段 → 否则与「无法判断」的 finding 自相矛盾地
+        漏出尽调队列（验收报告 §五 P0-3）。
+
+        只命中「真·空数据 + 低置信」：定量证据 data 恒为 asdict(metrics)（非空），故引擎的
+        完整度缺口不会被这条规则再塞回队列，与 eb5cba5 的收窄一致。
+        """
+        if not ev.needs_due_diligence and not ev.data and ev.confidence == "低":
+            return ev.model_copy(update={"needs_due_diligence": True})
+        return ev
+
     def _evidence_for_link(
         self, link, metrics, material: str, ticker: str, safe_name: str
     ) -> Evidence:
@@ -279,6 +295,10 @@ class ThesisPipeline:
         - Evidence.data 永远只放引擎计算值（LLM 不得引入新数字）；
         - 指标与条件明显无关时 LLM 应判 needs_due_diligence=True，不强行给 supports；
         - LLM 调用失败回退到引擎启发式，并标 needs_due_diligence=True。
+
+        是否尽调以 LLM 的按条件判断为准：引擎的公司级完整度缺口（partial /
+        前瞻不可用）已含在指标摘要里，与条件无关时不应强制尽调；
+        只有阻断性的 data_error 直接走引擎尽调路径。
         """
         base = self._fin_engine.build_evidence(metrics, condition=link.condition)
         if metrics.status == "data_error":
@@ -299,7 +319,7 @@ class ThesisPipeline:
             finding=judged.finding,
             supports=judged.supports,
             confidence=judged.confidence,
-            needs_due_diligence=judged.needs_due_diligence or base.needs_due_diligence,
+            needs_due_diligence=judged.needs_due_diligence,
         )
 
     def _financial_metrics(self, ticker: str, pe_ttm: float | None):

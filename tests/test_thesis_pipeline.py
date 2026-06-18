@@ -133,6 +133,24 @@ class TestFullRun:
         # 回退环节进入尽调队列
         assert any(item["index"] == 0 for item in result.due_diligence_queue)
 
+    def test_quantitative_unrelated_engine_gap_does_not_force_due_diligence(
+        self, target, texts
+    ):
+        """P0-3/eb5cba5：引擎的公司级缺口（无 trailing PE → forward PE 不可用）与条件无关时，
+        不应覆盖 LLM 的按条件判断强制尽调；缺口信息仍如实进了 LLM 指标摘要供其裁量。"""
+        quote = QuoteData(
+            date=datetime(2026, 6, 11), ticker="601985.SH",
+            price_close=10.0, pe_ttm=None, pb=2.0,
+        )
+        fake = FakeLLMClient(n_links=3)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        q_ev = result.projection.evidence_chain[0]
+        assert q_ev.supports is True
+        assert q_ev.needs_due_diligence is False  # 不被引擎缺口强制入队
+        assert not any(item["index"] == 0 for item in result.due_diligence_queue)
+        # 缺口信息仍如实进了 LLM 的指标摘要，由其按条件相关性裁量
+        assert "前瞻估值数据不足" in fake.last_quant_kwargs["metrics_summary"]
+
     def test_quantitative_irrelevant_metrics_marked_due_diligence(
         self, target, quote, texts
     ):
@@ -257,6 +275,53 @@ class TestWeightedSynthesis:
             model_cls=ThesisProjection, index=5,
         )
         assert loaded.weighted_support == pytest.approx(expected, abs=1e-4)
+
+
+class TestDueDiligenceFallback:
+    """P0-3：缺数据不入尽调队列的确定性兜底（不依赖 LLM 自觉）。"""
+
+    def test_empty_data_low_confidence_flagged(self):
+        ev = Evidence(data={}, finding="信息不足，无法判断", supports=False,
+                      confidence="低")
+        out = ThesisPipeline._ensure_due_diligence(ev)
+        assert out.needs_due_diligence is True
+
+    def test_nonempty_data_low_confidence_not_flagged(self):
+        """定量证据 data 恒非空 → 不被兜底规则塞回队列（不回归 #71/eb5cba5 的收窄）。"""
+        ev = Evidence(data={"revenue_cagr": 10.0, "status": "partial"},
+                      finding="营收增长，部分科目缺失", supports=True, confidence="低")
+        out = ThesisPipeline._ensure_due_diligence(ev)
+        assert out.needs_due_diligence is False
+
+    def test_empty_data_mid_confidence_not_flagged(self):
+        ev = Evidence(data={}, finding="基本支持", supports=True, confidence="中")
+        out = ThesisPipeline._ensure_due_diligence(ev)
+        assert out.needs_due_diligence is False
+
+    def test_already_flagged_is_noop(self):
+        ev = Evidence(data={}, finding="缺 proxy", supports=False, confidence="低",
+                      needs_due_diligence=True)
+        out = ThesisPipeline._ensure_due_diligence(ev)
+        assert out.needs_due_diligence is True
+
+    def test_qualitative_insufficient_link_auto_queued(self, target, quote, texts):
+        """定性环节「信息不足」(空 data + 低置信、LLM 未给 needs_due_diligence) → 确定性入队。"""
+        fake = FakeLLMClient(n_links=3, qualitative_insufficient=True)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        # link1 = qualitative，被兜底规则转尽调
+        q_ev = result.projection.evidence_chain[1]
+        assert q_ev.confidence == "低"
+        assert q_ev.data == {}
+        assert q_ev.needs_due_diligence is True
+        assert any(item["index"] == 1 for item in result.due_diligence_queue)
+
+    def test_supported_qualitative_not_queued(self, target, quote, texts):
+        """正常定性环节（中置信、有 data）不被兜底误入队。"""
+        fake = FakeLLMClient(n_links=3)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        q_ev = result.projection.evidence_chain[1]
+        assert q_ev.needs_due_diligence is False
+        assert not any(item["index"] == 1 for item in result.due_diligence_queue)
 
 
 class TestFallback:
