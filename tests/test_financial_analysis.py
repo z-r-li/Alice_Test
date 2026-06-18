@@ -53,6 +53,56 @@ class _RaisingProvider(FinancialsProvider):
         return True
 
 
+class TestProxyCapabilityWhitelist:
+    """P0-1：引擎能力边界白名单 —— 哪些 proxy 才允许走定量证据路径。"""
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            "财报：营收/毛利/现金流趋势 + forward PE",
+            "营收 CAGR 与净利率趋势",
+            "毛利率是否持续提升",
+            "trailing PE 与 PEG 估值",
+            "经营性现金流是否为正",
+            "revenue CAGR and net margin",
+        ],
+    )
+    def test_in_whitelist_specs_are_computable(self, spec):
+        assert FinancialAnalysisEngine.is_proxy_computable(spec) is True
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            "IEA 全球 AI 用电量增速",
+            "Clarksons 新船在手订单量",
+            "克拉克森船价指数",
+            "Wind 行业 ROE 对比",
+            "分部收入拆分（云业务）",
+            "年度回购金额",
+            "重置成本法估值",
+            "产能利用率与开工率",
+            "板块溢价率",
+            "装机容量同比",
+            "市场份额 / 渗透率",
+            # 夹带财务名词但跨公司口径（行业/分部）仍判越界
+            "净利率高于行业平均",
+            "分部营收占比",
+        ],
+    )
+    def test_out_of_whitelist_specs_not_computable(self, spec):
+        assert FinancialAnalysisEngine.is_proxy_computable(spec) is False
+
+    def test_empty_spec_not_computable(self):
+        assert FinancialAnalysisEngine.is_proxy_computable(None) is False
+        assert FinancialAnalysisEngine.is_proxy_computable("  ") is False
+
+    def test_ascii_token_uses_word_boundary(self):
+        """'pe' 不应误命中 'competitive landscape' 这类无关英文。"""
+        assert FinancialAnalysisEngine.is_proxy_computable(
+            "competitive landscape positioning"
+        ) is False
+
+
 class TestAnalyzeReport:
     def test_growth_trends_and_cagr(self):
         engine = FinancialAnalysisEngine()

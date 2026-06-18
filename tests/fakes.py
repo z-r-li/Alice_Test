@@ -34,6 +34,7 @@ class FakeLLMClient:
         implied_growth: float = 8.0,
         fail_stage: str | None = None,
         quant_irrelevant: bool = False,
+        quant_out_of_scope: bool = False,
     ):
         self.n_links = n_links
         self.include_due_diligence = include_due_diligence
@@ -41,6 +42,8 @@ class FakeLLMClient:
         self.implied_growth = implied_growth
         self.fail_stage = fail_stage
         self.quant_irrelevant = quant_irrelevant  # 模拟「指标与条件无关」的 LLM 判断
+        # 模拟 S3 把越界 proxy（引擎算不出）误标 quantitative，用于测代码侧兜底降级
+        self.quant_out_of_scope = quant_out_of_scope
         self.calls: list[str] = []  # 记录调用顺序，供测试断言
         self.last_quant_kwargs: dict | None = None  # 最近一次定量判断入参
         self.last_synthesis_items: list[dict] | None = None  # 最近一次 S5 证据项
@@ -110,7 +113,13 @@ class FakeLLMClient:
         self._mark("get_proxy_mapping")
         assignments = []
         for i in range(len(links)):
-            if i == 0:
+            if i == 0 and self.quant_out_of_scope:
+                # 越界：指向引擎算不出的数据，却被误标 quantitative（待代码侧兜底降级）
+                ptype, spec = (
+                    "quantitative",
+                    "IEA 全球 AI 用电量增速 + Clarksons 在手订单 + 船价指数",
+                )
+            elif i == 0:
                 ptype, spec = "quantitative", "财报：营收/毛利/现金流趋势 + forward PE"
             elif i == 1:
                 ptype, spec = "qualitative", "研报/新闻/互动易观点"

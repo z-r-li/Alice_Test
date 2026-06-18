@@ -145,6 +145,35 @@ class TestFullRun:
         assert q_ev.confidence == "低"
         assert any(item["index"] == 0 for item in result.due_diligence_queue)
 
+    def test_out_of_scope_quant_proxy_downgraded_to_due_diligence(
+        self, target, quote, texts
+    ):
+        """P0-1：S3 把越界 proxy（引擎算不出）误标 quantitative 时，代码侧兜底降级为尽调，
+        不进定量证据路径（不再用无关公司财务冒充验证）。"""
+        fake = FakeLLMClient(n_links=3, quant_out_of_scope=True)
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        # link0 被降级：不再是 quantitative，且不应触发定量 LLM 判断
+        link0 = result.logic_chain.links[0]
+        assert link0.proxy_type == "due_diligence"
+        assert link0.proxy_spec.startswith("[引擎不可算→转尽调]")
+        assert "get_quant_evidence_interpretation" not in fake.calls
+        # 证据如实转尽调、不编造数字、入队
+        q_ev = result.projection.evidence_chain[0]
+        assert q_ev.needs_due_diligence is True
+        assert q_ev.supports is False
+        assert q_ev.data == {}
+        assert any(item["index"] == 0 for item in result.due_diligence_queue)
+
+    def test_in_scope_quant_proxy_stays_quantitative(self, target, quote, texts):
+        """P0-1 不回归 P0-2：白名单内的定量 proxy 仍走定量证据路径（引擎计算值 + LLM 条件判断）。"""
+        fake = FakeLLMClient(n_links=3)  # link0 默认是白名单内的财报 proxy
+        result = _pipeline(fake=fake).run(target, quote=quote, texts=texts)
+        link0 = result.logic_chain.links[0]
+        assert link0.proxy_type == "quantitative"
+        assert "get_quant_evidence_interpretation" in fake.calls
+        q_ev = result.projection.evidence_chain[0]
+        assert "revenue_cagr" in q_ev.data  # 引擎计算值仍在
+
     def test_due_diligence_link_queued_without_fabrication(self, target, quote, texts):
         result = _pipeline().run(target, quote=quote, texts=texts)
         assert len(result.due_diligence_queue) >= 1

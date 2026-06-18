@@ -14,6 +14,7 @@ S4 财务分析引擎 (FinancialAnalysisEngine)
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 
 from ..data_ingestion.financials import (
@@ -22,6 +23,56 @@ from ..data_ingestion.financials import (
     FinancialsProvider,
 )
 from ..llm.models import Evidence
+
+# ── S3/S4 引擎能力边界（白名单）────────────────────────────────────────────
+# 本引擎只从单一公司的财报 + 估值算「公司级」指标（见 analyze_report / metrics_summary）。
+# 只有指向这些指标的 proxy 才能走定量证据路径；S3 prompt 已据此约束，
+# 此处为代码侧兜底，挡住 LLM 把引擎根本算不出的 proxy（行业/上游/订单/回购…）误标 quantitative。
+_COMPUTABLE_METRIC_TERMS: frozenset[str] = frozenset(
+    {
+        # 营收 / 增速
+        "营收", "营业收入", "营业总收入", "收入", "营业额", "revenue", "sales",
+        "营收同比", "revenue yoy", "cagr", "复合增速", "复合增长率", "复合增长",
+        "年化增长", "年均增长",
+        # 盈利
+        "净利润", "归母净利润", "盈利", "净利", "利润", "net income", "net profit",
+        "earnings",
+        # 利润率
+        "毛利率", "gross margin", "净利率", "净利润率", "net margin", "利润率",
+        # 现金流
+        "经营现金流", "经营性现金流", "经营活动现金流", "现金流", "operating cash",
+        "operating cashflow", "ocf",
+        # 估值
+        "市盈率", "pe", "p/e", "forward pe", "前瞻市盈率", "远期市盈率",
+        "动态市盈率", "peg",
+    }
+)
+# 引擎取不到的数据：即便 proxy_spec 夹带了上面的财务名词，命中下列任一项也判为越界。
+# 覆盖验收报告 §五 P0-1 列举的全部错配 proxy（行业/板块/分部、用电/装机/订单/船价、
+# 产能利用率、回购、重置成本、ROE…）。
+_OUT_OF_ENGINE_TERMS: frozenset[str] = frozenset(
+    {
+        # 跨公司口径：行业 / 板块 / 同行 / 分部（引擎只算单一公司）
+        "分部", "部门", "segment", "行业", "板块", "同行", "可比公司", "competitor",
+        "peer",
+        # 市场结构
+        "市占", "市场份额", "份额", "渗透率", "market share", "溢价",
+        # 量价 / 产能 / 订单 / 指数（非财报科目）
+        "用电", "电量", "装机", "产能", "利用率", "开工率", "订单", "在手订单",
+        "船价", "运价", "价格指数", "出货", "销量", "产量",
+        # 年报披露 / 资本运作（引擎不解析）
+        "重置成本", "回购", "资本开支", "capex", "分红", "股息", "roe", "roa", "roic",
+    }
+)
+
+_CJK_RE = re.compile(r"[一-鿿]")
+
+
+def _term_present(term: str, text_lower: str) -> bool:
+    """term 含中文 → 子串匹配；纯 ASCII → 词边界匹配（避免 'pe' 命中 'competitive'）。"""
+    if _CJK_RE.search(term):
+        return term in text_lower
+    return re.search(rf"(?<![a-z]){re.escape(term)}(?![a-z])", text_lower) is not None
 
 
 @dataclass
@@ -270,6 +321,21 @@ class FinancialAnalysisEngine:
             max_periods=max_periods,
         )
         return self.build_evidence(metrics, condition=condition)
+
+    @staticmethod
+    def is_proxy_computable(proxy_spec: str | None) -> bool:
+        """该 proxy 是否落在引擎可算的公司级指标白名单内（S3/S4 定量边界）。
+
+        判定：proxy_spec 命中任一「越界项」（行业/板块/分部、订单/产能/指数、回购/ROE…）
+        即视为引擎算不出 → False（即便夹带了财务名词）；否则需命中至少一个白名单指标名词。
+        无 spec 时无从判断，按不可算处理（交由尽调）。
+        """
+        if not proxy_spec or not proxy_spec.strip():
+            return False
+        text = proxy_spec.lower()
+        if any(_term_present(t, text) for t in _OUT_OF_ENGINE_TERMS):
+            return False
+        return any(_term_present(t, text) for t in _COMPUTABLE_METRIC_TERMS)
 
     @staticmethod
     def metrics_summary(m: FinancialMetrics) -> str:

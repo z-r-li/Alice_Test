@@ -146,6 +146,7 @@ class ThesisPipeline:
             if 0 <= a.link_index < len(chain.links):
                 chain.links[a.link_index].proxy_type = a.proxy_type
                 chain.links[a.link_index].proxy_spec = a.proxy_spec
+        self._enforce_proxy_capability(chain, ticker)
         self._persist(ticker, audit_date, "proxy_mapping", mapping, 3)
 
         # S4 逐 link 证据
@@ -204,6 +205,25 @@ class ThesisPipeline:
             used_pipeline=True,
             artifact_dir=artifact_dir,
         )
+
+    def _enforce_proxy_capability(self, chain: LogicChain, ticker: str) -> None:
+        """S3 代码侧兜底：把指向引擎算不出指标的 quantitative 环节降级为尽调。
+
+        即便 S3 prompt 已给白名单，LLM 仍可能把行业/上游/订单/回购等越界 proxy 误标
+        quantitative；此处按引擎能力边界校验，越界即转 due_diligence，绝不进定量证据路径
+        （定量证据会用无关的公司财务冒充验证——验收报告 §五 P0-1 的根因）。
+        """
+        for i, link in enumerate(chain.links):
+            if link.proxy_type != "quantitative":
+                continue
+            if self._fin_engine.is_proxy_computable(link.proxy_spec):
+                continue
+            orig = link.proxy_spec or "（未给 proxy_spec）"
+            link.proxy_type = "due_diligence"
+            link.proxy_spec = f"[引擎不可算→转尽调] {orig}"
+            self._logger.info(
+                f"[{ticker}] 环节{i} proxy 越界（非白名单指标），定量降级为尽调: {orig}"
+            )
 
     def _evidence_for_link(
         self, link, metrics, material: str, ticker: str, safe_name: str
