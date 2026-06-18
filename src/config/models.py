@@ -29,7 +29,8 @@ class LLMConfig(BaseModel):
 
     provider: Literal["deepseek"] = "deepseek"
     api_key: str = ""
-    model: str = "deepseek-chat"
+    # `deepseek-chat` 别名 2026-07-24 退役；默认显式用 deepseek-v4-flash（当前路由目标）。
+    model: str = "deepseek-v4-flash"
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, gt=0)
     max_retries: int = Field(default=2, ge=0, le=10, description="最大重试次数")

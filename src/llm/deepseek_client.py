@@ -35,7 +35,8 @@ T = TypeVar(
 )
 
 # 默认配置
-DEFAULT_MODEL = "deepseek-chat"
+# 显式用 deepseek-v4-flash：`deepseek-chat` 别名 2026-07-24 退役（当前已路由到 v4-flash）。
+DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_TEMPERATURE = 0
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 
@@ -61,7 +62,7 @@ def call_chat(
     Args:
         messages: 消息列表，格式为 [{"role": "user", "content": "..."}]
         response_format: 响应格式，"json" 或 "text"，默认 "text"
-        model: 模型名称，默认 "deepseek-chat"
+        model: 模型名称，默认 "deepseek-v4-flash"
         temperature: 温度参数，默认 0
 
     Returns:
@@ -116,7 +117,8 @@ class ContentModerationError(APICallError):
 class DeepSeekClient:
     """DeepSeek API 客户端"""
 
-    DEFAULT_MODEL = "deepseek-chat"
+    # `deepseek-chat` 别名 2026-07-24 退役；显式用 deepseek-v4-flash（当前路由目标）。
+    DEFAULT_MODEL = "deepseek-v4-flash"
     DEFAULT_TEMPERATURE = 0.0
     DEFAULT_MAX_TOKENS = 4096
     DEFAULT_THINKING_MAX_TOKENS = 16384
@@ -137,7 +139,7 @@ class DeepSeekClient:
 
         Args:
             api_key: API Key
-            model: 模型名称，默认 "deepseek-chat"
+            model: 模型名称，默认 "deepseek-v4-flash"
             temperature: 温度参数，默认 0.0
             max_tokens: 最大 token 数，默认 4096
             base_url: API 基础 URL
