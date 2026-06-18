@@ -725,6 +725,16 @@ class ThesisProjection(BaseModel):
         description="确定性加权支持分 Σ(weight×supports×置信系数)（本地计算附加，"
         "供人工对照 LLM 综合是否离谱；旧产物无此字段）",
     )
+    no_quantitative_anchor: bool = Field(
+        default=False,
+        description="thesis 经一次 S2 重试后仍无任何引擎可验证的公司级财务驱动环节"
+        "（n_quant=0）；为 True 时 our_growth 无定量锚，受限于 thesis 设计而非数据缺失"
+        "（旧产物无此字段，默认 False 向后兼容）",
+    )
+    no_anchor_reason: str | None = Field(
+        default=None,
+        description="no_quantitative_anchor=True 时的原因说明（供报告/人工审查；旧产物无此字段）",
+    )
     evidence_chain: list[Evidence] = Field(
         default_factory=list, description="逐 link 证据链（本地附加）"
     )
@@ -758,6 +768,10 @@ class ThesisProjection(BaseModel):
             else []
         )
         weighted_support = data.get("weighted_support")
+        no_anchor = data.get("no_quantitative_anchor", False)
+        if isinstance(no_anchor, str):
+            no_anchor = no_anchor.strip().lower() in ("true", "1", "yes", "是")
+        no_anchor_reason = data.get("no_anchor_reason")
         return cls(
             thesis_aligned=bool(thesis_aligned),
             our_growth=float(our_growth),
@@ -765,6 +779,10 @@ class ThesisProjection(BaseModel):
             reasoning=str(data.get("reasoning", "")),
             weighted_support=(
                 float(weighted_support) if weighted_support is not None else None
+            ),
+            no_quantitative_anchor=bool(no_anchor),
+            no_anchor_reason=(
+                str(no_anchor_reason) if no_anchor_reason is not None else None
             ),
             evidence_chain=evidence_chain,
         )
