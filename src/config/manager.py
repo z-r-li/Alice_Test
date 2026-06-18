@@ -189,7 +189,7 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     Example:
         >>> config = load_config("config.yaml")
         >>> print(config.llm_api.model)
-        deepseek-chat
+        deepseek-v4-flash
 
         >>> for target in config.targets:
         ...     print(f"{target.ticker}: {target.name}")
@@ -249,7 +249,7 @@ def get_config(path: str | Path | None = None, reload: bool = False) -> AppConfi
         >>> # 首次加载
         >>> config = get_config("config.yaml")
         >>> print(config.llm_api.model)
-        deepseek-chat
+        deepseek-v4-flash
 
         >>> # 后续访问（使用缓存）
         >>> config = get_config()

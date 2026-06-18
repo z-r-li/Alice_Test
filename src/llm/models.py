@@ -44,26 +44,36 @@ class LLMResponse(BaseModel):
 
     def get_cost_estimate(
         self,
-        input_price_per_1m: float = 0.27,
-        output_price_per_1m: float = 1.10,
+        input_price_per_1m: float = 0.14,
+        output_price_per_1m: float = 0.28,
+        cache_hit_price_per_1m: float = 0.0028,
+        cached_tokens: int = 0,
     ) -> float:
         """
-        估算调用成本（基于 DeepSeek-Chat 定价）
+        估算调用成本（基于 DeepSeek-V4-Flash 现价）
 
-        DeepSeek-Chat 定价（2024）:
-        - 输入: $0.27 / 1M tokens
-        - 输出: $1.10 / 1M tokens
+        DeepSeek-V4-Flash 定价（现价，`deepseek-chat` 已路由至此）:
+        - 输入（缓存未命中）: $0.14 / 1M tokens
+        - 输入（缓存命中）: $0.0028 / 1M tokens
+        - 输出: $0.28 / 1M tokens
+
+        （旧的 $0.27 / $1.10 是 V3/2024 价，高估 2–4 倍。）
 
         Args:
-            input_price_per_1m: 输入每百万 token 价格（美元）
+            input_price_per_1m: 输入（缓存未命中）每百万 token 价格（美元）
             output_price_per_1m: 输出每百万 token 价格（美元）
+            cache_hit_price_per_1m: 缓存命中输入每百万 token 价格（美元）
+            cached_tokens: prompt_tokens 中命中缓存的 token 数（默认 0，即全部按未命中计价）
 
         Returns:
             float: 估算成本（美元）
         """
-        input_cost = self.prompt_tokens / 1_000_000 * input_price_per_1m
+        cached = max(0, min(cached_tokens, self.prompt_tokens))
+        uncached_input = self.prompt_tokens - cached
+        input_cost = uncached_input / 1_000_000 * input_price_per_1m
+        cache_cost = cached / 1_000_000 * cache_hit_price_per_1m
         output_cost = self.completion_tokens / 1_000_000 * output_price_per_1m
-        return input_cost + output_cost
+        return input_cost + cache_cost + output_cost
 
 
 class ConsensusResult(BaseModel):

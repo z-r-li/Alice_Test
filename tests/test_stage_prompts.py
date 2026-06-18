@@ -70,6 +70,18 @@ class TestStagePromptFormatting:
         assert "0. [w=0.30]" in user and "1. [w=0.70]" in user
         assert "上游成本可控" in user
 
+    def test_proxy_prompt_states_engine_capability_whitelist(self):
+        """P0-1：S3 系统指令必须给出「可计算指标白名单」并要求越界项不得标 quantitative。"""
+        system, _ = PromptTemplates.format_proxy_prompt(
+            ticker="601985.SH", ticker_name="中国核电", links=[]
+        )
+        assert "白名单" in system
+        # 白名单内指标点名（引擎真能算的）
+        assert "forward PE" in system and "PEG" in system and "毛利率" in system
+        # 越界例子被点名为不得标 quantitative
+        assert "due_diligence" in system
+        assert any(k in system for k in ("行业 ROE", "分部收入", "在手订单", "回购金额"))
+
     def test_evidence_prompt_fences_material(self):
         system, user = PromptTemplates.format_evidence_prompt(
             ticker="601985.SH",

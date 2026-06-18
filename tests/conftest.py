@@ -57,7 +57,7 @@ def sample_app_config(sample_target_config: TargetConfig) -> AppConfig:
         llm_api=LLMConfig(
             provider="deepseek",
             api_key="test-api-key",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             temperature=0.0,
         ),
         targets=[sample_target_config],
@@ -72,7 +72,7 @@ def sample_config_dict() -> dict:
         "llm_api": {
             "provider": "deepseek",
             "api_key": "test-key",
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "temperature": 0,
         },
         "targets": [
@@ -254,7 +254,7 @@ def sample_config_yaml_content() -> str:
 llm_api:
   provider: "deepseek"
   api_key: "test-api-key"
-  model: "deepseek-chat"
+  model: "deepseek-v4-flash"
   temperature: 0
 
 targets:

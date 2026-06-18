@@ -428,34 +428,48 @@ class TestLLMResponse:
         """测试创建 LLMResponse"""
         response = LLMResponse(
             content='{"sentiment_score": 50}',
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             prompt_tokens=100,
             completion_tokens=50,
         )
         assert response.content == '{"sentiment_score": 50}'
-        assert response.model == "deepseek-chat"
+        assert response.model == "deepseek-v4-flash"
 
     def test_get_total_tokens(self):
         """测试获取总 token 数"""
         response = LLMResponse(
             content="test",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             prompt_tokens=100,
             completion_tokens=50,
         )
         assert response.get_total_tokens() == 150
 
     def test_get_cost_estimate(self):
-        """测试成本估算"""
+        """测试成本估算（DeepSeek-V4-Flash 现价）"""
         response = LLMResponse(
             content="test",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             prompt_tokens=1_000_000,  # 1M tokens
             completion_tokens=1_000_000,  # 1M tokens
         )
-        # DeepSeek 定价: 输入 $0.27/1M, 输出 $1.10/1M
-        expected_cost = 0.27 + 1.10
+        # V4-Flash 现价: 输入 $0.14/1M, 输出 $0.28/1M（旧 $0.27/$1.10 高估 2–4 倍）
+        expected_cost = 0.14 + 0.28
         assert response.get_cost_estimate() == pytest.approx(expected_cost)
+
+    def test_get_cost_estimate_with_cache_hits(self):
+        """缓存命中 token 按 $0.0028/1M 计价，未命中部分按 $0.14/1M"""
+        response = LLMResponse(
+            content="test",
+            model="deepseek-v4-flash",
+            prompt_tokens=1_000_000,
+            completion_tokens=1_000_000,
+        )
+        # 60% 命中缓存：0.4M×0.14 + 0.6M×0.0028 + 1M×0.28
+        expected = 0.4 * 0.14 + 0.6 * 0.0028 + 0.28
+        assert response.get_cost_estimate(cached_tokens=600_000) == pytest.approx(
+            expected
+        )
 
 
 class TestAuditSignalModel:

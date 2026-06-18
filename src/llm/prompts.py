@@ -242,11 +242,25 @@ $proposition
 # 任务
 为每个环节（按序号 link_index，从 0 开始）指定 proxy_type 与 proxy_spec：
 - proxy_type ∈ {quantitative, qualitative, due_diligence, none}
-  - quantitative：有可量化的财报 / 估值 / 市场数据（营收增速、毛利率、forward PE 等）
+  - quantitative：**仅当**该环节条件能由下方「可计算指标白名单」中的公司级财务/估值指标
+    直接检验时才可用；proxy_spec 必须写明用的是哪个白名单指标。
   - qualitative：有可结构化判断的定性信息（研报 / 新闻 / 互动易中的观点）
   - due_diligence：现实中无现成 proxy，需人工实地尽调（如飞工厂数货车、访谈前员工）
   - none：暂无任何可行 proxy
 - proxy_spec：数据源 / 计算方式 / 尽调说明（due_diligence 时写清要做什么）
+
+# 可计算指标白名单（quantitative 的唯一合法范围）
+本系统的财务引擎只能从【单一公司】的财报与估值算出以下公司级指标：
+营收（及同比 / CAGR）、净利润、毛利率、净利率、经营性现金流（趋势 / 是否为正）、
+trailing PE、forward PE、PEG。
+
+# 越界即不得标 quantitative（强制 due_diligence 或 qualitative）
+凡条件依赖白名单外的数据，**一律不得**标 quantitative——即便能想象到某个数据源。常见越界项：
+- 行业 / 板块 / 同行 / 分部口径（如行业 ROE、板块溢价率、分部收入、市场份额、渗透率）；
+- 上游 / 量价 / 产能（如用电量增速、装机容量、在手订单、船价 / 运价指数、产能利用率）；
+- 资本运作 / 年报披露特项（如回购金额、重置成本、资本开支、ROE / ROA / ROIC、股息）。
+这些若有研报 / 新闻可结构化判断 → qualitative；否则 → due_diligence。引擎算不出的指标
+被误标 quantitative，会让无关财务被当成「验证」，是必须避免的错配。
 
 # 输出格式
 仅返回有效 JSON：
