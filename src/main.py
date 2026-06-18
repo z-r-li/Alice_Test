@@ -47,6 +47,43 @@ from .persistence import CSVReportWriter, AuditReportStore, ArtifactStore
 from .utils import setup_logger, AuditLogger, TextSanitizer
 
 
+def _reconfigure_stdio() -> None:
+    """将 stdout/stderr 切到 UTF-8（errors='replace'）。
+
+    在 Windows GBK/cp936 等非 UTF-8 控制台下，打印 '✓'/'✗'(U+2713/U+2717) 等字符
+    会触发 UnicodeEncodeError。该错误发生在审计完成、CSV 已落盘之后，却会把异常上抛、
+    污染进程退出码，使每日 cron 把成功的运行误报为失败。
+
+    Python 3.7+ 的 TextIOWrapper 提供 reconfigure；不可用或被重定向/包装的流则跳过，
+    交由 _safe_print 兜底。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            # 流不支持重配置（已分离/非真实 TextIO）：忽略
+            pass
+
+
+def _safe_print(*args, **kwargs) -> None:
+    """print 包装：非 UTF-8 控制台下打印不可编码字符时退化为 errors='replace'。
+
+    确保摘要打印永不抛 UnicodeEncodeError、不污染退出码——退出码只应反映审计结果。
+    """
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe_args = [
+            a.encode(enc, "replace").decode(enc, "replace") if isinstance(a, str) else a
+            for a in args
+        ]
+        print(*safe_args, **kwargs)
+
+
 class AliceTestPipeline:
     """Alice Test 主流水线"""
 
@@ -241,12 +278,12 @@ class AliceTestPipeline:
             success_count: 成功数量
             error_count: 错误数量
         """
-        print("\n" + "=" * 60)
-        print("审计摘要")
-        print("=" * 60)
-        print(f"总计: {len(results)} 个标的")
-        print(f"成功: {success_count} | 错误: {error_count}")
-        print("-" * 60)
+        _safe_print("\n" + "=" * 60)
+        _safe_print("审计摘要")
+        _safe_print("=" * 60)
+        _safe_print(f"总计: {len(results)} 个标的")
+        _safe_print(f"成功: {success_count} | 错误: {error_count}")
+        _safe_print("-" * 60)
 
         # 按信号分类统计
         signal_counts: dict[str, int] = {}
@@ -255,22 +292,22 @@ class AliceTestPipeline:
             signal_counts[signal] = signal_counts.get(signal, 0) + 1
 
         if signal_counts:
-            print("信号分布:")
+            _safe_print("信号分布:")
             for signal, count in sorted(signal_counts.items()):
-                print(f"  {signal}: {count}")
-            print("-" * 60)
+                _safe_print(f"  {signal}: {count}")
+            _safe_print("-" * 60)
 
         # 显示每个标的结果
-        print("详细结果:")
+        _safe_print("详细结果:")
         for r in results:
             status_icon = "✓" if r.status == "ok" else "✗"
-            print(
+            _safe_print(
                 f"  {status_icon} {r.ticker:12} {r.name:10} | "
                 f"{r.signal.value:12} | Gap: {r.gap:+6.1f}% | "
                 f"Sentiment: {r.sentiment_score:3}"
             )
 
-        print("=" * 60)
+        _safe_print("=" * 60)
 
     def _process_single_target(self, target: TargetConfig) -> AuditResult:
         """
@@ -539,6 +576,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     """主入口函数"""
+    # 优先把控制台切到 UTF-8，避免摘要里的 '✓'/'✗' 在 Windows GBK 控制台炸退出码
+    _reconfigure_stdio()
+
     args = parse_args()
 
     # 配置日志（--debug 优先于 --verbose）
