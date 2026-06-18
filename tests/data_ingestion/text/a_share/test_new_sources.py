@@ -141,9 +141,25 @@ class TestProfitForecastFetcher:
         # 评级不带「评级:」冒号写法（避免被协调器误判为评级变动）
         assert "评级:" not in items[0].summary
 
-    def test_em_symbol_format(self):
-        assert ProfitForecastFetcher._em_symbol("601985.SH") == "SH601985"
-        assert ProfitForecastFetcher._em_symbol("000001.SZ") == "SZ000001"
+    def test_market_table_cached_across_calls(self, monkeypatch):
+        """全市场一致预期表整轮复用：多次 fetch 仅拉一次（symbol 为板块名，须取全表过滤）。"""
+        calls = {"n": 0}
+        df = pd.DataFrame({
+            "代码": ["601985"], "名称": ["中国核电"],
+            "研报数": ["5"], "2025预测每股收益": ["0.45"],
+        })
+
+        def fake(**k):
+            calls["n"] += 1
+            return df
+
+        _patch_ak(monkeypatch, "stock_profit_forecast_em", fake)
+        f = ProfitForecastFetcher()
+        items1 = f.fetch_texts("601985.SH", "中国核电")
+        items2 = f.fetch_texts("601985.SH", "中国核电")
+        assert calls["n"] == 1  # 整表仅拉一次
+        assert len(items1) == 1 and len(items2) == 1
+        assert "研报数 5" in items1[0].summary
 
     def test_filters_market_wide_table_to_target(self, monkeypatch):
         df = pd.DataFrame({

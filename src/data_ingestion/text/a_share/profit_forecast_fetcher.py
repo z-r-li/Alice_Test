@@ -1,20 +1,22 @@
 """
 A 股机构盈利预测获取器（#65 新增可达共识源）
 
-数据源: 东方财富 — AkShare `stock_profit_forecast_em(symbol=...)`
-用途: 把「机构对公司未来盈利/增速的一致预期」作为 sentiment / implied_growth 的素材，
+数据源: 东方财富 — AkShare `stock_profit_forecast_em()`
+用途: 把「机构对公司未来盈利的一致预期」作为 sentiment / implied_growth 的素材，
       直接抬升 A 股共识素材条数。走 datacenter.eastmoney（本网络可达）。
 
-要点:
-- 盈利预测代表「当前一致预期」，并非时间窗内的新闻，故按报告日期取最新 max_items 条，
-  不做 48h 硬过滤（其余新闻/公告类源仍按窗口过滤）。
-- 列名宽松匹配（机构/研究员/评级/各年度每股收益·净利润等），不同 akshare 版本兼容。
-- 若返回的是含「代码/简称」列的宽表（疑似市场级），过滤到本标的，避免串标的。
-- 任何获取/解析失败都优雅降级为空列表（不影响其他源）；绝不编造数字。
+要点（实测纠偏）:
+- `stock_profit_forecast_em(symbol=...)` 的 symbol 是【行业板块名】而非股票代码；传代码会让
+  接口内部取空→报错。故改为取【全市场一致预期表】(symbol="")，按「代码/名称」过滤到本标的
+  （整表含每股 1 行的一致预期：研报数、近六月评级分布、各年度预测每股收益等）。
+- 全市场表整轮复用（实例级 TTL 缓存）：盈利预测变化慢，避免每标的重复拉全表。
+- 一致预期代表「当前预期」，非时间窗内的新闻，故不做 48h 硬过滤。
+- 列名宽松匹配；任何获取/解析失败都优雅降级为空列表（不影响其他源）；绝不编造数字。
 """
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime
 
 import pandas as pd
@@ -25,10 +27,10 @@ from ..models import TextSourceType
 
 logger = logging.getLogger("alice_test")
 
-# 含这些关键词的列视为「预测/估值」数值列，拼进摘要
+# 含这些关键词的列视为「预测/估值/评级」信息列，拼进摘要
 _FORECAST_COL_KEYWORDS = ("每股收益", "净利润", "预测", "增长", "营收", "目标价", "评级")
-_CODE_COLS = ("股票代码", "代码", "证券代码")
-_NAME_COLS = ("股票简称", "名称", "证券简称", "简称")
+_CODE_COLS = ("代码", "股票代码", "证券代码")
+_NAME_COLS = ("名称", "股票简称", "证券简称", "简称")
 
 
 def _first(row, *names: str) -> str:
@@ -67,6 +69,13 @@ def _parse_dt(value) -> datetime | None:
 class ProfitForecastFetcher(TextProvider):
     """东方财富机构盈利预测获取器（一致预期 → implied_growth 素材）。"""
 
+    # 全市场一致预期表的实例级缓存 TTL（秒）；盈利预测变化慢，整轮复用
+    MARKET_CACHE_TTL_S: float = 3600.0
+
+    def __init__(self) -> None:
+        self._cached_df: pd.DataFrame | None = None
+        self._cached_at: float = 0.0
+
     def fetch_texts(
         self,
         ticker: str,
@@ -80,15 +89,7 @@ class ProfitForecastFetcher(TextProvider):
             return []
 
         symbol = self.extract_symbol(ticker)
-        em_symbol = self._em_symbol(ticker)
-        try:
-            import akshare as ak
-
-            df = ak.stock_profit_forecast_em(symbol=em_symbol)
-        except Exception as e:
-            logger.warning(f"[{ticker}] 盈利预测获取失败: {e}")
-            return []
-
+        df = self._get_market_df()
         if df is None or getattr(df, "empty", True):
             logger.debug(f"[{ticker}] 无盈利预测数据")
             return []
@@ -99,21 +100,30 @@ class ProfitForecastFetcher(TextProvider):
             logger.warning(f"[{ticker}] 盈利预测解析失败: {e}")
             return []
 
-    @staticmethod
-    def _em_symbol(ticker: str) -> str:
-        """东财盈利预测接口的 symbol 形如 SH601985 / SZ000001；非沪深用纯代码兜底。"""
-        t = ticker.upper()
-        code = t.split(".")[0]
-        if t.endswith(".SH"):
-            return f"SH{code}"
-        if t.endswith(".SZ"):
-            return f"SZ{code}"
-        return code
+    def _get_market_df(self) -> pd.DataFrame | None:
+        """取（缓存的）全市场一致预期表；失败返回 None（不缓存失败）。"""
+        now = time.time()
+        if (
+            self._cached_df is not None
+            and (now - self._cached_at) < self.MARKET_CACHE_TTL_S
+        ):
+            return self._cached_df
+        try:
+            import akshare as ak
+
+            # symbol 为行业板块名；留空取全市场（整表含「代码/名称」逐股一致预期）
+            df = ak.stock_profit_forecast_em(symbol="")
+        except Exception as e:
+            logger.warning(f"盈利预测全市场表获取失败: {e}")
+            return None
+        if df is not None and not getattr(df, "empty", True):
+            self._cached_df = df
+            self._cached_at = now
+        return df
 
     def _to_items(
         self, df: pd.DataFrame, symbol: str, name: str, max_items: int
     ) -> list[TextItem]:
-        # 若是含代码/简称的宽表（疑似市场级返回），先过滤到本标的，避免串标的
         df = self._filter_to_target(df, symbol, name)
         if df is None or df.empty:
             return []
@@ -128,11 +138,14 @@ class ProfitForecastFetcher(TextProvider):
             institution = _first(row, "机构", "机构名称", "评级机构", "研究机构")
             analyst = _first(row, "研究员", "分析师")
             rating = _first(row, "评级", "投资评级", "最新评级", "东财评级")
+            report_count = _first(row, "研报数", "机构数")
             published = _parse_dt(
                 _first(row, "报告日期", "日期", "发布日期", "评级日期") or None
             ) or datetime.now()
 
             bits = []
+            if report_count:
+                bits.append(f"研报数 {report_count}")
             for c in forecast_cols:
                 v = _first(row, c)
                 if v:
@@ -153,7 +166,8 @@ class ProfitForecastFetcher(TextProvider):
             if forecast_str:
                 parts.append(forecast_str)
             summary = "｜".join(parts)
-            title = f"盈利预测 · {institution}" if institution else "机构盈利预测一致预期"
+            who = institution or name or "机构"
+            title = f"机构一致盈利预测 · {who}"
 
             rows.append(
                 (
@@ -176,7 +190,10 @@ class ProfitForecastFetcher(TextProvider):
     def _filter_to_target(
         df: pd.DataFrame, symbol: str, name: str
     ) -> pd.DataFrame:
-        """含代码/简称列时过滤到本标的；命中为空则退回原表（按 per-stock 查询处理）。"""
+        """按「代码/名称」过滤到本标的；含代码/名称列但无命中则返回空（避免串标的）。
+
+        无代码/名称列时（如 per-stock 直查返回），原样返回交由后续解析。
+        """
         code_col = next((c for c in df.columns if str(c) in _CODE_COLS), None)
         name_col = next((c for c in df.columns if str(c) in _NAME_COLS), None)
         if not code_col and not name_col:
@@ -189,9 +206,7 @@ class ProfitForecastFetcher(TextProvider):
             if name_col and name and str(name) in str(row[name_col]):
                 ok = True
             mask.append(ok)
-        if any(mask):
-            return df[pd.Series(mask, index=df.index)]
-        return df
+        return df[pd.Series(mask, index=df.index)]
 
     def get_source_name(self) -> str:
         return "东财盈利预测"
