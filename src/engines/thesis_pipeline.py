@@ -48,6 +48,10 @@ class PipelineResult:
     due_diligence_queue: list[dict] = field(default_factory=list)
     used_pipeline: bool = True  # False 表示回退到了单次投影
     artifact_dir: str | None = None
+    # #8：S2 驱动环节确定性校验的结果（供报告/main 摘要；不进 CSV 列）
+    n_quantitative_drivers: int = 0  # 过完 S3 后仍为 quantitative 的环节数 (n_quant)
+    s2_retried: bool = False  # 是否触发了一次有界 S2 驱动重试
+    no_quantitative_anchor: bool = False  # 重试后仍 n_quant==0（our_growth 无定量锚）
 
     def to_projection_result(self) -> ThesisProjectionResult:
         """退化为向后兼容的 ThesisProjectionResult（喂给 GapCalculator）"""
@@ -132,21 +136,52 @@ class ThesisPipeline:
             success_conditions=refined.success_conditions,
             kill_criteria=refined.kill_criteria, horizon=refined.horizon,
         )
-        self._persist(ticker, audit_date, "logic_chain", chain, 2)
+        s2_snapshot = chain.model_copy(deep=True)  # S2 纯链路快照（proxy 前）
 
-        # S3 Proxy 映射（合并回链路）
-        links_payload = [
-            {"statement": l.statement, "weight": l.weight, "condition": l.condition}
-            for l in chain.links
-        ]
-        mapping: ProxyMapping = self._llm.get_proxy_mapping(
-            ticker=ticker, ticker_name=safe_name, links=links_payload
-        )
-        for a in mapping.assignments:
-            if 0 <= a.link_index < len(chain.links):
-                chain.links[a.link_index].proxy_type = a.proxy_type
-                chain.links[a.link_index].proxy_spec = a.proxy_spec
-        self._enforce_proxy_capability(chain, ticker)
+        # S3 Proxy 映射（合并回链路）+ 代码侧能力兜底
+        mapping = self._map_and_enforce(chain, ticker, safe_name)
+
+        # #8：确定性校验——过完 S3 后是否仍有可被引擎验证的驱动环节（唯一真源 = enforce 后
+        # 仍为 quantitative 的环节数；is_proxy_computable 已在 enforce 内挡掉越界冒充）。
+        n_quant = self._count_quantitative(chain)
+        s2_retried = False
+        no_quant_anchor = False
+        no_anchor_reason: str | None = None
+        if n_quant == 0:
+            # 一次有界 S2 重试：明确要求至少 1 条白名单内的公司级财务驱动 condition。
+            s2_retried = True
+            self._logger.info(
+                f"[{ticker}] S3 后无引擎可验证驱动环节 (n_quant=0)，触发一次 S2 驱动重试"
+            )
+            try:
+                retry_chain = self._llm.get_logic_chain(
+                    ticker=ticker, ticker_name=safe_name,
+                    proposition=refined.proposition,
+                    success_conditions=refined.success_conditions,
+                    kill_criteria=refined.kill_criteria, horizon=refined.horizon,
+                    enforce_driver=True,
+                )
+                retry_snapshot = retry_chain.model_copy(deep=True)
+                retry_mapping = self._map_and_enforce(retry_chain, ticker, safe_name)
+            except Exception as e:
+                self._logger.warning(
+                    f"[{ticker}] S2 驱动重试失败，保留原链路并标无定量锚: {e}"
+                )
+                retry_chain = None
+            if retry_chain is not None:
+                # 采用重试链路（更强约束下的最佳尝试）
+                chain, mapping, s2_snapshot = retry_chain, retry_mapping, retry_snapshot
+                n_quant = self._count_quantitative(chain)
+            if n_quant == 0:
+                # 重试仍无驱动：不编造定量，记可选标记，让 S5 与报告显式说明无锚。
+                no_quant_anchor = True
+                no_anchor_reason = (
+                    "S2 经一次重试后仍无白名单内可被财务引擎验证的公司级财务驱动环节 "
+                    "(n_quant=0)；our_growth 无定量锚，受限于 thesis 设计而非数据缺失。"
+                )
+                self._logger.warning(f"[{ticker}] {no_anchor_reason}")
+
+        self._persist(ticker, audit_date, "logic_chain", s2_snapshot, 2)
         self._persist(ticker, audit_date, "proxy_mapping", mapping, 3)
 
         # S4 逐 link 证据
@@ -187,11 +222,14 @@ class ThesisPipeline:
         projection: ThesisProjection = self._llm.get_thesis_synthesis(
             ticker=ticker, ticker_name=safe_name,
             proposition=refined.proposition, evidence_items=evidence_items,
+            no_quantitative_anchor=no_quant_anchor,
         )
         projection.evidence_chain = evidence_list
         projection.refined_thesis = refined
         projection.logic_chain = chain
         projection.weighted_support = self.weighted_support(chain)
+        projection.no_quantitative_anchor = no_quant_anchor
+        projection.no_anchor_reason = no_anchor_reason
         self._persist(ticker, audit_date, "thesis_projection", projection, 5)
 
         artifact_dir = (
@@ -205,7 +243,40 @@ class ThesisPipeline:
             due_diligence_queue=dd_queue,
             used_pipeline=True,
             artifact_dir=artifact_dir,
+            n_quantitative_drivers=n_quant,
+            s2_retried=s2_retried,
+            no_quantitative_anchor=no_quant_anchor,
         )
+
+    def _map_and_enforce(
+        self, chain: LogicChain, ticker: str, safe_name: str
+    ) -> ProxyMapping:
+        """S3：为链路逐环节匹配 proxy（合并回 chain）+ 代码侧能力兜底降级。
+
+        抽成独立步骤，使 #8 的 S2 驱动重试能在新链路上重跑同一套映射 + enforce。
+        """
+        links_payload = [
+            {"statement": l.statement, "weight": l.weight, "condition": l.condition}
+            for l in chain.links
+        ]
+        mapping: ProxyMapping = self._llm.get_proxy_mapping(
+            ticker=ticker, ticker_name=safe_name, links=links_payload
+        )
+        for a in mapping.assignments:
+            if 0 <= a.link_index < len(chain.links):
+                chain.links[a.link_index].proxy_type = a.proxy_type
+                chain.links[a.link_index].proxy_spec = a.proxy_spec
+        self._enforce_proxy_capability(chain, ticker)
+        return mapping
+
+    @staticmethod
+    def _count_quantitative(chain: LogicChain) -> int:
+        """过完 S3 + enforce 后仍为 quantitative 的环节数 (n_quant)。
+
+        enforce 已把越界（is_proxy_computable=False）的 quantitative 降级为 due_diligence，
+        故此计数 == 引擎真正可验证的驱动环节数，与 S3 用同一真源（is_proxy_computable）。
+        """
+        return sum(1 for l in chain.links if l.proxy_type == "quantitative")
 
     def _enforce_proxy_capability(self, chain: LogicChain, ticker: str) -> None:
         """S3 代码侧兜底：把指向引擎算不出指标的 quantitative 环节降级为尽调。

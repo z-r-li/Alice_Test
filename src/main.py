@@ -382,7 +382,11 @@ class AliceTestPipeline:
         n = len(pr.evidence)
         supported = sum(1 for e in pr.evidence if e.supports)
         dd = len(pr.due_diligence_queue)
-        return f"证据链 {n} 环节（支持 {supported}）；尽调队列 {dd} 项"
+        summary = f"证据链 {n} 环节（支持 {supported}）；尽调队列 {dd} 项"
+        # #8：thesis 无引擎可验证驱动时显式标注 our_growth 无定量锚（受限于 thesis，非数据缺失）
+        if pr.no_quantitative_anchor:
+            summary += "；our_growth 无定量锚（thesis 无引擎可验证驱动，经 S2 重试仍 n_quant=0）"
+        return summary
 
     def _ingest_data(self, target: TargetConfig) -> TickerRawData:
         """
