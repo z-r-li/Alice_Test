@@ -44,7 +44,7 @@ from .engines import (
     RiskConfig,
 )
 from .engines.thesis_pipeline import PipelineResult
-from .engines.risk_engine import WAIT
+from .engines.risk_engine import WAIT, UNKNOWN_CLUSTER
 from .llm import DeepSeekClient
 from .persistence import CSVReportWriter, AuditReportStore, ArtifactStore
 from .utils import setup_logger, AuditLogger, TextSanitizer
@@ -311,7 +311,12 @@ class AliceTestPipeline:
         """
         if self._risk_engine is None:
             return
-        industry_by_ticker = {t.ticker: t.industry for t in targets}
+        # 把占位「未知」/空白行业归一到引擎的 UNKNOWN 哨兵：否则所有未填 industry 的标的
+        # （TargetConfig.industry 默认 "未知"）会被并成一个合成簇，互相 correlation_flags，
+        # 且 ≥4 个时 0.05×N 超 max_cluster_weight 触发错误等比缩权。
+        industry_by_ticker = {
+            t.ticker: self._normalize_industry(t.industry) for t in targets
+        }
         sized = [r for r in results if r.status == "ok"]
         assessments = self._risk_engine.assess_portfolio(
             sized, industry_by_ticker=industry_by_ticker
@@ -330,6 +335,18 @@ class AliceTestPipeline:
             r.correlation_flags = a.correlation_flags
             r.risk_adjusted_action = a.risk_adjusted_action
             r.risk_contribution = a.risk_contribution
+
+    @staticmethod
+    def _normalize_industry(industry: str | None) -> str:
+        """空白 / 占位「未知」→ 引擎的 UNKNOWN 哨兵；其余原样返回。
+
+        TargetConfig.industry 默认 "未知"，与引擎免聚类的 UNKNOWN_CLUSTER("UNKNOWN")
+        不是同一字符串；不归一会把未填行业的标的误当成真实同簇。
+        """
+        s = (industry or "").strip()
+        if not s or s == "未知":
+            return UNKNOWN_CLUSTER
+        return s
 
     def _print_summary(
         self,

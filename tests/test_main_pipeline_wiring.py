@@ -50,6 +50,7 @@ def _make_pipeline(
     our_growth=18.0,
     implied_growth=8.0,
     risk_enabled=True,
+    targets=None,
 ):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     from src.main import AliceTestPipeline
@@ -73,7 +74,7 @@ def _make_pipeline(
             "path": str(tmp_path / "out.csv"),
             "artifacts_dir": str(tmp_path / "artifacts"),
         },
-        "targets": [
+        "targets": targets if targets is not None else [
             {"ticker": "601985.SH", "name": "中国核电",
              "thesis": "AI算力需要稳定基荷电力，核电是物理刚需。", "industry": "电力"}
         ],
@@ -190,3 +191,22 @@ class TestMainPipelineWiring:
         assert r.risk_adjusted_action != "BUY"  # 不建议买入
         # 结构性退出（来自 thesis kill_criteria，与行情无关）仍可填充
         assert r.structural_exit == ["核心政策逆转", "毛利率持续下滑"]
+
+    def test_unknown_industry_not_clustered(self, monkeypatch, tmp_path):
+        # 未填 industry（TargetConfig 默认 "未知"）不应被并成一个合成簇：
+        # 4 个 OPPORTUNITY × 0.05 = 0.20 > 0.15，若误当真实同簇会错误缩权到 0.0375。
+        # 归一到引擎 UNKNOWN 哨兵后：各自 0.05、互不 correlation_flag。
+        targets = [
+            {"ticker": f"T{i}.SH", "name": f"标的{i}",
+             "thesis": f"信念{i}：长期成长。"}  # 不写 industry → 默认 "未知"
+            for i in range(4)
+        ]
+        pipeline, config = _make_pipeline(
+            monkeypatch, tmp_path, our_growth=25.0, implied_growth=8.0,
+            targets=targets,
+        )
+        results = pipeline.run()
+        assert len(results) == 4
+        assert all(r.signal is AuditSignal.OPPORTUNITY for r in results)
+        assert all(r.suggested_weight == pytest.approx(0.05) for r in results)
+        assert all(r.correlation_flags == [] for r in results)
