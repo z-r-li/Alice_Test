@@ -40,8 +40,11 @@ from .engines import (
     AuditResult,
     FinancialAnalysisEngine,
     ThesisPipeline,
+    RiskEngine,
+    RiskConfig,
 )
 from .engines.thesis_pipeline import PipelineResult
+from .engines.risk_engine import WAIT
 from .llm import DeepSeekClient
 from .persistence import CSVReportWriter, AuditReportStore, ArtifactStore
 from .utils import setup_logger, AuditLogger, TextSanitizer
@@ -137,6 +140,29 @@ class AliceTestPipeline:
         # P1: S1–S5 多阶段流水线 + S4 财报分析 + 阶段产物持久化
         self._artifact_store = ArtifactStore(self._config.output.artifacts_dir)
         self._thesis_pipeline = self._build_thesis_pipeline()
+
+        # S6: 组合层风控引擎（纯函数、确定性；config.risk.enabled=False 时为 None）
+        self._risk_engine = self._build_risk_engine()
+
+    def _build_risk_engine(self) -> RiskEngine | None:
+        """构建 S6 风控引擎（config.risk.enabled=False 时返回 None，跳过风控叠加）。
+
+        把 pydantic 侧 `RiskControlConfig` 映射为引擎侧 `RiskConfig` 数据类后注入。
+        """
+        rc = getattr(self._config, "risk", None)
+        if rc is None or not rc.enabled:
+            return None
+        return RiskEngine(
+            RiskConfig(
+                ref_weight=rc.ref_weight,
+                soft_cap=rc.soft_cap,
+                target_positions=rc.target_positions,
+                max_cluster_weight=rc.max_cluster_weight,
+                total_risk_budget=rc.total_risk_budget,
+                sizing_mode=rc.sizing_mode,
+                enabled=rc.enabled,
+            )
+        )
 
     def _build_thesis_pipeline(self) -> ThesisPipeline | None:
         """构建多阶段信念流水线（pipeline.enabled=False 时回退单次 ThesisProjector）"""
@@ -238,6 +264,11 @@ class AliceTestPipeline:
                     import traceback
                     self._py_logger.debug(traceback.format_exc())
 
+        # S6: 组合层叠加（跨标的）——相关性/聚类 + 整体风险预算归一化，回填每个 AuditResult。
+        # 第二遍纯函数处理整批结果；行业取自 TargetConfig.industry（AuditResult 无该字段）。
+        if self._risk_engine is not None and results:
+            self._apply_portfolio_risk(results, targets)
+
         # 保存结果
         if results:
             try:
@@ -263,6 +294,42 @@ class AliceTestPipeline:
             target = self._config.get_target_by_ticker(self._ticker_filter)
             return [target] if target else []
         return self._config.targets
+
+    def _apply_portfolio_risk(
+        self, results: list[AuditResult], targets: list[TargetConfig]
+    ) -> None:
+        """S6 组合层叠加：对整批 results 跑 assess_portfolio 并回填跨标的风控字段。
+
+        回填跨标的产物（suggested_weight / correlation_flags / risk_adjusted_action /
+        risk_contribution）；structural_exit / quant_exit_target 已在 assess_one 按标的填好，
+        此处不覆盖（assess_portfolio 未喂 kill_criteria）。
+
+        只对数据完好（status=="ok"）的标的做 sizing：降级运行（data_error，如行情占位
+        price=0.0）即便信号恰为 OPPORTUNITY，也不应拿正权重 / 给 BUY，更不应占用同簇与
+        整体风险预算额度、稀释正常标的——故按 status 过滤，非 ok 标的中性置零。
+        空机会集 / 全 WAIT 时 assess_portfolio 优雅返回全 0。
+        """
+        if self._risk_engine is None:
+            return
+        industry_by_ticker = {t.ticker: t.industry for t in targets}
+        sized = [r for r in results if r.status == "ok"]
+        assessments = self._risk_engine.assess_portfolio(
+            sized, industry_by_ticker=industry_by_ticker
+        )
+        by_ticker = {a.ticker: a for a in assessments}
+        for r in results:
+            a = by_ticker.get(r.ticker)
+            if a is None:
+                # 非 ok（未参与 sizing）：中性化跨标的风控字段，不给权重 / 不给 BUY
+                r.suggested_weight = 0.0
+                r.correlation_flags = []
+                r.risk_adjusted_action = WAIT
+                r.risk_contribution = None
+                continue
+            r.suggested_weight = a.suggested_weight
+            r.correlation_flags = a.correlation_flags
+            r.risk_adjusted_action = a.risk_adjusted_action
+            r.risk_contribution = a.risk_contribution
 
     def _print_summary(
         self,
@@ -301,10 +368,15 @@ class AliceTestPipeline:
         _safe_print("详细结果:")
         for r in results:
             status_icon = "✓" if r.status == "ok" else "✗"
+            # S6: 建议仓位 / 风险动作（风控未启用或未评估时显示占位 '-'）
+            weight = getattr(r, "suggested_weight", None)
+            weight_str = f"{weight * 100:5.1f}%" if weight is not None else "    - "
+            action = getattr(r, "risk_adjusted_action", None) or "-"
             _safe_print(
                 f"  {status_icon} {r.ticker:12} {r.name:10} | "
                 f"{r.signal.value:12} | Gap: {r.gap:+6.1f}% | "
-                f"Sentiment: {r.sentiment_score:3}"
+                f"Sentiment: {r.sentiment_score:3} | "
+                f"建议仓位: {weight_str} | 风险动作: {action}"
             )
 
         _safe_print("=" * 60)
@@ -372,7 +444,26 @@ class AliceTestPipeline:
                     f"  [{target.ticker}] 尽调队列 {len(pipeline_result.due_diligence_queue)} 项"
                 )
 
+        # S6: 单标的风控基线——结构性退出 + 量化退出占位（kill_criteria 在 PipelineResult
+        # 作用域内可达）。跨标的 sizing / 相关性 / 最终 risk_adjusted_action 由循环后的
+        # assess_portfolio 统一裁定（权威写者），故此处只填按标的产物、不写 action。
+        if self._risk_engine is not None:
+            kill_criteria = self._kill_criteria_of(pipeline_result)
+            ra = self._risk_engine.assess_one(result, kill_criteria=kill_criteria)
+            result.structural_exit = ra.structural_exit
+            result.quant_exit_target = ra.quant_exit_target
+
         return result
+
+    @staticmethod
+    def _kill_criteria_of(pr: PipelineResult | None) -> list[str]:
+        """从 S1 RefinedThesis 取结构性退出条件（kill_criteria），空安全。
+
+        回退路径（used_pipeline=False）下 refined_thesis 为 None → 返回空列表。
+        """
+        if pr is None or pr.refined_thesis is None:
+            return []
+        return list(pr.refined_thesis.kill_criteria or [])
 
     @staticmethod
     def _summarize_evidence(pr: PipelineResult) -> str:

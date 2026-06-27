@@ -27,6 +27,7 @@ from .models import (
     OutputConfig,
     SchedulerConfig,
     GapThresholdConfig,
+    RiskControlConfig,
 )
 
 __all__ = [
@@ -52,4 +53,5 @@ __all__ = [
     "OutputConfig",
     "SchedulerConfig",
     "GapThresholdConfig",
+    "RiskControlConfig",
 ]

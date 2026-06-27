@@ -60,6 +60,14 @@ class AuditResult:
     artifact_dir: str | None = None  # S1–S5 产物 JSON 目录
     evidence_summary: str | None = None  # 证据链 / 尽调队列一句话摘要
 
+    # S6: 组合层风控回填字段（RiskEngine；向后兼容扩展，默认 None；不改动原 CSV 14 列）
+    suggested_weight: float | None = None  # 建议仓位（~ref_weight 软参考、非硬顶）
+    correlation_flags: list[str] | None = None  # 同簇 / 高相关的其他 ticker
+    structural_exit: list[str] | None = None  # 结构性退出触发（来自 S1 kill_criteria）
+    quant_exit_target: float | None = None  # 量化退出目标价 / 估值（D3 待定，v0.1 留空）
+    risk_adjusted_action: str | None = None  # 叠加风控后动作 BUY / TRIM / WAIT / EXIT
+    risk_contribution: float | None = None  # 对组合总风险的贡献（v0.2 接相关阵后算）
+
 
 class GapCalculator:
     """Gap 计算器与信号判定"""
