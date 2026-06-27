@@ -550,6 +550,38 @@ class PipelineConfig(BaseModel):
     )
 
 
+class RiskControlConfig(BaseModel):
+    """S6 组合层风控配置（pydantic 版，镜像 engines.risk_engine.RiskConfig）。
+
+    阈值均可在 config.yaml 的 `risk:` 段覆盖；main.py 将其映射为引擎侧
+    `RiskConfig` 数据类后注入 `RiskEngine`。v0.1 仅用到 sizing_mode="equal"
+    占位，conviction / risk_budget 待 6/28 会议 D1 定后启用。
+    """
+
+    ref_weight: float = Field(
+        default=0.05, ge=0.0, le=1.0, description="单笔软参考权重（非硬顶）"
+    )
+    soft_cap: float = Field(
+        default=0.10, ge=0.0, le=1.0, description="单笔软护栏（可被风险预算进一步压低）"
+    )
+    target_positions: int = Field(
+        default=20, gt=0, le=500, description="目标持仓数（~20 × 5% ≈ 满仓）"
+    )
+    max_cluster_weight: float = Field(
+        default=0.15, ge=0.0, le=1.0, description="同簇（行业/主题）合计权重上限"
+    )
+    total_risk_budget: float = Field(
+        default=1.0, ge=0.0, le=1.0, description="组合总投入上限（1.0=可满仓；现金=1-Σw）"
+    )
+    sizing_mode: Literal["equal", "conviction", "risk_budget"] = Field(
+        default="equal",
+        description="v0.1 仅 equal 生效；conviction / risk_budget 待 D1 定后启用",
+    )
+    enabled: bool = Field(
+        default=True, description="是否启用 S6 组合层风控叠加（关闭则不回填风控字段）"
+    )
+
+
 class AppConfig(BaseModel):
     """
     应用总配置
@@ -585,6 +617,7 @@ class AppConfig(BaseModel):
     financial_analysis: FinancialAnalysisConfig = Field(
         default_factory=FinancialAnalysisConfig
     )
+    risk: RiskControlConfig = Field(default_factory=RiskControlConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     gap_thresholds: GapThresholdConfig = Field(default_factory=GapThresholdConfig)
 

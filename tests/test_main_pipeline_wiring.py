@@ -12,6 +12,7 @@ import pytest
 from src.config import load_config_from_dict
 from src.data_ingestion.models import QuoteData
 from src.data_ingestion.text import TextProviderFactory
+from src.engines.gap_calculator import AuditSignal
 from src.persistence import ArtifactStore, CSVReportWriter
 from tests.fakes import FakeLLMClient
 
@@ -41,7 +42,16 @@ class _FailingQuotesProvider:
         return True
 
 
-def _make_pipeline(monkeypatch, tmp_path, *, pipeline_enabled=True):
+def _make_pipeline(
+    monkeypatch,
+    tmp_path,
+    *,
+    pipeline_enabled=True,
+    our_growth=18.0,
+    implied_growth=8.0,
+    risk_enabled=True,
+    targets=None,
+):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     from src.main import AliceTestPipeline
 
@@ -50,18 +60,21 @@ def _make_pipeline(monkeypatch, tmp_path, *, pipeline_enabled=True):
     monkeypatch.setattr(
         AliceTestPipeline,
         "_create_llm_client",
-        lambda self: FakeLLMClient(our_growth=18.0, implied_growth=8.0, n_links=3),
+        lambda self: FakeLLMClient(
+            our_growth=our_growth, implied_growth=implied_growth, n_links=3
+        ),
     )
 
     config = load_config_from_dict({
         "data_sources": {"crawler": {"use_mock": True}},
         "financial_analysis": {"use_mock": True},
         "pipeline": {"enabled": pipeline_enabled},
+        "risk": {"enabled": risk_enabled},
         "output": {
             "path": str(tmp_path / "out.csv"),
             "artifacts_dir": str(tmp_path / "artifacts"),
         },
-        "targets": [
+        "targets": targets if targets is not None else [
             {"ticker": "601985.SH", "name": "中国核电",
              "thesis": "AI算力需要稳定基荷电力，核电是物理刚需。", "industry": "电力"}
         ],
@@ -124,3 +137,76 @@ class TestMainPipelineWiring:
         # 仍产出有效结果（单次 ThesisProjector 路径）
         assert result.gap == pytest.approx(18.0 - 8.0)
         assert result.artifact_dir is None
+
+    def test_risk_engine_backfills_opportunity_fields(self, monkeypatch, tmp_path):
+        # S6 接线：OPPORTUNITY 标的（gap=25-8=17>10、sentiment=35<40、thesis_aligned）
+        # 经端到端 mock 流水线后，应回填 suggested_weight + structural_exit。
+        pipeline, config = _make_pipeline(
+            monkeypatch, tmp_path, our_growth=25.0, implied_growth=8.0
+        )
+        assert pipeline._risk_engine is not None
+        results = pipeline.run()
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.signal is AuditSignal.OPPORTUNITY
+        # 组合层 sizing：单标的 → 默认 ref_weight 0.05（受软护栏/簇上限/预算约束，未触顶）
+        assert r.suggested_weight == pytest.approx(0.05)
+        assert r.risk_adjusted_action == "BUY"
+        # 结构性退出来自 S1 RefinedThesis.kill_criteria（FakeLLMClient 固定值）
+        assert r.structural_exit == ["核心政策逆转", "毛利率持续下滑"]
+        # 单标的、单簇 → 无同簇相关 flag；D3 量化退出 v0.1 留空
+        assert r.correlation_flags == []
+        assert r.quant_exit_target is None
+
+    def test_risk_disabled_leaves_fields_none(self, monkeypatch, tmp_path):
+        # config.risk.enabled=False → 不构建引擎、不回填，风控字段保持 None（向后兼容）。
+        pipeline, config = _make_pipeline(
+            monkeypatch, tmp_path, our_growth=25.0, implied_growth=8.0,
+            risk_enabled=False,
+        )
+        assert pipeline._risk_engine is None
+        r = pipeline.run()[0]
+        assert r.signal is AuditSignal.OPPORTUNITY  # 信号判定不受风控开关影响
+        assert r.suggested_weight is None
+        assert r.structural_exit is None
+        assert r.risk_adjusted_action is None
+        assert r.correlation_flags is None
+
+    def test_data_error_not_sized_even_if_opportunity(self, monkeypatch, tmp_path):
+        # 降级运行：行情全失败 → status=data_error，占位 price=0.0。即便信号恰为
+        # OPPORTUNITY（gap/sentiment 仍按值判定），也不得拿正权重 / 给 BUY，
+        # 不占用同簇与整体风险预算（否则会稀释正常标的）。
+        pipeline, config = _make_pipeline(
+            monkeypatch, tmp_path, our_growth=25.0, implied_growth=8.0
+        )
+        monkeypatch.setattr(
+            pipeline, "_select_quotes_provider",
+            lambda ticker: _FailingQuotesProvider(),
+        )
+        r = pipeline.run()[0]
+        assert r.status == "data_error"
+        assert r.signal is AuditSignal.OPPORTUNITY  # 信号本身不被风控否决
+        assert r.suggested_weight == 0.0  # 但不给正权重
+        assert r.risk_adjusted_action != "BUY"  # 不建议买入
+        # 结构性退出（来自 thesis kill_criteria，与行情无关）仍可填充
+        assert r.structural_exit == ["核心政策逆转", "毛利率持续下滑"]
+
+    def test_unknown_industry_not_clustered(self, monkeypatch, tmp_path):
+        # 未填 industry（TargetConfig 默认 "未知"）不应被并成一个合成簇：
+        # 4 个 OPPORTUNITY × 0.05 = 0.20 > 0.15，若误当真实同簇会错误缩权到 0.0375。
+        # 归一到引擎 UNKNOWN 哨兵后：各自 0.05、互不 correlation_flag。
+        targets = [
+            {"ticker": f"T{i}.SH", "name": f"标的{i}",
+             "thesis": f"信念{i}：长期成长。"}  # 不写 industry → 默认 "未知"
+            for i in range(4)
+        ]
+        pipeline, config = _make_pipeline(
+            monkeypatch, tmp_path, our_growth=25.0, implied_growth=8.0,
+            targets=targets,
+        )
+        results = pipeline.run()
+        assert len(results) == 4
+        assert all(r.signal is AuditSignal.OPPORTUNITY for r in results)
+        assert all(r.suggested_weight == pytest.approx(0.05) for r in results)
+        assert all(r.correlation_flags == [] for r in results)
