@@ -199,10 +199,16 @@ class ConsensusResult(BaseModel):
             KeyError: 缺少必需字段且无默认值
         """
         # 处理字段名映射：implied_growth_rate (PRD) -> implied_growth (内部)
-        implied_growth = data.get(
-            "implied_growth",
-            data.get("implied_growth_rate", 0.0),
-        )
+        # C1 fail-closed：核心增长字段缺失 / 为 null 时**绝不补 0.0**——否则无效 LLM 输出会被
+        # 洗成「市场隐含 0%」的正常样本，污染 gap / 信号 / 校准。缺字段抛错，由 _parse_json_response
+        # 包装为 JSONParseError 触发 JSON repair / 重试；重试仍缺则向上 fail-closed。
+        # （显式的 0.0 是有效值，照常保留——只拦截「缺失 / null」。）
+        implied_growth = data.get("implied_growth", data.get("implied_growth_rate"))
+        if implied_growth is None:
+            raise ValueError(
+                "ConsensusResult 缺少核心字段 implied_growth / implied_growth_rate；"
+                "fail-closed 拒绝补 0.0，触发重试 / 尽调。"
+            )
 
         return cls(
             sentiment_score=int(data.get("sentiment_score", 0)),
@@ -359,10 +365,13 @@ class ThesisProjectionResult(BaseModel):
             KeyError: 缺少必需字段且无默认值
         """
         # 处理字段名映射：expected_growth_rate (PRD) -> our_growth (内部)
-        our_growth = data.get(
-            "our_growth",
-            data.get("expected_growth_rate", 0.0),
-        )
+        # C1 fail-closed：缺核心增长字段绝不补 0.0（见 ConsensusResult.from_dict 同款说明）。
+        our_growth = data.get("our_growth", data.get("expected_growth_rate"))
+        if our_growth is None:
+            raise ValueError(
+                "ThesisProjectionResult 缺少核心字段 our_growth / expected_growth_rate；"
+                "fail-closed 拒绝补 0.0，触发重试 / 尽调。"
+            )
 
         # 处理 thesis_aligned 可能是字符串的情况
         thesis_aligned = data.get("thesis_aligned", False)
@@ -752,7 +761,13 @@ class ThesisProjection(BaseModel):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ThesisProjection":
-        our_growth = data.get("our_growth", data.get("expected_growth_rate", 0.0))
+        # C1 fail-closed：缺核心增长字段绝不补 0.0（见 ConsensusResult.from_dict 同款说明）。
+        our_growth = data.get("our_growth", data.get("expected_growth_rate"))
+        if our_growth is None:
+            raise ValueError(
+                "ThesisProjection 缺少核心字段 our_growth / expected_growth_rate；"
+                "fail-closed 拒绝补 0.0，触发重试 / 尽调。"
+            )
         thesis_aligned = data.get("thesis_aligned", False)
         if isinstance(thesis_aligned, str):
             thesis_aligned = thesis_aligned.strip().lower() in (

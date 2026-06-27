@@ -418,18 +418,13 @@ class DeepSeekClient:
         try:
             return self.chat_with_json_output(system, user, ConsensusResult)
         except ContentModerationError as e:
-            # 内容审核失败，返回中性默认结果
+            # C2 fail-closed：内容审核失败**绝不编造** implied_growth=5.0（旧实现是脊柱头号
+            # 污染源——把 LLM 拒答伪装成一次可计算审计）。向上抛出，由调用方标 status=llm_error
+            # + needs_due_diligence，不进正常 alpha/IC 样本。
             logger.warning(
-                f"[{ticker}] 内容审核触发，使用默认中性结果: {e}"
+                f"[{ticker}] 市场共识内容审核触发，fail-closed 抛出（不编造增长率）: {e}"
             )
-            return ConsensusResult(
-                sentiment_score=50,
-                sentiment_label="中性",
-                implied_growth=5.0,
-                key_narrative="内容审核限制，无法分析市场情绪",
-                key_worry="无法获取（内容审核限制）",
-                key_hope="无法获取（内容审核限制）",
-            )
+            raise
 
     def get_thesis_projection(
         self,
@@ -468,16 +463,11 @@ class DeepSeekClient:
                 use_thinking=self._thinking_enabled,  # 使用配置的思考模式开关
             )
         except ContentModerationError as e:
-            # 内容审核失败，返回中性默认结果
+            # C2 fail-closed：内容审核失败**绝不编造** our_growth=5.0，向上抛出由调用方标记尽调。
             logger.warning(
-                f"[{ticker}] 信念投影内容审核触发，使用默认结果: {e}"
+                f"[{ticker}] 信念投影内容审核触发，fail-closed 抛出（不编造增长率）: {e}"
             )
-            return ThesisProjectionResult(
-                thesis_aligned=True,
-                our_growth=5.0,
-                confidence="低",
-                reasoning="内容审核限制，无法进行信念投影分析，使用保守默认值",
-            )
+            raise
 
     # =========================================================================
     # P1 多阶段流水线 (S1–S5) 逐阶段调用

@@ -35,9 +35,11 @@ from .data_ingestion.preprocessor import TextPreprocessor
 from .data_ingestion.financials import get_financials_provider
 from .engines import (
     ConsensusEngine,
+    InsufficientDataError,
     ThesisProjector,
     GapCalculator,
     AuditResult,
+    AuditSignal,
     FinancialAnalysisEngine,
     ThesisPipeline,
     RiskEngine,
@@ -46,6 +48,7 @@ from .engines import (
 from .engines.thesis_pipeline import PipelineResult
 from .engines.risk_engine import WAIT, UNKNOWN_CLUSTER
 from .llm import DeepSeekClient
+from .llm.deepseek_client import ContentModerationError
 from .persistence import CSVReportWriter, AuditReportStore, ArtifactStore
 from .utils import setup_logger, AuditLogger, TextSanitizer
 
@@ -411,30 +414,53 @@ class AliceTestPipeline:
         # Step 1: 数据摄入
         raw_data = self._ingest_data(target)
 
-        # 检查是否有有效的文本数据，避免无意义的 LLM 调用
+        # C2 fail-closed：无有效文本不再以占位符喂 LLM 反推增长率，直接产出标记行
+        # （status=data_partial + needs_due_diligence），不进正常 alpha/IC 样本。
         if not raw_data.texts:
             self._py_logger.warning(
-                f"[{target.ticker}] 无有效文本数据，跳过 LLM 分析"
+                f"[{target.ticker}] 无有效文本数据，fail-closed（不调用 LLM）"
             )
-            # 记录为数据错误，但仍继续处理（使用默认值）
+            return self._fail_closed_result(
+                target, raw_data, status="data_partial",
+                reason="无有效文本数据，未进行市场共识 / 信念分析",
+            )
 
         # Step 2: Module A - 市场共识分析
-        consensus = self._consensus_engine.analyze(raw_data)
+        # C2 fail-closed：文本不足 / 内容审核失败绝不编造 implied_growth，转标记行。
+        try:
+            consensus = self._consensus_engine.analyze(raw_data)
+        except InsufficientDataError as e:
+            return self._fail_closed_result(
+                target, raw_data, status="data_partial",
+                reason=f"市场共识数据不足：{e}",
+            )
+        except ContentModerationError as e:
+            return self._fail_closed_result(
+                target, raw_data, status="llm_error",
+                reason=f"市场共识内容审核失败：{e}",
+            )
 
         # Step 3: Module B - 信念投影
         # 默认走 S1–S5 多阶段流水线（ThesisPipeline），任一阶段失败其内部回退单次投影；
         # pipeline.enabled=False 时直接用单次 ThesisProjector。
+        # C2 fail-closed：信念投影内容审核失败（含回退路径再失败）绝不编造 our_growth。
         pipeline_result: PipelineResult | None = None
-        if self._thesis_pipeline is not None:
-            pipeline_result = self._thesis_pipeline.run(
-                target,
-                quote=raw_data.quote,
-                texts=raw_data.texts,
-                audit_date=raw_data.date,
+        try:
+            if self._thesis_pipeline is not None:
+                pipeline_result = self._thesis_pipeline.run(
+                    target,
+                    quote=raw_data.quote,
+                    texts=raw_data.texts,
+                    audit_date=raw_data.date,
+                )
+                thesis_projection = pipeline_result.to_projection_result()
+            else:
+                thesis_projection = self._thesis_projector.project(target)
+        except ContentModerationError as e:
+            return self._fail_closed_result(
+                target, raw_data, status="llm_error",
+                reason=f"信念投影内容审核失败：{e}",
             )
-            thesis_projection = pipeline_result.to_projection_result()
-        else:
-            thesis_projection = self._thesis_projector.project(target)
 
         # Step 4: Gap 计算与信号判定（脊柱 gap = our_growth − implied_growth 不变）
         result = self._gap_calculator.compute_audit_result(
@@ -451,11 +477,18 @@ class AliceTestPipeline:
         # 否则基于占位数据的运行会被统计与落盘为 status="ok"
         if raw_data.status != "ok":
             result.status = "data_error"
+            result.needs_due_diligence = True
 
         # P1: 附带多阶段流水线产物引用（向后兼容字段，不影响原 CSV 14 列）
         if pipeline_result is not None:
             result.artifact_dir = pipeline_result.artifact_dir
             result.evidence_summary = self._summarize_evidence(pipeline_result)
+            # C2 fail-closed：流水线整体回退（单次投影）绕过了证据链守门，gap 仅作人工参考，
+            # 标记不进正常 alpha/IC 样本（保留 used_pipeline=False 与计算值供人工对照）。
+            if not pipeline_result.used_pipeline:
+                if result.status == "ok":
+                    result.status = "pipeline_error"
+                result.needs_due_diligence = True
             if self._verbose and pipeline_result.due_diligence_queue:
                 self._py_logger.info(
                     f"  [{target.ticker}] 尽调队列 {len(pipeline_result.due_diligence_queue)} 项"
@@ -471,6 +504,45 @@ class AliceTestPipeline:
             result.quant_exit_target = ra.quant_exit_target
 
         return result
+
+    def _fail_closed_result(
+        self,
+        target: TargetConfig,
+        raw_data: TickerRawData,
+        *,
+        status: Literal["data_partial", "llm_error", "data_error", "pipeline_error"],
+        reason: str,
+    ) -> AuditResult:
+        """构造 fail-closed 审计结果：缺数据 / 失败路径**绝不产出可计算 gap**。
+
+        增长率与 gap 置 NaN（非可比，不会误触发 OPPORTUNITY/OVERHEATED），signal=WAIT，
+        status≠ok + needs_due_diligence=True，使该行被运行摘要计为 ✗、S6 sizing 跳过、
+        不进正常 alpha/IC 样本。这是 PR-A 的核心：让失败明确可见而非伪装成正常预测。
+        """
+        self._py_logger.warning(f"[{target.ticker}] fail-closed [{status}]：{reason}")
+        nan = float("nan")
+        return AuditResult(
+            date=raw_data.date,
+            ticker=target.ticker,
+            name=target.name,
+            price=raw_data.quote.price_close,
+            pe_ttm=raw_data.quote.pe_ttm,
+            sentiment_score=0,
+            sentiment_label="中性",
+            implied_growth=nan,
+            key_narrative=reason,
+            key_worry="",
+            key_hope="",
+            thesis_aligned=False,
+            our_growth=nan,
+            confidence="低",
+            reasoning=reason,
+            gap=nan,
+            signal=AuditSignal.WAIT,
+            status=status,
+            needs_due_diligence=True,
+            evidence_summary=f"fail-closed：{reason}",
+        )
 
     @staticmethod
     def _kill_criteria_of(pr: PipelineResult | None) -> list[str]:

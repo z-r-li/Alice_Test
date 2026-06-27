@@ -1,4 +1,4 @@
-from .consensus_engine import ConsensusEngine
+from .consensus_engine import ConsensusEngine, InsufficientDataError
 from .thesis_projector import ThesisProjector
 from .gap_calculator import GapCalculator, AuditSignal, AuditResult
 from .financial_analysis import FinancialAnalysisEngine, FinancialMetrics
@@ -7,6 +7,7 @@ from .risk_engine import RiskEngine, RiskConfig, RiskAssessment, PortfolioState
 
 __all__ = [
     "ConsensusEngine",
+    "InsufficientDataError",
     "ThesisProjector",
     "GapCalculator",
     "AuditSignal",
