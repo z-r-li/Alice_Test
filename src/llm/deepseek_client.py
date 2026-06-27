@@ -177,8 +177,22 @@ class DeepSeekClient:
             LLMResponse: 响应对象
 
         Raises:
-            APICallError: API 调用失败
+            APICallError: API 调用失败（含关键路径 temperature≠0）
         """
+        # M2：关键路径（结构化 JSON 输出）硬锁 temperature=0。非 0 会让每日审计的
+        # sentiment / 增长率 / JSON 形状可变，破坏可重复性与回归可比性——直接 fail，
+        # 不静默放行。思考模式不接受 temperature（由 extra_body 控制），故豁免；
+        # 需要探索 / 非确定性输出时只能走非 JSON 的 text 模式，且不得进入持续运行。
+        if json_mode and not use_thinking:
+            effective_temp = (
+                temperature if temperature is not None else self._temperature
+            )
+            if effective_temp != 0:
+                raise APICallError(
+                    f"关键路径（JSON 结构化输出）要求 temperature=0，当前为 "
+                    f"{effective_temp}；非 0 温度破坏可重复性，已拒绝调用。"
+                )
+
         try:
             # 构建请求参数
             kwargs: dict = {
