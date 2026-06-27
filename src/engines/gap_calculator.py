@@ -54,7 +54,14 @@ class AuditResult:
     signal: AuditSignal  # OPPORTUNITY / OVERHEATED / WAIT
 
     # 状态
-    status: Literal["ok", "data_error", "llm_error"] = "ok"
+    # PR-A fail-closed：扩充 data_partial（缺有效文本）/ pipeline_error（流水线整体回退）；
+    # 非 "ok" 即「不进正常 alpha/IC 样本」。向后兼容（旧产物默认 "ok"）。
+    status: Literal[
+        "ok", "data_error", "llm_error", "data_partial", "pipeline_error"
+    ] = "ok"
+    # 缺数据 / 失败路径的 fail-closed 标记：True 表示该行需人工尽调、不得进入正常 alpha/IC 样本
+    # （向后兼容扩展，默认 False；CSV 持久化留待 PR-C/M3）。
+    needs_due_diligence: bool = False
 
     # P1: 多阶段流水线产物引用（向后兼容扩展，默认 None；不改动原 CSV 14 列）
     artifact_dir: str | None = None  # S1–S5 产物 JSON 目录

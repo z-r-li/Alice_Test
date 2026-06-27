@@ -5,6 +5,7 @@ main.py 多阶段流水线接线测试（离线）
 产出带 artifact_dir / evidence_summary 的 AuditResult、脊柱 gap 不变、阶段产物落盘，
 且原 CSV 14 列不受新字段影响。对应 P1 Step 8。
 """
+import math
 from datetime import datetime
 
 import pytest
@@ -13,6 +14,7 @@ from src.config import load_config_from_dict
 from src.data_ingestion.models import QuoteData
 from src.data_ingestion.text import TextProviderFactory
 from src.engines.gap_calculator import AuditSignal
+from src.llm.deepseek_client import ContentModerationError
 from src.persistence import ArtifactStore, CSVReportWriter
 from tests.fakes import FakeLLMClient
 
@@ -51,6 +53,7 @@ def _make_pipeline(
     implied_growth=8.0,
     risk_enabled=True,
     targets=None,
+    fail_stage=None,
 ):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     from src.main import AliceTestPipeline
@@ -61,7 +64,8 @@ def _make_pipeline(
         AliceTestPipeline,
         "_create_llm_client",
         lambda self: FakeLLMClient(
-            our_growth=our_growth, implied_growth=implied_growth, n_links=3
+            our_growth=our_growth, implied_growth=implied_growth, n_links=3,
+            fail_stage=fail_stage,
         ),
     )
 
@@ -210,3 +214,59 @@ class TestMainPipelineWiring:
         assert all(r.signal is AuditSignal.OPPORTUNITY for r in results)
         assert all(r.suggested_weight == pytest.approx(0.05) for r in results)
         assert all(r.correlation_flags == [] for r in results)
+
+
+class TestMainFailClosed:
+    """PR-A fail-closed：失败 / 缺数据路径绝不产出可计算 gap，而是标记行（不进正常样本）。"""
+
+    def test_no_texts_fail_closed(self, monkeypatch, tmp_path):
+        pipeline, config = _make_pipeline(monkeypatch, tmp_path, risk_enabled=False)
+        monkeypatch.setattr(pipeline, "_fetch_texts", lambda target: [])
+        result = pipeline._process_single_target(config.targets[0])
+
+        assert result.status == "data_partial"
+        assert result.needs_due_diligence is True
+        assert result.signal is AuditSignal.WAIT
+        # 绝不产出可计算 gap：增长率 / gap 均为 NaN（非可比，不会误触发信号）
+        assert math.isnan(result.gap)
+        assert math.isnan(result.our_growth)
+        assert math.isnan(result.implied_growth)
+
+    def test_consensus_moderation_fail_closed(self, monkeypatch, tmp_path):
+        pipeline, config = _make_pipeline(monkeypatch, tmp_path, risk_enabled=False)
+
+        def _raise(raw_data):
+            raise ContentModerationError("Content Exists Risk")
+
+        monkeypatch.setattr(pipeline._consensus_engine, "analyze", _raise)
+        result = pipeline._process_single_target(config.targets[0])
+
+        assert result.status == "llm_error"
+        assert result.needs_due_diligence is True
+        assert math.isnan(result.gap)
+
+    def test_pipeline_fallback_flagged_not_normal_sample(self, monkeypatch, tmp_path):
+        # 流水线 S2 失败 → 整体回退单次投影：gap 仍算（供人工参考），但行被标 pipeline_error
+        # + needs_due_diligence，不进正常 alpha/IC 样本。
+        pipeline, config = _make_pipeline(
+            monkeypatch, tmp_path, risk_enabled=False, fail_stage="get_logic_chain"
+        )
+        result = pipeline._process_single_target(config.targets[0])
+
+        assert result.status == "pipeline_error"
+        assert result.needs_due_diligence is True
+        assert result.evidence_summary == "单次投影（流水线回退）"
+        # 计算值保留供人工对照（脊柱 gap = our − implied）
+        assert result.gap == pytest.approx(18.0 - 8.0)
+
+    def test_fail_closed_row_excluded_from_sizing(self, monkeypatch, tmp_path):
+        # 端到端：风控启用 + 无文本 → fail-closed 行不参与 sizing（不拿正权重 / 不 BUY）。
+        pipeline, config = _make_pipeline(
+            monkeypatch, tmp_path, our_growth=25.0, implied_growth=8.0,
+        )
+        monkeypatch.setattr(pipeline, "_fetch_texts", lambda target: [])
+        r = pipeline.run()[0]
+        assert r.status == "data_partial"
+        assert r.needs_due_diligence is True
+        assert r.suggested_weight == 0.0
+        assert r.risk_adjusted_action != "BUY"
