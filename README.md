@@ -27,7 +27,7 @@ Alice Test 是一个自动化 Python 数据流水线，用于监控特定投资�
 - 🔄 自动采集 A股/港股/美股行情数据
 - 📰 整合研报摘要与新闻标题
 - 🌐 港美股: Serper.dev + LLM 多层浏览
-- 🤖 基于 DeepSeek-V3 的市场情绪分析
+- 🤖 基于 DeepSeek-V4-Flash 的市场情绪分析
 - 📊 认知差计算与信号生成 (OPPORTUNITY / OVERHEATED / WAIT)
 - 📁 CSV 格式审计报告输出
 
@@ -90,25 +90,35 @@ pip install -r requirements.txt
 # LLM 配置
 llm_api:
   provider: "deepseek"
-  model: "deepseek-chat"
-  api_key: "${DEEPSEEK_API_KEY}"  # 支持环境变量
+  model: "deepseek-v4-flash"
+  api_key: ""  # 运行期从环境变量 DEEPSEEK_API_KEY 读取
   temperature: 0  # 重要：保持为 0 以确保评分一致性
-  max_tokens: 2000
+  max_tokens: 4096
 
 # 数据源配置
 data_sources:
   a_shares:
     provider: "akshare"  # 可选: "tushare" 或 "akshare"
-    token: "${TUSHARE_TOKEN}"  # 使用 tushare 时需要
+    token: ""  # 使用 tushare 时从环境变量 TUSHARE_TOKEN 读取
   hk_us:
     provider: "yfinance"
   # 文本数据源配置
   text:
     hk_us:
-      provider: "serper"
-      api_key: "${SERPER_API_KEY}"
-      max_results: 10
-      max_pages_to_browse: 3
+      search_provider: "serper"
+      search_api_key: ""  # 运行期从 SERPER_API_KEY 读取
+      browsing:
+        enabled: true
+        max_depth: 2
+        max_links_per_page: 3
+        link_selection_mode: "llm"
+      trusted_domains:
+        - "seekingalpha.com"
+        - "finance.yahoo.com"
+        - "reuters.com"
+      search_templates:
+        research: "{ticker} {name} analyst report research"
+        news: "{ticker} {name} news"
 
 # 监控标的配置
 targets:
@@ -118,25 +128,23 @@ targets:
       AI算力发展将大幅增加电力需求，核电作为稳定基荷电源将充分受益。
       公司在建机组规模行业领先，2025-2027年将迎来机组集中投产期。
       预期未来3年净利润复合增长率约12%。
-    expected_growth: 12.0
     
   - ticker: "AAPL"
     name: "苹果公司"
     thesis: |
       iPhone 换机周期叠加 AI 功能升级，预计带来新一轮增长。
       服务业务持续高毛利贡献，生态护城河稳固。
-    expected_growth: 8.0
 
 # Gap 阈值配置
 gap_thresholds:
-  opportunity: 5.0   # gap >= 5% 触发 OPPORTUNITY 信号
-  overheated: -5.0   # gap <= -5% 触发 OVERHEATED 信号
+  opportunity_gap_min: 10.0
+  opportunity_sentiment_max: 40
+  overheated_sentiment_min: 80
 
 # 输出配置
 output:
   format: "csv"
   path: "audit_report.csv"
-  append: true  # 追加模式
 ```
 
 ### 3. 运行程序
@@ -273,7 +281,6 @@ targets:
     name: "公司名称"
     thesis: |
       你对这个公司的投资逻辑...
-    expected_growth: 10.0  # 你预期的增长率
 ```
 
 ---
@@ -283,10 +290,10 @@ targets:
 | 组件 | 技术选型 |
 |------|----------|
 | 编程语言 | Python 3.x |
-| LLM 服务 | DeepSeek-V3 (主力) / GPT-4o-mini (备选) |
+| LLM 服务 | DeepSeek-V4-Flash |
 | A股数据 | Tushare / AkShare |
 | 港美股数据 | yfinance |
-| 存储 | SQLite / CSV |
+| 存储 | CSV |
 
 ---
 

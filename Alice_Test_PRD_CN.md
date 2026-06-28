@@ -11,7 +11,7 @@
 | **项目代号** | Alice Test |
 | **核心目标** | 构建自动化 Python 数据流水线，监控特定投资标的，计算**认知差 (Cognitive Gap)** —— 即"市场当前共识"与"预设宏观信念"之间的偏差 |
 | **核心价值** | 不预测股价，而是系统性识别市场定价偏差带来的机会 |
-| **主力模型** | DeepSeek-V3（性价比高，中文理解能力强） |
+| **主力模型** | DeepSeek-V4-Flash（关键路径显式指定，temperature=0） |
 
 ---
 
@@ -19,7 +19,7 @@
 
 ```yaml
 编程语言:      Python 3.10+
-LLM 服务商:    DeepSeek-V3 (主力) / GPT-4o-mini (备选)
+LLM 服务商:    DeepSeek-V4-Flash
 数据源:
   - A股行情:   AkShare (默认) / Tushare
   - 港美股行情: yfinance
@@ -164,7 +164,7 @@ quota_weights:
 #### 4.2.1 LLM 配置
 
 ```yaml
-model: deepseek-chat
+model: deepseek-v4-flash
 temperature: 0  # 关键：必须为 0，确保评分一致性
 ```
 
@@ -244,7 +244,7 @@ temperature: 0  # 关键：必须为 0，确保评分一致性
 仅返回有效 JSON：
 {
   "thesis_aligned": <布尔值>,
-  "expected_growth_rate": <百分比浮点数>,
+  "our_growth": <百分比浮点数>,
   "confidence": "<高|中|低>",
   "reasoning": "<2-3 句解释>"
 }
@@ -259,7 +259,7 @@ temperature: 0  # 关键：必须为 0，确保评分一致性
 #### 4.4.1 核心公式
 
 ```python
-gap = expected_growth_rate - implied_growth_rate
+gap = our_growth - implied_growth_rate
 ```
 
 #### 4.4.2 信号逻辑
@@ -284,8 +284,8 @@ def generate_signal(gap: float, sentiment: int) -> str:
 # LLM 配置
 llm_api:
   provider: "deepseek"
-  api_key: ""  # 留空则从环境变量 DEEPSEEK_API_KEY 读取
-  model: "deepseek-chat"
+  api_key: ""  # 运行期只从环境变量 DEEPSEEK_API_KEY 读取
+  model: "deepseek-v4-flash"
   temperature: 0  # 必须为 0，保证评分稳定
   max_tokens: 4096
   max_retries: 2
@@ -298,7 +298,7 @@ data_sources:
   # A 股行情数据源
   a_shares:
     provider: "akshare"  # 或 "tushare"
-    token: ""  # Tushare 需要
+    token: ""  # 使用 Tushare 时运行期只从环境变量 TUSHARE_TOKEN 读取
 
   # 港美股行情数据源
   hk_us:
@@ -322,7 +322,7 @@ data_sources:
     # 港美股文本源（基于 Web Search）
     hk_us:
       search_provider: "serper"  # serper | serpapi
-      search_api_key: ""  # 留空从 SERPER_API_KEY 读取
+      search_api_key: ""  # 运行期只从 SERPER_API_KEY 读取
       browsing:
         enabled: true
         max_depth: 2
@@ -378,8 +378,9 @@ scheduler:
 
 # Gap 判定阈值配置
 gap_thresholds:
-  opportunity: 5.0   # gap >= 5% 触发 OPPORTUNITY 信号
-  overheated: -5.0   # gap <= -5% 触发 OVERHEATED 信号
+  opportunity_gap_min: 10.0
+  opportunity_sentiment_max: 40
+  overheated_sentiment_min: 80
 ```
 
 ### 5.2 环境变量
@@ -412,13 +413,21 @@ gap_thresholds:
 | `key_narrative` | STRING | 一句话市场总结 |
 | `key_worry` | STRING | 主要担忧 |
 | `key_hope` | STRING | 主要期待 |
+| `status` | STRING | ok / data_error / llm_error / data_partial / pipeline_error / unknown |
+| `needs_due_diligence` | BOOL | 是否需人工尽调；旧 CSV 缺列为未知 |
+| `suggested_weight` | FLOAT | S6 建议仓位 |
+| `correlation_flags` | JSON ARRAY | 同簇 / 高相关 ticker 列表 |
+| `structural_exit` | JSON ARRAY | 结构性退出条件 |
+| `quant_exit_target` | FLOAT | 量化退出目标（未定则为空） |
+| `risk_adjusted_action` | STRING | BUY / TRIM / WAIT / EXIT |
+| `risk_contribution` | FLOAT | 组合风险贡献 |
 
 ### 6.2 输出示例
 
 ```csv
-date,ticker,name,price,pe_ttm,sentiment_score,sentiment_label,implied_growth,our_growth,gap,signal,key_narrative,key_worry,key_hope
-2025-10-24,600150.SH,中国船舶,35.5,18.2,35,悲观,5.0,15.0,10.0,OPPORTUNITY,市场担忧钢价上涨侵蚀利润,钢材成本压力,新船订单增长
-2025-10-24,601985.SH,中国核电,12.8,22.5,62,乐观,8.0,12.0,4.0,WAIT,AI电力需求叙事持续发酵,核准进度不确定性,电力需求持续增长
+date,ticker,name,price,pe_ttm,sentiment_score,sentiment_label,implied_growth,our_growth,gap,signal,key_narrative,key_worry,key_hope,status,needs_due_diligence,suggested_weight,correlation_flags,structural_exit,quant_exit_target,risk_adjusted_action,risk_contribution
+2025-10-24,600150.SH,中国船舶,35.5,18.2,35,悲观,5.0,15.0,10.0,OPPORTUNITY,市场担忧钢价上涨侵蚀利润,钢材成本压力,新船订单增长,ok,false,0.05,"[]","[]",,BUY,
+2025-10-24,601985.SH,中国核电,12.8,22.5,62,乐观,8.0,12.0,4.0,WAIT,AI电力需求叙事持续发酵,核准进度不确定性,电力需求持续增长,ok,false,0.0,"[]","[]",,WAIT,
 ```
 
 ---

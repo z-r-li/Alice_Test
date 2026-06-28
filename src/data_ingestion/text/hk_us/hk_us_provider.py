@@ -261,7 +261,7 @@ class HKUSTextProvider(TextProvider):
     def _create_search_client(self) -> SerperClient:
         """创建搜索客户端"""
         if self._config.search_provider == "serper":
-            return SerperClient(api_key=self._config.search_api_key or None)
+            return SerperClient(api_key=None)
         else:
             # TODO: 支持 SerpAPI
             raise NotImplementedError(f"不支持的搜索提供商: {self._config.search_provider}")

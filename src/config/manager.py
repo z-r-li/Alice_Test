@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -32,8 +31,7 @@ class ConfigManager:
     """
     配置管理器，提供统一配置对象
 
-    支持从 YAML 文件加载配置，自动处理环境变量注入，
-    并提供缓存机制避免重复加载。
+    支持从 YAML 文件加载配置，并提供缓存机制避免重复加载。
 
     Example:
         >>> manager = ConfigManager("config.yaml")
@@ -62,7 +60,7 @@ class ConfigManager:
         加载配置文件
 
         从 YAML 文件读取配置，解析并验证后返回 AppConfig 对象。
-        API Key 支持从环境变量 DEEPSEEK_API_KEY 注入。
+        Secret 不写入配置对象；运行期由各配置 getter 直接从 os.environ 读取。
 
         Returns:
             AppConfig: 解析后的配置对象
@@ -84,8 +82,8 @@ class ConfigManager:
         if raw_config is None:
             raw_config = {}
 
-        # 处理环境变量注入
-        raw_config = self._inject_env_vars(raw_config)
+        # Secret 不注入 raw_config，避免真实值驻留 AppConfig。
+        raw_config = self._prepare_config(raw_config)
 
         # 转换为 Pydantic 模型
         try:
@@ -95,37 +93,19 @@ class ConfigManager:
 
         return self._config
 
-    def _inject_env_vars(self, config: dict[str, Any]) -> dict[str, Any]:
+    def _prepare_config(self, config: dict[str, Any]) -> dict[str, Any]:
         """
-        注入环境变量到配置中
+        加载前预处理配置。
 
-        优先级: 环境变量 > 配置文件中的值
+        环境变量中的 secret 不写回配置字典；`LLMConfig.get_api_key()`、
+        `ASharesSourceConfig.get_token()` 等运行期 getter 会直接读取 os.environ。
 
         Args:
             config: 原始配置字典
 
         Returns:
-            dict: 注入环境变量后的配置
+            dict: 预处理后的配置
         """
-        # 确保 llm_api 存在
-        if "llm_api" not in config:
-            config["llm_api"] = {}
-
-        # 从环境变量注入 API Key
-        env_api_key = os.environ.get("DEEPSEEK_API_KEY")
-        if env_api_key:
-            config["llm_api"]["api_key"] = env_api_key
-
-        # 从环境变量注入 Tushare Token（如果需要）
-        # PRD 5.1: TUSHARE_TOKEN 应注入到 data_sources.a_shares.token
-        env_tushare_token = os.environ.get("TUSHARE_TOKEN")
-        if env_tushare_token:
-            if "data_sources" not in config:
-                config["data_sources"] = {}
-            if "a_shares" not in config["data_sources"]:
-                config["data_sources"]["a_shares"] = {}
-            config["data_sources"]["a_shares"]["token"] = env_tushare_token
-
         return config
 
     def get_config(self) -> AppConfig:

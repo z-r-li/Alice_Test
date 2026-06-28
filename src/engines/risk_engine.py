@@ -26,6 +26,7 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Protocol, runtime_checkable
 
@@ -150,39 +151,40 @@ class RiskEngine:
                 or UNKNOWN_CLUSTER
             )
 
-        out: dict[str, RiskAssessment] = {
-            it.ticker: RiskAssessment(
+        out: list[RiskAssessment] = [
+            RiskAssessment(
                 ticker=it.ticker,
                 structural_exit=[s for s in kc.get(it.ticker, []) if str(s).strip()],
             )
             for it in items
-        }
+        ]
 
-        eligible = [it for it in items if self._eligible(it)]
-        clusters = {it.ticker: cluster_of(it) for it in eligible}
+        eligible = [(i, it) for i, it in enumerate(items) if self._eligible(it)]
+        clusters = {i: cluster_of(it) for i, it in eligible}
 
         # 1) 基线等权（软参考，受单笔软护栏约束）
-        weights = {it.ticker: min(cfg.ref_weight, cfg.soft_cap) for it in eligible}
+        weights = {i: min(cfg.ref_weight, cfg.soft_cap) for i, _ in eligible}
         # 2) 同簇合计上限（UNKNOWN 不视为真实簇，跳过）
         weights = self._apply_cluster_cap(weights, clusters, cfg.max_cluster_weight)
         # 3) 整体风险预算：Σw ≤ total_risk_budget
         weights = self._apply_total_budget(weights, cfg.total_risk_budget)
+        weights = self._round_weights_with_budget(weights, cfg.total_risk_budget)
 
         # 4) 回填
-        for it in eligible:
-            ra = out[it.ticker]
-            ra.suggested_weight = round(weights.get(it.ticker, 0.0), 6)
-            cl = clusters[it.ticker]
+        for i, it in eligible:
+            ra = out[i]
+            ra.suggested_weight = weights.get(i, 0.0)
+            cl = clusters[i]
             if cl != UNKNOWN_CLUSTER:
                 ra.correlation_flags = sorted(
-                    t for t, c in clusters.items() if c == cl and t != it.ticker
+                    items[j].ticker for j, c in clusters.items() if c == cl and j != i
                 )
             ra.risk_adjusted_action = "BUY" if ra.suggested_weight > 0 else WAIT
-        for it in items:
+        for i, it in enumerate(items):
             if not self._eligible(it):
-                out[it.ticker].risk_adjusted_action = WAIT
+                out[i].risk_adjusted_action = WAIT
 
-        return [out[it.ticker] for it in items]
+        return out
 
     # ---------- helpers ----------
     def _eligible(self, item: AuditLike) -> bool:
@@ -192,9 +194,9 @@ class RiskEngine:
 
     @staticmethod
     def _apply_cluster_cap(
-        weights: dict[str, float], clusters: Mapping[str, str], cap: float
-    ) -> dict[str, float]:
-        by_cluster: dict[str, list[str]] = {}
+        weights: dict[int, float], clusters: Mapping[int, str], cap: float
+    ) -> dict[int, float]:
+        by_cluster: dict[str, list[int]] = {}
         for t in weights:
             cl = clusters.get(t, UNKNOWN_CLUSTER)
             if cl == UNKNOWN_CLUSTER:
@@ -210,9 +212,32 @@ class RiskEngine:
         return out
 
     @staticmethod
-    def _apply_total_budget(weights: dict[str, float], budget: float) -> dict[str, float]:
+    def _apply_total_budget(weights: dict[int, float], budget: float) -> dict[int, float]:
         tot = sum(weights.values())
         if tot > budget and tot > 0:
             scale = budget / tot
             return {t: w * scale for t, w in weights.items()}
         return dict(weights)
+
+    @staticmethod
+    def _round_weights_with_budget(
+        weights: dict[int, float], budget: float, decimals: int = 6
+    ) -> dict[int, float]:
+        """Round weights while preserving Σw <= budget."""
+        rounded = {t: round(w, decimals) for t, w in weights.items()}
+        if sum(rounded.values()) <= budget:
+            return rounded
+
+        unit = 10 ** -decimals
+        # Repeatedly trim one rounding unit from the largest weights until within budget.
+        while sum(rounded.values()) > budget:
+            candidates = [t for t, w in rounded.items() if w > 0]
+            if not candidates:
+                break
+            t = max(candidates, key=lambda key: (rounded[key], -key))
+            rounded[t] = round(max(0.0, rounded[t] - unit), decimals)
+
+            # Guard against pathological non-finite budgets/weights in direct dataclass use.
+            if not math.isfinite(sum(rounded.values())):
+                return {k: 0.0 for k in rounded}
+        return rounded

@@ -142,6 +142,34 @@ class TestAnalyzeReport:
         assert m.forward_pe_basis == "unavailable"
         assert any("尽调" in n for n in m.notes)
 
+    def test_report_partial_status_propagates_to_metrics(self):
+        report = _growing_report()
+        report.status = "partial"
+        report.error_message = "provider missing cashflow fields"
+
+        m = FinancialAnalysisEngine().analyze_report(report, trailing_pe=15.0)
+
+        assert m.status == "partial"
+        assert any("partial" in n for n in m.notes)
+
+    def test_single_period_does_not_proxy_trend_from_latest_ocf(self):
+        report = FinancialReport(
+            ticker="ONE.SH",
+            market="a_share",
+            periods=[
+                FinancialPeriod("2024-12-31", 100.0, 60.0, 10.0, 15.0),
+            ],
+        )
+
+        engine = FinancialAnalysisEngine()
+        m = engine.analyze_report(report, trailing_pe=15.0)
+        ev = engine.build_evidence(m)
+
+        assert m.status == "partial"
+        assert m.ocf_latest_positive is True
+        assert m.ocf_trend == "unknown"
+        assert ev.needs_due_diligence is True
+
 
 class TestBuildEvidence:
     def test_growing_company_supports_with_real_data(self):

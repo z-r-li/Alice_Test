@@ -184,7 +184,11 @@ class AliceTestPipeline:
                     ticker,
                     use_mock=fin_cfg.use_mock,
                     a_share_provider=a_cfg.provider,
-                    tushare_token=(a_cfg.token or None),
+                    tushare_token=(
+                        a_cfg.get_token()
+                        if (not fin_cfg.use_mock and a_cfg.provider == "tushare")
+                        else None
+                    ),
                 )
 
         return ThesisPipeline(
@@ -491,7 +495,7 @@ class AliceTestPipeline:
             result.status = "data_error"
             result.needs_due_diligence = True
 
-        # P1: 附带多阶段流水线产物引用（向后兼容字段，不影响原 CSV 14 列）
+        # P1: 附带多阶段流水线产物引用（向后兼容字段；CSV 保持旧列前缀并追加新列）
         if pipeline_result is not None:
             result.artifact_dir = pipeline_result.artifact_dir
             result.evidence_summary = self._summarize_evidence(pipeline_result)
@@ -668,6 +672,7 @@ class AliceTestPipeline:
                     lookback_hours=crawler_config.lookback_hours,
                     max_items=crawler_config.max_items_per_ticker,
                     use_mock=True,
+                    config=self._config,
                 )
             elif market == "a_share":
                 # A 股使用协调器
@@ -692,6 +697,7 @@ class AliceTestPipeline:
                     name=target.name,
                     lookback_hours=crawler_config.lookback_hours,
                     max_items=crawler_config.max_items_per_ticker,
+                    config=self._config,
                 )
 
             if self._verbose:

@@ -9,6 +9,7 @@ CSV 写入测试
 - test_file_creation: 文件创建和表头写入
 """
 import csv
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -94,6 +95,44 @@ class TestCSVReportWriterSave:
         assert len(rows) == 3
         assert rows[1][1] == "600150.SH"
         assert rows[2][1] == "NVDA"
+
+    def test_save_and_read_status_and_risk_fields(
+        self,
+        temp_csv_path: Path,
+        sample_audit_result: AuditResult,
+    ):
+        """M3：状态 / 尽调 / 风控字段应落列并可读回。"""
+        sample_audit_result.status = "pipeline_error"
+        sample_audit_result.needs_due_diligence = True
+        sample_audit_result.suggested_weight = 0.05
+        sample_audit_result.correlation_flags = ["A.SH", "B.SH"]
+        sample_audit_result.structural_exit = ["政策逆转", "毛利率下滑"]
+        sample_audit_result.quant_exit_target = 12.5
+        sample_audit_result.risk_adjusted_action = "BUY"
+        sample_audit_result.risk_contribution = 0.03
+
+        writer = CSVReportWriter(temp_csv_path)
+        writer.save(sample_audit_result)
+
+        with open(temp_csv_path, "r", encoding="utf-8") as f:
+            rows = list(csv.reader(f))
+        header = rows[0]
+        row = rows[1]
+        assert header == CSVReportWriter.CSV_COLUMNS
+        assert row[header.index("status")] == "pipeline_error"
+        assert row[header.index("needs_due_diligence")] == "true"
+        assert json.loads(row[header.index("correlation_flags")]) == ["A.SH", "B.SH"]
+        assert json.loads(row[header.index("structural_exit")]) == ["政策逆转", "毛利率下滑"]
+
+        read_back = writer._read_all_results()[0]
+        assert read_back.status == "pipeline_error"
+        assert read_back.needs_due_diligence is True
+        assert read_back.suggested_weight == pytest.approx(0.05)
+        assert read_back.correlation_flags == ["A.SH", "B.SH"]
+        assert read_back.structural_exit == ["政策逆转", "毛利率下滑"]
+        assert read_back.quant_exit_target == pytest.approx(12.5)
+        assert read_back.risk_adjusted_action == "BUY"
+        assert read_back.risk_contribution == pytest.approx(0.03)
 
 
 class TestCSVCommaEscaping:
@@ -462,6 +501,37 @@ class TestCSVRowConversion:
 
         assert result.pe_ttm is None
 
+    def test_row_to_result_legacy_row_missing_new_columns(self, temp_csv_path: Path):
+        """旧 14 列 CSV 缺 M3 字段时，不补 ok/false/[] 这类真值默认。"""
+        row = [
+            "2024-01-15",
+            "TEST.SH",
+            "测试公司",
+            "10.0",
+            "15.0",
+            "50",
+            "中性",
+            "10.0",
+            "15.0",
+            "5.0",
+            "WAIT",
+            "测试叙事",
+            "测试担忧",
+            "测试期望",
+        ]
+
+        writer = CSVReportWriter(temp_csv_path)
+        result = writer._row_to_result(row)
+
+        assert result.status == "unknown"
+        assert result.needs_due_diligence is None
+        assert result.suggested_weight is None
+        assert result.correlation_flags is None
+        assert result.structural_exit is None
+        assert result.quant_exit_target is None
+        assert result.risk_adjusted_action is None
+        assert result.risk_contribution is None
+
 
 class TestCSVReadAllResults:
     """读取全部结果测试类"""
@@ -512,3 +582,33 @@ class TestCSVReadAllResults:
         results = writer._read_all_results()
 
         assert results == []  # 不完整的行被跳过
+
+    def test_read_all_results_legacy_csv(self, temp_csv_path: Path):
+        """旧文件只有原 14 列时仍可读回，新增字段保持未知。"""
+        legacy_columns = CSVReportWriter.CSV_COLUMNS[:14]
+        with open(temp_csv_path, "w", newline="", encoding="utf-8") as f:
+            csvwriter = csv.writer(f)
+            csvwriter.writerow(legacy_columns)
+            csvwriter.writerow([
+                "2024-01-15",
+                "TEST.SH",
+                "测试公司",
+                "10.0",
+                "15.0",
+                "50",
+                "中性",
+                "10.0",
+                "15.0",
+                "5.0",
+                "WAIT",
+                "测试叙事",
+                "测试担忧",
+                "测试期望",
+            ])
+
+        results = CSVReportWriter(temp_csv_path)._read_all_results()
+
+        assert len(results) == 1
+        assert results[0].ticker == "TEST.SH"
+        assert results[0].status == "unknown"
+        assert results[0].needs_due_diligence is None

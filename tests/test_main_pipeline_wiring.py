@@ -3,7 +3,7 @@ main.py 多阶段流水线接线测试（离线）
 
 用 FakeLLMClient + mock 文本/财报 + 桩行情，验证 AliceTestPipeline 默认走 ThesisPipeline、
 产出带 artifact_dir / evidence_summary 的 AuditResult、脊柱 gap 不变、阶段产物落盘，
-且原 CSV 14 列不受新字段影响。对应 P1 Step 8。
+且 CSV 保持旧 14 列前缀并追加 M3 状态/风控字段。对应 P1 Step 8 + M3。
 """
 import math
 from datetime import datetime
@@ -108,19 +108,26 @@ class TestMainPipelineWiring:
         stages = store.list_stages("601985.SH", result.date)
         assert len(stages) == 5
 
-    def test_csv_columns_unchanged_backward_compatible(self, monkeypatch, tmp_path):
+    def test_csv_columns_keep_legacy_prefix_and_add_m3_fields(self, monkeypatch, tmp_path):
         pipeline, config = _make_pipeline(monkeypatch, tmp_path)
         result = pipeline._process_single_target(config.targets[0])
 
         csv_path = tmp_path / "bc.csv"
         writer = CSVReportWriter(csv_path)
-        writer.save(result)  # 含新字段的 AuditResult 仍能写入原 14 列
+        writer.save(result)  # 含新字段的 AuditResult 写入旧前缀 + M3 新列
 
         import csv as _csv
         with open(csv_path, encoding="utf-8") as f:
             rows = list(_csv.reader(f))
         assert rows[0] == CSVReportWriter.CSV_COLUMNS
-        assert len(rows[0]) == 14  # 原始列数不变
+        assert rows[0][:14] == [
+            "date", "ticker", "name", "price", "pe_ttm",
+            "sentiment_score", "sentiment_label", "implied_growth",
+            "our_growth", "gap", "signal", "key_narrative",
+            "key_worry", "key_hope",
+        ]
+        assert "status" in rows[0]
+        assert "risk_adjusted_action" in rows[0]
 
     def test_quote_failure_propagates_data_error_status(self, monkeypatch, tmp_path):
         # 行情全失败 → 占位 price_close=0.0 继续分析，但结果状态必须是 data_error，
