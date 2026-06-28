@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from pydantic import ValidationError
+
 from .config import ConfigManager, AppConfig, TargetConfig
 from .data_ingestion import TickerRawData, QuoteData, TextItem
 from .data_ingestion.quotes import (
@@ -47,7 +49,7 @@ from .engines import (
 )
 from .engines.thesis_pipeline import PipelineResult
 from .engines.risk_engine import WAIT, UNKNOWN_CLUSTER
-from .llm import DeepSeekClient
+from .llm import DeepSeekClient, JSONParseError
 from .llm.deepseek_client import ContentModerationError
 from .persistence import CSVReportWriter, AuditReportStore, ArtifactStore
 from .utils import setup_logger, AuditLogger, TextSanitizer
@@ -439,6 +441,11 @@ class AliceTestPipeline:
                 target, raw_data, status="llm_error",
                 reason=f"市场共识内容审核失败：{e}",
             )
+        except (JSONParseError, ValidationError) as e:
+            return self._fail_closed_result(
+                target, raw_data, status="llm_error",
+                reason=f"市场共识 JSON 解析失败：{e}",
+            )
 
         # Step 3: Module B - 信念投影
         # 默认走 S1–S5 多阶段流水线（ThesisPipeline），任一阶段失败其内部回退单次投影；
@@ -460,6 +467,11 @@ class AliceTestPipeline:
             return self._fail_closed_result(
                 target, raw_data, status="llm_error",
                 reason=f"信念投影内容审核失败：{e}",
+            )
+        except (JSONParseError, ValidationError) as e:
+            return self._fail_closed_result(
+                target, raw_data, status="llm_error",
+                reason=f"信念投影 JSON 解析失败：{e}",
             )
 
         # Step 4: Gap 计算与信号判定（脊柱 gap = our_growth − implied_growth 不变）

@@ -14,7 +14,7 @@ from src.config import load_config_from_dict
 from src.data_ingestion.models import QuoteData
 from src.data_ingestion.text import TextProviderFactory
 from src.engines.gap_calculator import AuditSignal
-from src.llm.deepseek_client import ContentModerationError
+from src.llm.deepseek_client import ContentModerationError, JSONParseError
 from src.persistence import ArtifactStore, CSVReportWriter
 from tests.fakes import FakeLLMClient
 
@@ -244,6 +244,40 @@ class TestMainFailClosed:
         assert result.status == "llm_error"
         assert result.needs_due_diligence is True
         assert math.isnan(result.gap)
+
+    def test_consensus_json_parse_error_fail_closed(self, monkeypatch, tmp_path):
+        pipeline, config = _make_pipeline(monkeypatch, tmp_path, risk_enabled=False)
+
+        def _raise(raw_data):
+            raise JSONParseError("missing implied_growth")
+
+        monkeypatch.setattr(pipeline._consensus_engine, "analyze", _raise)
+        result = pipeline._process_single_target(config.targets[0])
+
+        assert result.status == "llm_error"
+        assert result.needs_due_diligence is True
+        assert result.signal is AuditSignal.WAIT
+        assert math.isnan(result.gap)
+        assert math.isnan(result.implied_growth)
+        assert math.isnan(result.our_growth)
+
+    def test_thesis_json_parse_error_fail_closed(self, monkeypatch, tmp_path):
+        pipeline, config = _make_pipeline(
+            monkeypatch, tmp_path, pipeline_enabled=False, risk_enabled=False
+        )
+
+        def _raise(target):
+            raise JSONParseError("missing our_growth")
+
+        monkeypatch.setattr(pipeline._thesis_projector, "project", _raise)
+        result = pipeline._process_single_target(config.targets[0])
+
+        assert result.status == "llm_error"
+        assert result.needs_due_diligence is True
+        assert result.signal is AuditSignal.WAIT
+        assert math.isnan(result.gap)
+        assert math.isnan(result.implied_growth)
+        assert math.isnan(result.our_growth)
 
     def test_pipeline_fallback_flagged_not_normal_sample(self, monkeypatch, tmp_path):
         # 流水线 S2 失败 → 整体回退单次投影：gap 仍算（供人工参考），但行被标 pipeline_error
