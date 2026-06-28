@@ -14,6 +14,7 @@ from .models import TextSourceType
 
 if TYPE_CHECKING:
     from ..models import TextItem
+    from src.config.models import AppConfig
 
 logger = logging.getLogger("alice_test")
 
@@ -79,10 +80,16 @@ class TextProviderFactory:
 
     _a_share_provider: TextProvider | None = None
     _hk_us_provider: TextProvider | None = None
+    _hk_us_provider_config_key: int | None = None
     _mock_provider: TextProvider | None = None
 
     @classmethod
-    def get_provider(cls, ticker: str, use_mock: bool = False) -> TextProvider:
+    def get_provider(
+        cls,
+        ticker: str,
+        use_mock: bool = False,
+        config: AppConfig | None = None,
+    ) -> TextProvider:
         """
         根据 ticker 返回对应的 Provider 实例
 
@@ -106,8 +113,7 @@ class TextProviderFactory:
         if market == "a_share":
             return cls._get_a_share_provider()
         else:
-            # 港股和美股暂时使用同一个占位 Provider
-            return cls._get_hk_us_provider()
+            return cls._get_hk_us_provider(config=config)
 
     @classmethod
     def _get_a_share_provider(cls) -> TextProvider:
@@ -122,17 +128,25 @@ class TextProviderFactory:
         return cls._a_share_provider
 
     @classmethod
-    def _get_hk_us_provider(cls) -> TextProvider:
+    def _get_hk_us_provider(cls, config: AppConfig | None = None) -> TextProvider:
         """获取或创建港美股 Provider（单例）"""
-        if cls._hk_us_provider is None:
-            # 从环境或配置加载
+        config_key = id(config) if config is not None else None
+        if cls._hk_us_provider is None or cls._hk_us_provider_config_key != config_key:
             from .hk_us import HKUSTextProvider
-            from src.config import get_config  # 假设有全局配置获取方法
+            from src.config.models import CrawlerConfig, HKUSTextSourceConfig, LLMConfig
 
             try:
-                config = get_config()
-                hk_us_config = config.data_sources.text.hk_us
-                crawler_config = config.data_sources.crawler
+                hk_us_config = (
+                    config.data_sources.text.hk_us
+                    if config is not None
+                    else HKUSTextSourceConfig()
+                )
+                crawler_config = (
+                    config.data_sources.crawler
+                    if config is not None
+                    else CrawlerConfig()
+                )
+                llm_config = config.llm_api if config is not None else LLMConfig()
 
                 # 尝试创建 LLM 客户端（用于内容提取）
                 llm_client = None
@@ -140,8 +154,12 @@ class TextProviderFactory:
                     from src.llm.deepseek_client import DeepSeekClient
 
                     llm_client = DeepSeekClient(
-                        api_key=config.llm_api.api_key,
-                        model=config.llm_api.model,
+                        api_key=llm_config.get_api_key(),
+                        model=llm_config.model,
+                        temperature=llm_config.temperature,
+                        max_tokens=llm_config.max_tokens,
+                        thinking_enabled=llm_config.thesis_thinking_enabled,
+                        thinking_max_tokens=llm_config.thesis_thinking_max_tokens,
                     )
                 except Exception as e:
                     logger.warning(f"无法创建 LLM 客户端，将禁用内容提取: {e}")
@@ -151,11 +169,13 @@ class TextProviderFactory:
                     crawler_config=crawler_config,
                     llm_client=llm_client,
                 )
+                cls._hk_us_provider_config_key = config_key
                 logger.info("创建港美股 TextProvider (HKUSTextProvider)")
 
             except Exception as e:
                 logger.warning(f"无法创建 HKUSTextProvider，使用占位实现: {e}")
                 cls._hk_us_provider = _PlaceholderProvider("hk_us")
+                cls._hk_us_provider_config_key = config_key
 
         return cls._hk_us_provider
 
@@ -184,6 +204,7 @@ class TextProviderFactory:
         max_items: int = 10,
         source_types: list[TextSourceType] | None = None,
         use_mock: bool = False,
+        config: AppConfig | None = None,
     ) -> list[TextItem]:
         """
         便捷方法：自动选择 Provider 并获取文本
@@ -214,7 +235,7 @@ class TextProviderFactory:
         # 延迟导入避免循环依赖
         from ..models import TextItem
 
-        provider = cls.get_provider(ticker, use_mock=use_mock)
+        provider = cls.get_provider(ticker, use_mock=use_mock, config=config)
         return provider.fetch_texts(
             ticker=ticker,
             name=name,
@@ -236,5 +257,6 @@ class TextProviderFactory:
         """
         cls._a_share_provider = None
         cls._hk_us_provider = None
+        cls._hk_us_provider_config_key = None
         cls._mock_provider = None
         logger.debug("TextProviderFactory 缓存已重置")

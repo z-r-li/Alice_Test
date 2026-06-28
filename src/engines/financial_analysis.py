@@ -191,6 +191,12 @@ class FinancialAnalysisEngine:
             m.status = "data_error"
             m.notes = ["财报无有效报告期，需尽调"]
             return m
+        if report.status == "partial":
+            m.status = "partial"
+            notes.append(
+                f"财报提供方返回 partial 状态"
+                f"{f'（{report.error_message}）' if report.error_message else ''}，需尽调"
+            )
 
         first, last = periods[0], periods[-1]
         years = len(periods) - 1
@@ -199,12 +205,36 @@ class FinancialAnalysisEngine:
         m.revenue_latest = last.revenue
         m.gross_margin_latest = last.gross_margin
         m.net_margin_latest = last.net_margin
+        trend_missing: list[str] = []
+        if len(periods) < 2:
+            trend_missing.append("报告期少于 2 期")
+        if first.revenue is None or last.revenue is None:
+            trend_missing.append("revenue trend")
+        elif first.revenue == 0:
+            trend_missing.append("revenue trend 起点为 0")
+        if first.net_income is None or last.net_income is None:
+            trend_missing.append("earnings trend")
+        if first.gross_margin is None or last.gross_margin is None:
+            trend_missing.append("gross_margin trend")
+        if first.net_margin is None or last.net_margin is None:
+            trend_missing.append("net_margin trend")
+        if first.operating_cashflow is None or last.operating_cashflow is None:
+            trend_missing.append("operating_cashflow trend")
+        elif first.operating_cashflow == 0:
+            trend_missing.append("operating_cashflow trend 起点为 0")
+
         m.revenue_cagr = _cagr_pct(first.revenue, last.revenue, years)
         m.earnings_cagr = _cagr_pct(first.net_income, last.net_income, years)
-        m.revenue_trend = _trend_value(first.revenue, last.revenue)
-        m.gross_margin_trend = _trend_points(first.gross_margin, last.gross_margin)
-        m.net_margin_trend = _trend_points(first.net_margin, last.net_margin)
-        m.ocf_trend = _trend_value(first.operating_cashflow, last.operating_cashflow)
+        if not trend_missing:
+            m.revenue_trend = _trend_value(first.revenue, last.revenue)
+            m.gross_margin_trend = _trend_points(first.gross_margin, last.gross_margin)
+            m.net_margin_trend = _trend_points(first.net_margin, last.net_margin)
+            m.ocf_trend = _trend_value(first.operating_cashflow, last.operating_cashflow)
+        else:
+            m.status = "partial"
+            notes.append(
+                "趋势字段数据不足（" + ", ".join(trend_missing) + "），相关结论需尽调"
+            )
         if last.operating_cashflow is not None:
             m.ocf_latest_positive = last.operating_cashflow > 0
 

@@ -123,6 +123,33 @@ def test_total_budget_scales_when_overcommitted():
     _assert_invariants(out, cfg)
 
 
+def test_total_budget_not_exceeded_after_rounding():
+    cfg = RiskConfig(
+        ref_weight=0.01,
+        soft_cap=0.01,
+        max_cluster_weight=1.0,
+        total_risk_budget=0.000002,
+    )
+    items = [_opp(f"R{i}.SH", industry=f"板块{i}") for i in range(3)]
+    out = RiskEngine(cfg).assess_portfolio(items)
+
+    assert sum(a.suggested_weight for a in out) <= cfg.total_risk_budget + EPS
+    assert all(round(a.suggested_weight, 6) == a.suggested_weight for a in out)
+
+
+def test_duplicate_ticker_not_folded_by_dict_key():
+    cfg = RiskConfig(ref_weight=0.05, soft_cap=0.10, max_cluster_weight=1.0)
+    items = [_opp("DUP.SH", industry="电力"), _opp("DUP.SH", industry="电力")]
+    out = RiskEngine(cfg).assess_portfolio(items)
+
+    assert len(out) == 2
+    assert out[0] is not out[1]
+    assert [a.ticker for a in out] == ["DUP.SH", "DUP.SH"]
+    assert [a.suggested_weight for a in out] == [0.05, 0.05]
+    assert out[0].correlation_flags == ["DUP.SH"]
+    assert out[1].correlation_flags == ["DUP.SH"]
+
+
 def test_unknown_cluster_exempt_from_cap_and_flags():
     cfg = RiskConfig(ref_weight=0.05, soft_cap=0.10, max_cluster_weight=0.15)
     # 4 个 UNKNOWN：合计 0.20 > 0.15，但 UNKNOWN 不当作真实簇 → 不缩、不互相 flag

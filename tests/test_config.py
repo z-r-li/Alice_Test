@@ -3,7 +3,7 @@
 
 测试用例：
 - test_load_config: 加载示例配置
-- test_env_var_injection: 环境变量注入
+- test_env_var_injection: 环境变量 getter 不写回配置对象
 - test_config_validation: 配置验证
 - test_config_manager: ConfigManager 功能测试
 """
@@ -69,6 +69,13 @@ class TestLoadConfig:
 
         assert "YAML 解析错误" in str(exc_info.value)
 
+    def test_config_example_parses(self):
+        """M7：仓库示例配置必须能被严格 schema 真实解析。"""
+        config = load_config(Path(__file__).resolve().parents[1] / "config.example.yaml")
+
+        assert config.llm_api.model == "deepseek-v4-flash"
+        assert len(config.targets) >= 1
+
 
 class TestLoadConfigFromDict:
     """从字典加载配置测试类"""
@@ -116,21 +123,39 @@ class TestLoadConfigFromDict:
 
         assert "配置验证失败" in str(exc_info.value)
 
+    def test_load_config_from_dict_rejects_unknown_top_level_key(self):
+        with pytest.raises(ConfigError) as exc_info:
+            load_config_from_dict({
+                "unknown_section": {},
+                "targets": [{"ticker": "AAPL", "name": "Apple", "thesis": "测试"}],
+            })
+
+        assert "extra_forbidden" in str(exc_info.value)
+
+    def test_load_config_from_dict_rejects_unknown_nested_key(self):
+        with pytest.raises(ConfigError) as exc_info:
+            load_config_from_dict({
+                "targets": [{"ticker": "AAPL", "name": "Apple", "thesis": "测试"}],
+                "gap_thresholds": {"opportunity": 5.0},
+            })
+
+        assert "extra_forbidden" in str(exc_info.value)
+
 
 class TestEnvVarInjection:
-    """环境变量注入测试类"""
+    """环境变量 getter 测试类"""
 
-    def test_deepseek_api_key_injection(
+    def test_deepseek_api_key_env_getter_without_config_injection(
         self,
         temp_config_path: Path,
         env_with_api_key,
     ):
-        """测试 DEEPSEEK_API_KEY 环境变量注入"""
+        """DEEPSEEK_API_KEY 运行期可读，但不写回 AppConfig。"""
         # 配置文件中不设置 api_key
         config_content = """
 llm_api:
   provider: "deepseek"
-  model: "deepseek-chat"
+  model: "deepseek-v4-flash"
   temperature: 0
 
 targets:
@@ -142,15 +167,15 @@ targets:
 
         config = load_config(temp_config_path)
 
-        # 验证环境变量被注入
-        assert config.llm_api.api_key == "env-test-api-key"
+        assert config.llm_api.api_key == ""
+        assert config.llm_api.get_api_key() == "env-test-api-key"
 
-    def test_tushare_token_injection(
+    def test_tushare_token_env_getter_without_config_injection(
         self,
         temp_config_path: Path,
         env_with_tushare_token,
     ):
-        """测试 TUSHARE_TOKEN 环境变量注入"""
+        """TUSHARE_TOKEN 运行期可读，但不写回 AppConfig。"""
         config_content = """
 llm_api:
   provider: "deepseek"
@@ -168,8 +193,8 @@ targets:
 
         config = load_config(temp_config_path)
 
-        # 验证环境变量被注入
-        assert config.data_sources.a_shares.token == "env-test-tushare-token"
+        assert config.data_sources.a_shares.token == ""
+        assert config.data_sources.a_shares.get_token() == "env-test-tushare-token"
 
     def test_env_var_priority_over_file(
         self,
@@ -182,7 +207,7 @@ targets:
 llm_api:
   provider: "deepseek"
   api_key: "file-api-key"
-  model: "deepseek-chat"
+  model: "deepseek-v4-flash"
   temperature: 0
 
 targets:
@@ -194,8 +219,9 @@ targets:
 
         config = load_config(temp_config_path)
 
-        # 环境变量应该覆盖配置文件的值
-        assert config.llm_api.api_key == "env-test-api-key"
+        # 环境变量供 getter 使用，但不覆盖配置对象中的文件值
+        assert config.llm_api.api_key == "file-api-key"
+        assert config.llm_api.get_api_key() == "env-test-api-key"
 
 
 class TestConfigManager:
@@ -452,11 +478,12 @@ class TestAppConfig:
 class TestLLMConfig:
     """LLMConfig 测试类"""
 
-    def test_get_api_key_from_config(self, clean_env):
-        """测试从配置获取 API Key"""
+    def test_get_api_key_ignores_config_secret(self, clean_env):
+        """运行期 secret 只从环境变量读取，不从 AppConfig 字段读取。"""
         config = LLMConfig(api_key="test-key")
 
-        assert config.get_api_key() == "test-key"
+        with pytest.raises(ValueError):
+            config.get_api_key()
 
     def test_get_api_key_from_env(self, env_with_api_key):
         """测试从环境变量获取 API Key"""

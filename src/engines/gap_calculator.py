@@ -57,17 +57,17 @@ class AuditResult:
     # PR-A fail-closed：扩充 data_partial（缺有效文本）/ pipeline_error（流水线整体回退）；
     # 非 "ok" 即「不进正常 alpha/IC 样本」。向后兼容（旧产物默认 "ok"）。
     status: Literal[
-        "ok", "data_error", "llm_error", "data_partial", "pipeline_error"
+        "ok", "data_error", "llm_error", "data_partial", "pipeline_error", "unknown"
     ] = "ok"
     # 缺数据 / 失败路径的 fail-closed 标记：True 表示该行需人工尽调、不得进入正常 alpha/IC 样本
-    # （向后兼容扩展，默认 False；CSV 持久化留待 PR-C/M3）。
-    needs_due_diligence: bool = False
+    # （向后兼容扩展，默认 False；旧 CSV 读回缺列时为 None，表示未知）。
+    needs_due_diligence: bool | None = False
 
-    # P1: 多阶段流水线产物引用（向后兼容扩展，默认 None；不改动原 CSV 14 列）
+    # P1: 多阶段流水线产物引用（向后兼容扩展，默认 None）
     artifact_dir: str | None = None  # S1–S5 产物 JSON 目录
     evidence_summary: str | None = None  # 证据链 / 尽调队列一句话摘要
 
-    # S6: 组合层风控回填字段（RiskEngine；向后兼容扩展，默认 None；不改动原 CSV 14 列）
+    # S6: 组合层风控回填字段（RiskEngine；向后兼容扩展，默认 None）
     suggested_weight: float | None = None  # 建议仓位（~ref_weight 软参考、非硬顶）
     correlation_flags: list[str] | None = None  # 同簇 / 高相关的其他 ticker
     structural_exit: list[str] | None = None  # 结构性退出触发（来自 S1 kill_criteria）

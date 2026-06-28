@@ -4,8 +4,10 @@ CSV 报告写入器
 输出格式符合 PRD 6.1 节定义的 audit_report.csv 规范
 """
 import csv
+import json
 from datetime import datetime
 from pathlib import Path
+from typing import Mapping
 
 from .base import AuditReportStore
 from ..engines.gap_calculator import AuditResult, AuditSignal
@@ -30,6 +32,14 @@ class CSVReportWriter(AuditReportStore):
         "key_narrative",
         "key_worry",
         "key_hope",
+        "status",
+        "needs_due_diligence",
+        "suggested_weight",
+        "correlation_flags",
+        "structural_exit",
+        "quant_exit_target",
+        "risk_adjusted_action",
+        "risk_contribution",
     ]
 
     def __init__(self, file_path: str | Path = "audit_report.csv"):
@@ -157,6 +167,23 @@ class CSVReportWriter(AuditReportStore):
         """将英文逗号替换为中文逗号，避免 CSV 分隔符冲突"""
         return text.replace(",", "，") if text else ""
 
+    @staticmethod
+    def _serialize_list(value: list[str] | None) -> str:
+        """Serialize list fields without inventing defaults for missing values."""
+        if value is None:
+            return ""
+        return json.dumps(value, ensure_ascii=False)
+
+    @staticmethod
+    def _serialize_optional(value: object) -> str:
+        return "" if value is None else str(value)
+
+    @staticmethod
+    def _serialize_bool(value: bool | None) -> str:
+        if value is None:
+            return ""
+        return "true" if value else "false"
+
     def _result_to_row(self, result: AuditResult) -> list[str]:
         """
         将 AuditResult 转换为 CSV 行
@@ -182,9 +209,43 @@ class CSVReportWriter(AuditReportStore):
             self._escape_comma(result.key_narrative),
             self._escape_comma(result.key_worry),
             self._escape_comma(result.key_hope),
+            getattr(result, "status", "") or "",
+            self._serialize_bool(getattr(result, "needs_due_diligence", None)),
+            self._serialize_optional(getattr(result, "suggested_weight", None)),
+            self._serialize_list(getattr(result, "correlation_flags", None)),
+            self._serialize_list(getattr(result, "structural_exit", None)),
+            self._serialize_optional(getattr(result, "quant_exit_target", None)),
+            getattr(result, "risk_adjusted_action", None) or "",
+            self._serialize_optional(getattr(result, "risk_contribution", None)),
         ]
 
-    def _row_to_result(self, row: list[str]) -> AuditResult:
+    @staticmethod
+    def _parse_float(value: str | None) -> float | None:
+        if value is None or value == "":
+            return None
+        return float(value)
+
+    @staticmethod
+    def _parse_optional_bool(value: str | None) -> bool | None:
+        if value is None or value == "":
+            return None
+        return value.strip().lower() in {"true", "1", "yes", "y", "是"}
+
+    @staticmethod
+    def _parse_list(value: str | None) -> list[str] | None:
+        if value is None or value == "":
+            return None
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return [part.strip() for part in value.split(";") if part.strip()]
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed]
+        if parsed is None:
+            return None
+        return [str(parsed)]
+
+    def _row_to_result(self, row: list[str] | Mapping[str, str | None]) -> AuditResult:
         """
         将 CSV 行转换为 AuditResult
 
@@ -194,25 +255,41 @@ class CSVReportWriter(AuditReportStore):
         Returns:
             AuditResult: 审计结果对象
         """
+        data: Mapping[str, str | None]
+        if isinstance(row, Mapping):
+            data = row
+        else:
+            data = dict(zip(self.CSV_COLUMNS, row))
+
         return AuditResult(
-            date=datetime.strptime(row[0], "%Y-%m-%d"),
-            ticker=row[1],
-            name=row[2],
-            price=float(row[3]),
-            pe_ttm=float(row[4]) if row[4] else None,
-            sentiment_score=int(row[5]),
-            sentiment_label=row[6],
-            implied_growth=float(row[7]),
-            our_growth=float(row[8]),
-            gap=float(row[9]),
-            signal=AuditSignal(row[10]),
-            key_narrative=row[11],
-            key_worry=row[12],
-            key_hope=row[13],
-            # 以下字段在 CSV 中不存储，使用默认值
+            date=datetime.strptime(data["date"] or "", "%Y-%m-%d"),
+            ticker=data["ticker"] or "",
+            name=data["name"] or "",
+            price=float(data["price"] or "nan"),
+            pe_ttm=self._parse_float(data.get("pe_ttm")),
+            sentiment_score=int(data["sentiment_score"] or 0),
+            sentiment_label=data["sentiment_label"] or "",
+            implied_growth=float(data["implied_growth"] or "nan"),
+            our_growth=float(data["our_growth"] or "nan"),
+            gap=float(data["gap"] or "nan"),
+            signal=AuditSignal(data["signal"] or "WAIT"),
+            key_narrative=data["key_narrative"] or "",
+            key_worry=data["key_worry"] or "",
+            key_hope=data["key_hope"] or "",
+            # 旧 CSV 没有以下列：用 unknown/None 表示未知，不补看似真实的默认。
+            status=data.get("status") or "unknown",
+            needs_due_diligence=self._parse_optional_bool(
+                data.get("needs_due_diligence")
+            ),
             thesis_aligned=True,
             confidence="中",
             reasoning="",
+            suggested_weight=self._parse_float(data.get("suggested_weight")),
+            correlation_flags=self._parse_list(data.get("correlation_flags")),
+            structural_exit=self._parse_list(data.get("structural_exit")),
+            quant_exit_target=self._parse_float(data.get("quant_exit_target")),
+            risk_adjusted_action=data.get("risk_adjusted_action") or None,
+            risk_contribution=self._parse_float(data.get("risk_contribution")),
         )
 
     def _read_all_results(self) -> list[AuditResult]:
@@ -227,11 +304,9 @@ class CSVReportWriter(AuditReportStore):
 
         results = []
         with open(self._file_path, "r", newline="", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            # 跳过表头
-            next(reader, None)
+            reader = csv.DictReader(f)
             for row in reader:
-                if len(row) >= 14:  # 确保行数据完整
+                if all(row.get(col) is not None for col in self.CSV_COLUMNS[:14]):
                     results.append(self._row_to_result(row))
         return results
 

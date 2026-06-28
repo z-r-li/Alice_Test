@@ -7,7 +7,7 @@
 # ============================================
 llm_api:
   provider: "deepseek"
-  api_key: ""  # 留空则从环境变量 DEEPSEEK_API_KEY 读取
+  api_key: ""  # 运行期只从环境变量 DEEPSEEK_API_KEY 读取
   model: "deepseek-v4-flash"  # `deepseek-chat` 别名 2026-07-24 退役，显式用 v4-flash
   temperature: 0  # 必须为 0，保证评分稳定（思考模式下此参数不生效）
   max_tokens: 4096
@@ -27,7 +27,7 @@ data_sources:
   # A 股行情数据源
   a_shares:
     provider: "akshare"  # 或 "tushare"
-    token: ""  # Tushare 需要
+    token: ""  # 使用 Tushare 时运行期只从环境变量 TUSHARE_TOKEN 读取
 
   # 港美股行情数据源
   hk_us:
@@ -74,10 +74,10 @@ data_sources:
       search_provider: "serper"
 
       # 搜索 API 密钥
-      # 留空则从环境变量读取：
+      # 运行期只从环境变量读取：
       # - serper: SERPER_API_KEY
       # - serpapi: SERPAPI_KEY
-      search_api_key: ""
+      search_api_key: ""  # 兼容字段；真实密钥不要写入配置
 
       # 多层浏览配置
       # 用于从搜索结果页深入获取研报详情
@@ -168,13 +168,7 @@ scheduler:
 # ============================================
 # Gap 判定阈值配置
 # ============================================
-# 简化模式：仅基于 gap 值判断（推荐）
 gap_thresholds:
-  opportunity: 5.0   # gap >= 5% 触发 OPPORTUNITY 信号
-  overheated: -5.0   # gap <= -5% 触发 OVERHEATED 信号
-
-# 高级模式（可选）：结合情绪分数判断
-# gap_thresholds:
-#   opportunity_gap_min: 10.0  # Gap > 10 视为机会
-#   opportunity_sentiment_max: 40  # 情绪 < 40 视为悲观
-#   overheated_sentiment_min: 80  # 情绪 > 80 视为过热
+  opportunity_gap_min: 10.0  # Gap > 10 视为机会
+  opportunity_sentiment_max: 40  # 情绪 < 40 视为悲观
+  overheated_sentiment_min: 80  # 情绪 > 80 视为过热

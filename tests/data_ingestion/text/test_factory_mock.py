@@ -8,14 +8,17 @@ import pytest
 
 from src.data_ingestion.models import TextItem
 from src.data_ingestion.text import MockTextProvider, TextProviderFactory
+from src.config import load_config_from_dict, reset_global_config, set_global_config
 
 
 @pytest.fixture(autouse=True)
 def _reset_factory():
     """每个用例前后重置工厂单例缓存，避免跨用例污染"""
     TextProviderFactory.reset()
+    reset_global_config()
     yield
     TextProviderFactory.reset()
+    reset_global_config()
 
 
 class TestFactoryUseMock:
@@ -47,6 +50,39 @@ class TestFactoryUseMock:
         """默认（use_mock=False）A 股不应返回 MockTextProvider"""
         provider = TextProviderFactory.get_provider("601985.SH")
         assert not isinstance(provider, MockTextProvider)
+
+    def test_hk_us_non_mock_uses_passed_config_not_global(self, monkeypatch):
+        """M8：HK/US 非 mock 接线使用当前 config，而不是全局 get_config()。"""
+        monkeypatch.setenv("SERPER_API_KEY", "serper-test-key")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
+
+        from src.data_ingestion.text.hk_us.hk_us_provider import HKUSTextProvider
+
+        current_config = load_config_from_dict({
+            "data_sources": {
+                "text": {
+                    "hk_us": {
+                        "search_provider": "serper",
+                        "trusted_domains": ["current.example.com"],
+                    }
+                },
+                "crawler": {"max_items_per_ticker": 7},
+            },
+            "targets": [{"ticker": "AAPL", "name": "Apple", "thesis": "测试"}],
+        })
+        global_config = load_config_from_dict({
+            "data_sources": {
+                "text": {"hk_us": {"search_provider": "serpapi"}},
+            },
+            "targets": [{"ticker": "MSFT", "name": "Microsoft", "thesis": "测试"}],
+        })
+        set_global_config(global_config)
+
+        provider = TextProviderFactory.get_provider("AAPL", config=current_config)
+
+        assert isinstance(provider, HKUSTextProvider)
+        assert provider._config.trusted_domains == ["current.example.com"]
+        assert provider._crawler_config.max_items_per_ticker == 7
 
     def test_reset_clears_mock_provider(self):
         """reset() 清空 Mock Provider 单例缓存"""

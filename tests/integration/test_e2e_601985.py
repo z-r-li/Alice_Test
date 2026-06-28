@@ -74,12 +74,19 @@ def test_e2e_601985_offline(monkeypatch, tmp_path):
     assert r.artifact_dir is not None
     assert "证据链" in (r.evidence_summary or "")
 
-    # CSV：原始 14 列 + 至少一行数据（向后兼容）
+    # CSV：旧 14 列前缀 + M3 状态/风控新增列
     assert csv_path.exists()
     with open(csv_path, encoding="utf-8") as f:
         rows = list(_csv.reader(f))
     assert rows[0] == CSVReportWriter.CSV_COLUMNS
-    assert len(rows[0]) == 14
+    assert rows[0][:14] == [
+        "date", "ticker", "name", "price", "pe_ttm",
+        "sentiment_score", "sentiment_label", "implied_growth",
+        "our_growth", "gap", "signal", "key_narrative",
+        "key_worry", "key_hope",
+    ]
+    assert "status" in rows[0]
+    assert "risk_adjusted_action" in rows[0]
     assert len(rows) >= 2
 
     # 五阶段产物 + 完整证据链

@@ -9,16 +9,22 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class LLMConfig(BaseModel):
+class ConfigModel(BaseModel):
+    """Base class for config sections: reject unknown keys instead of drifting."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class LLMConfig(ConfigModel):
     """
     LLM API 配置
 
     Attributes:
         provider: LLM 提供商，当前仅支持 deepseek
-        api_key: API 密钥，留空则从环境变量 DEEPSEEK_API_KEY 读取
+        api_key: 兼容字段；运行期密钥只从环境变量 DEEPSEEK_API_KEY 读取
         model: 模型名称
         temperature: 温度参数，必须为 0 以保证评分稳定
         max_tokens: 最大 token 数
@@ -28,7 +34,10 @@ class LLMConfig(BaseModel):
     """
 
     provider: Literal["deepseek"] = "deepseek"
-    api_key: str = ""
+    api_key: str = Field(
+        default="",
+        description="兼容字段；运行期密钥只从环境变量 DEEPSEEK_API_KEY 读取",
+    )
     # `deepseek-chat` 别名 2026-07-24 退役；默认显式用 deepseek-v4-flash（当前路由目标）。
     model: str = "deepseek-v4-flash"
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
@@ -71,16 +80,16 @@ class LLMConfig(BaseModel):
         Raises:
             ValueError: 未配置 API Key
         """
-        key = os.environ.get("DEEPSEEK_API_KEY", self.api_key)
+        key = os.environ.get("DEEPSEEK_API_KEY")
         if not key:
             raise ValueError(
                 "未配置 DeepSeek API Key。"
-                "请在 config.yaml 中设置 api_key 或设置环境变量 DEEPSEEK_API_KEY"
+                "请设置环境变量 DEEPSEEK_API_KEY"
             )
         return key
 
 
-class ASharesSourceConfig(BaseModel):
+class ASharesSourceConfig(ConfigModel):
     """
     A 股数据源配置
 
@@ -88,11 +97,14 @@ class ASharesSourceConfig(BaseModel):
 
     Attributes:
         provider: A 股数据源提供商，支持 tushare 或 akshare
-        token: Tushare API Token（使用 tushare 时必填）
+        token: 兼容字段；运行期 Token 只从环境变量 TUSHARE_TOKEN 读取
     """
 
     provider: Literal["tushare", "akshare"] = "tushare"
-    token: str = Field(default="", description="Tushare API Token")
+    token: str = Field(
+        default="",
+        description="兼容字段；运行期 Token 只从环境变量 TUSHARE_TOKEN 读取",
+    )
 
     def get_token(self) -> str:
         """
@@ -104,17 +116,16 @@ class ASharesSourceConfig(BaseModel):
         Raises:
             ValueError: 使用 tushare 但未配置 Token
         """
-        token = os.environ.get("TUSHARE_TOKEN", self.token)
+        token = os.environ.get("TUSHARE_TOKEN")
         if self.provider == "tushare" and not token:
             raise ValueError(
                 "使用 tushare 数据源需配置 Token。"
-                "请在 config.yaml 中设置 data_sources.a_shares.token "
-                "或设置环境变量 TUSHARE_TOKEN"
+                "请设置环境变量 TUSHARE_TOKEN"
             )
         return token
 
 
-class HKUSSourceConfig(BaseModel):
+class HKUSSourceConfig(ConfigModel):
     """
     港美股数据源配置
 
@@ -127,7 +138,7 @@ class HKUSSourceConfig(BaseModel):
     provider: Literal["yfinance"] = "yfinance"
 
 
-class QuotesSourceConfig(BaseModel):
+class QuotesSourceConfig(ConfigModel):
     """
     行情数据源配置（兼容旧版配置格式）
 
@@ -140,7 +151,7 @@ class QuotesSourceConfig(BaseModel):
     hk_us: Literal["yfinance"] = "yfinance"
 
 
-class AShareTextSourceConfig(BaseModel):
+class AShareTextSourceConfig(ConfigModel):
     """
     A 股文本数据源配置
 
@@ -194,7 +205,7 @@ class AShareTextSourceConfig(BaseModel):
     )
 
 
-class BrowsingConfig(BaseModel):
+class BrowsingConfig(ConfigModel):
     """
     多层浏览配置
 
@@ -218,7 +229,7 @@ class BrowsingConfig(BaseModel):
     )
 
 
-class HKUSTextSourceConfig(BaseModel):
+class HKUSTextSourceConfig(ConfigModel):
     """
     港美股文本数据源配置
 
@@ -226,7 +237,7 @@ class HKUSTextSourceConfig(BaseModel):
 
     Attributes:
         search_provider: 搜索服务提供商 ("serper" 推荐, "serpapi" 备选)
-        search_api_key: 搜索 API 密钥（留空则从环境变量读取）
+        search_api_key: 兼容字段；运行期密钥只从 SERPER_API_KEY / SERPAPI_KEY 读取
         browsing: 多层浏览配置
         trusted_domains: 可信域名白名单
         search_templates: 搜索查询模板
@@ -238,7 +249,7 @@ class HKUSTextSourceConfig(BaseModel):
     )
     search_api_key: str = Field(
         default="",
-        description="搜索 API 密钥，留空则从环境变量 SERPER_API_KEY 或 SERPAPI_KEY 读取",
+        description="兼容字段；运行期密钥只从环境变量 SERPER_API_KEY 或 SERPAPI_KEY 读取",
     )
     browsing: BrowsingConfig = Field(
         default_factory=BrowsingConfig,
@@ -269,7 +280,7 @@ class HKUSTextSourceConfig(BaseModel):
     )
 
 
-class TextSourceConfig(BaseModel):
+class TextSourceConfig(ConfigModel):
     """
     文本数据源配置
 
@@ -314,7 +325,7 @@ class TextSourceConfig(BaseModel):
         return data
 
 
-class TrustedSourcesConfig(BaseModel):
+class TrustedSourcesConfig(ConfigModel):
     """
     可信数据源配置
 
@@ -342,7 +353,7 @@ class TrustedSourcesConfig(BaseModel):
     )
 
 
-class CrawlerConfig(BaseModel):
+class CrawlerConfig(ConfigModel):
     """
     爬虫配置
 
@@ -382,7 +393,7 @@ class CrawlerConfig(BaseModel):
     )
 
 
-class DataSourcesConfig(BaseModel):
+class DataSourcesConfig(ConfigModel):
     """
     数据源总配置
 
@@ -419,7 +430,7 @@ class DataSourcesConfig(BaseModel):
         return self
 
 
-class OutputConfig(BaseModel):
+class OutputConfig(ConfigModel):
     """
     输出配置
 
@@ -444,7 +455,7 @@ class OutputConfig(BaseModel):
     )
 
 
-class TargetConfig(BaseModel):
+class TargetConfig(ConfigModel):
     """
     单个监控标的配置
 
@@ -482,7 +493,7 @@ class TargetConfig(BaseModel):
             return "us"
 
 
-class SchedulerConfig(BaseModel):
+class SchedulerConfig(ConfigModel):
     """
     调度配置
 
@@ -495,7 +506,7 @@ class SchedulerConfig(BaseModel):
     enabled: bool = True
 
 
-class GapThresholdConfig(BaseModel):
+class GapThresholdConfig(ConfigModel):
     """
     Gap 判定阈值配置
 
@@ -529,7 +540,7 @@ class GapThresholdConfig(BaseModel):
         return self
 
 
-class FinancialAnalysisConfig(BaseModel):
+class FinancialAnalysisConfig(ConfigModel):
     """S4 财务分析配置"""
 
     enabled: bool = Field(
@@ -541,7 +552,7 @@ class FinancialAnalysisConfig(BaseModel):
     )
 
 
-class PipelineConfig(BaseModel):
+class PipelineConfig(ConfigModel):
     """S1–S5 多阶段信念流水线配置"""
 
     enabled: bool = Field(
@@ -550,7 +561,7 @@ class PipelineConfig(BaseModel):
     )
 
 
-class RiskControlConfig(BaseModel):
+class RiskControlConfig(ConfigModel):
     """S6 组合层风控配置（pydantic 版，镜像 engines.risk_engine.RiskConfig）。
 
     阈值均可在 config.yaml 的 `risk:` 段覆盖；main.py 将其映射为引擎侧
@@ -582,7 +593,7 @@ class RiskControlConfig(BaseModel):
     )
 
 
-class AppConfig(BaseModel):
+class AppConfig(ConfigModel):
     """
     应用总配置
 
