@@ -455,6 +455,27 @@ class OutputConfig(ConfigModel):
     )
 
 
+class PersistenceConfig(ConfigModel):
+    """持久化后端配置（P2：决策日志 / 持仓 / 风控史 / alpha 同库 SQLite）。
+
+    对应 D-20260629-1（持久化=SQLite）与 S7 决策日志（CDX-2）落地：
+
+    Attributes:
+        backend: 持久化后端。``csv``（默认）仅写 ``output`` 的审计报告 CSV；
+            ``sqlite`` 在此之上把每笔 S7 决策（含 WAIT）落进决策日志 SQLite。
+        sqlite_path: SQLite DB 文件路径（``backend=sqlite`` 时生效）。
+    """
+
+    backend: Literal["csv", "sqlite"] = Field(
+        default="csv",
+        description="持久化后端：csv 仅写审计报告；sqlite 额外写 S7 决策日志",
+    )
+    sqlite_path: str = Field(
+        default="data/alice.db",
+        description="决策日志 SQLite DB 文件路径（backend=sqlite 时生效）",
+    )
+
+
 class TargetConfig(ConfigModel):
     """
     单个监控标的配置
@@ -624,6 +645,7 @@ class AppConfig(ConfigModel):
     data_sources: DataSourcesConfig = Field(default_factory=DataSourcesConfig)
     targets: list[TargetConfig] = Field(default_factory=list)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     financial_analysis: FinancialAnalysisConfig = Field(
         default_factory=FinancialAnalysisConfig

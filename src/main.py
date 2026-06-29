@@ -14,6 +14,7 @@ if __name__ == "__main__" and __package__ is None:
 
 import argparse
 import logging
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -51,8 +52,25 @@ from .engines.thesis_pipeline import PipelineResult
 from .engines.risk_engine import WAIT, UNKNOWN_CLUSTER
 from .llm import DeepSeekClient, JSONParseError
 from .llm.deepseek_client import ContentModerationError
-from .persistence import CSVReportWriter, AuditReportStore, ArtifactStore
+from .persistence import (
+    CSVReportWriter,
+    AuditReportStore,
+    ArtifactStore,
+    SQLiteStore,
+    DecisionEntry,
+)
 from .utils import setup_logger, AuditLogger, TextSanitizer
+
+
+# S7 决策日志：市场 → 对标基准 / 币种（按 ticker 后缀确定性派生，非编造）。
+_BENCHMARK_BY_MARKET = {"CN": "沪深300", "HK": "HSI", "US": "SPX"}
+_CURRENCY_BY_MARKET = {"CN": "CNY", "HK": "HKD", "US": "USD"}
+# RiskEngine.risk_adjusted_action（BUY/TRIM/WAIT/EXIT）→ 决策日志 action 全集
+# （BUY/ADD/HOLD/TRIM/SELL/WAIT）。EXIT 无对应枚举 → 映射到 SELL。
+_RISK_ACTION_TO_DECISION = {
+    "BUY": "BUY", "ADD": "ADD", "HOLD": "HOLD",
+    "TRIM": "TRIM", "SELL": "SELL", "WAIT": "WAIT", "EXIT": "SELL",
+}
 
 
 def _reconfigure_stdio() -> None:
@@ -286,6 +304,11 @@ class AliceTestPipeline:
             except Exception as e:
                 self._py_logger.error(f"保存报告失败: {e}")
 
+        # S7 决策日志（P2 / CDX-2）：backend=sqlite 时，对每个结果（含 WAIT、含 fail-closed）
+        # 落一行可追溯决策记录，供日后回填兑现、算命中率 / IC（P0-5 验证时钟）。默认 csv 不写。
+        if results and self._config.persistence.backend == "sqlite":
+            self._write_decision_log(results, targets)
+
         # 输出统计信息
         stats = self._logger.end_run()
         self._print_summary(results, success_count, error_count)
@@ -303,6 +326,155 @@ class AliceTestPipeline:
             target = self._config.get_target_by_ticker(self._ticker_filter)
             return [target] if target else []
         return self._config.targets
+
+    # ---- S7 决策日志（P2 / CDX-2） ------------------------------------------
+    def _write_decision_log(
+        self, results: list[AuditResult], targets: list[TargetConfig]
+    ) -> None:
+        """把整批 S7 结果（含 WAIT / fail-closed）落进决策日志 SQLite。
+
+        幂等 upsert（按 decision_id=f"{ticker}-{asof_date}"），同一交易日重跑不重复。
+        失败不上抛——决策日志写出问题（含建目录失败）不应污染审计报告已落盘的运行退出码，
+        故 mkdir / 元数据解析 / 落库整段都在 try 内。
+        """
+        try:
+            path = Path(self._config.persistence.sqlite_path)
+            if str(path.parent) not in ("", "."):
+                path.parent.mkdir(parents=True, exist_ok=True)
+
+            targets_by_ticker = {t.ticker: t for t in targets}
+            commit = self._resolve_pipeline_commit()
+            model_version = self._config.llm_api.model
+            entries = [
+                self._build_decision_entry(
+                    r, targets_by_ticker.get(r.ticker), commit, model_version
+                )
+                for r in results
+            ]
+            with SQLiteStore(str(path)) as store:
+                store.save_decisions(entries)
+            self._py_logger.info(
+                f"决策日志已写入 {len(entries)} 行（SQLite）: {path}"
+            )
+        except Exception as e:
+            self._py_logger.error(f"写入决策日志失败: {e}")
+
+    def _build_decision_entry(
+        self,
+        result: AuditResult,
+        target: TargetConfig | None,
+        pipeline_commit: str | None,
+        model_version: str | None,
+    ) -> DecisionEntry:
+        """由 AuditResult（+ 标的 thesis + 运行期元数据）构造一条 DecisionEntry。
+
+        缺数据 / NaN（fail-closed 行的 our_growth/implied_growth/gap）一律转 NULL，**不编造**。
+        且 **status != "ok"（降级 / 失败 / 流水线回退）的行，IC 预测子（our_growth /
+        implied_growth / gap）一律置 NULL**——与「非 ok 不进正常 alpha/IC 样本」纪律一致，
+        否则 pipeline_error / data_error 行仍带数值会污染 information_coefficient()。
+        catalyst / confidence_pct / horizon_days 等暂无可靠来源的字段留 NULL（P1-6 催化剂落地后再接）。
+        """
+        asof = result.date.strftime("%Y-%m-%d")
+        market = self._market_code(result.ticker)
+        status_ok = getattr(result, "status", "ok") == "ok"
+        # 证伪条件 = S1 RefinedThesis.kill_criteria：优先取 _process_single_target 无条件挂上的
+        # _s1_kill_criteria（独立于风控）；回退到 structural_exit（风控开时的同源回填）。
+        # 二者皆空 → 留 NULL（如 fail-closed / 流水线回退路径无 refined_thesis）。
+        kc = getattr(result, "_s1_kill_criteria", None) or getattr(result, "structural_exit", None)
+        falsification = "; ".join(kc) if kc else None
+        return DecisionEntry(
+            decision_id=f"{result.ticker}-{asof}",
+            asof_date=asof,
+            ticker=result.ticker,
+            action=self._resolve_action(result),
+            market=market,
+            benchmark=_BENCHMARK_BY_MARKET.get(market),
+            currency=_CURRENCY_BY_MARKET.get(market),
+            signal=result.signal.value,
+            suggested_weight=self._nan_to_none(
+                getattr(result, "suggested_weight", None)
+            ),
+            # 非 ok 行不进 IC/命中率样本：预测子置 NULL（不只是 NaN→NULL）。
+            our_growth=self._nan_to_none(result.our_growth) if status_ok else None,
+            implied_growth=self._nan_to_none(result.implied_growth) if status_ok else None,
+            gap=self._nan_to_none(result.gap) if status_ok else None,
+            thesis_summary=(target.thesis if target else None),
+            falsification=falsification,
+            source_artifact=getattr(result, "artifact_dir", None),
+            pipeline_commit=pipeline_commit,
+            model_version=model_version,
+        )
+
+    @staticmethod
+    def _resolve_action(result: AuditResult) -> str:
+        """决策动作（占位）：降级 / 失败行绝不记 BUY；ok 行优先采用组合层风控裁定动作。
+
+        - status != "ok"（data_error / pipeline_error / data_partial / llm_error）→ WAIT：
+          与 _apply_portfolio_risk 中性化一致（这些行已被置零权重、不给买入），否则决策日志
+          会与审计结果自相矛盾（给一个流水线已判定「不可操作」的行记 BUY）。
+        - ok 行：用 risk_adjusted_action（组合层权威写者，已含预算 / 簇约束，可能把 OPPORTUNITY
+          压成 WAIT/TRIM）；映射进决策动作全集；风控关闭（None）时回退信号占位映射。
+        真正人拍板的 action 待 S7 人审入口接入后覆盖。
+        """
+        if getattr(result, "status", "ok") != "ok":
+            return "WAIT"
+        ra = getattr(result, "risk_adjusted_action", None)
+        if ra is not None:  # 组合层已裁定（含 WAIT）；None 才表示风控关闭、走回退
+            return _RISK_ACTION_TO_DECISION.get(ra, "WAIT")
+        # 风控关闭（risk_adjusted_action 为 None）→ 占位映射：BUY 须 OPPORTUNITY **且
+        # thesis_aligned**（镜像 RiskEngine._eligible——系统里唯一校验信念对齐之处）；否则一个
+        # 被流水线标为「未对齐」的 thesis 会在风控关闭时被记成 actionable BUY。
+        return (
+            "BUY"
+            if (result.signal == AuditSignal.OPPORTUNITY
+                and getattr(result, "thesis_aligned", False))
+            else "WAIT"
+        )
+
+    @staticmethod
+    def _market_code(ticker: str) -> str:
+        """按 ticker 后缀派生市场码 CN/HK/US（与 TargetConfig.get_market 同口径）。"""
+        t = ticker.upper()
+        if t.endswith((".SH", ".SZ")):
+            return "CN"
+        if t.endswith(".HK"):
+            return "HK"
+        return "US"
+
+    @staticmethod
+    def _nan_to_none(value: float | None) -> float | None:
+        """NaN / None → None（决策日志不存 NaN，避免污染 IC/命中率样本）。"""
+        if value is None:
+            return None
+        try:
+            if math.isnan(value):
+                return None
+        except TypeError:
+            return value
+        return value
+
+    def _resolve_pipeline_commit(self) -> str | None:
+        """尽力获取运行期 git short commit（复现锚）；不可用时 None，不阻塞。"""
+        cached = getattr(self, "_pipeline_commit_cache", "__unset__")
+        if cached != "__unset__":
+            return cached
+        commit: str | None = None
+        try:
+            import subprocess
+
+            proc = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(Path(__file__).resolve().parent.parent),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if proc.returncode == 0:
+                commit = proc.stdout.strip() or None
+        except Exception:
+            commit = None
+        self._pipeline_commit_cache = commit
+        return commit
 
     def _apply_portfolio_risk(
         self, results: list[AuditResult], targets: list[TargetConfig]
@@ -510,11 +682,16 @@ class AliceTestPipeline:
                     f"  [{target.ticker}] 尽调队列 {len(pipeline_result.due_diligence_queue)} 项"
                 )
 
+        # S1 kill_criteria（证伪条件）来自 thesis 流水线、**独立于风控**：决策日志 falsification
+        # 取它，故无论 risk.enabled 与否都算出来挂到 result 上（不入 CSV、不经 RiskEngine）。
+        # 否则「pipeline 开 + 风控关」时 structural_exit 不被回填 → falsification 丢失 S7 审计护栏。
+        kill_criteria = self._kill_criteria_of(pipeline_result)
+        result._s1_kill_criteria = kill_criteria
+
         # S6: 单标的风控基线——结构性退出 + 量化退出占位（kill_criteria 在 PipelineResult
         # 作用域内可达）。跨标的 sizing / 相关性 / 最终 risk_adjusted_action 由循环后的
         # assess_portfolio 统一裁定（权威写者），故此处只填按标的产物、不写 action。
         if self._risk_engine is not None:
-            kill_criteria = self._kill_criteria_of(pipeline_result)
             ra = self._risk_engine.assess_one(result, kill_criteria=kill_criteria)
             result.structural_exit = ra.structural_exit
             result.quant_exit_target = ra.quant_exit_target
@@ -565,10 +742,11 @@ class AliceTestPipeline:
         """从 S1 RefinedThesis 取结构性退出条件（kill_criteria），空安全。
 
         回退路径（used_pipeline=False）下 refined_thesis 为 None → 返回空列表。
+        过滤空白项，与 RiskEngine.assess_one 同口径——使风控开/关两条路径的 falsification 一致。
         """
         if pr is None or pr.refined_thesis is None:
             return []
-        return list(pr.refined_thesis.kill_criteria or [])
+        return [s for s in (pr.refined_thesis.kill_criteria or []) if str(s).strip()]
 
     @staticmethod
     def _summarize_evidence(pr: PipelineResult) -> str:
