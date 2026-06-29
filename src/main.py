@@ -14,6 +14,7 @@ if __name__ == "__main__" and __package__ is None:
 
 import argparse
 import logging
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -51,8 +52,19 @@ from .engines.thesis_pipeline import PipelineResult
 from .engines.risk_engine import WAIT, UNKNOWN_CLUSTER
 from .llm import DeepSeekClient, JSONParseError
 from .llm.deepseek_client import ContentModerationError
-from .persistence import CSVReportWriter, AuditReportStore, ArtifactStore
+from .persistence import (
+    CSVReportWriter,
+    AuditReportStore,
+    ArtifactStore,
+    SQLiteStore,
+    DecisionEntry,
+)
 from .utils import setup_logger, AuditLogger, TextSanitizer
+
+
+# S7 决策日志：市场 → 对标基准 / 币种（按 ticker 后缀确定性派生，非编造）。
+_BENCHMARK_BY_MARKET = {"CN": "沪深300", "HK": "HSI", "US": "SPX"}
+_CURRENCY_BY_MARKET = {"CN": "CNY", "HK": "HKD", "US": "USD"}
 
 
 def _reconfigure_stdio() -> None:
@@ -286,6 +298,11 @@ class AliceTestPipeline:
             except Exception as e:
                 self._py_logger.error(f"保存报告失败: {e}")
 
+        # S7 决策日志（P2 / CDX-2）：backend=sqlite 时，对每个结果（含 WAIT、含 fail-closed）
+        # 落一行可追溯决策记录，供日后回填兑现、算命中率 / IC（P0-5 验证时钟）。默认 csv 不写。
+        if results and self._config.persistence.backend == "sqlite":
+            self._write_decision_log(results, targets)
+
         # 输出统计信息
         stats = self._logger.end_run()
         self._print_summary(results, success_count, error_count)
@@ -303,6 +320,132 @@ class AliceTestPipeline:
             target = self._config.get_target_by_ticker(self._ticker_filter)
             return [target] if target else []
         return self._config.targets
+
+    # ---- S7 决策日志（P2 / CDX-2） ------------------------------------------
+    def _write_decision_log(
+        self, results: list[AuditResult], targets: list[TargetConfig]
+    ) -> None:
+        """把整批 S7 结果（含 WAIT / fail-closed）落进决策日志 SQLite。
+
+        幂等 upsert（按 decision_id=f"{ticker}-{asof_date}"），同一交易日重跑不重复。
+        失败不上抛——决策日志写出问题不应污染审计报告已落盘的运行退出码。
+        """
+        path = Path(self._config.persistence.sqlite_path)
+        if str(path.parent) not in ("", "."):
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+        targets_by_ticker = {t.ticker: t for t in targets}
+        commit = self._resolve_pipeline_commit()
+        model_version = self._config.llm_api.model
+        entries = [
+            self._build_decision_entry(
+                r, targets_by_ticker.get(r.ticker), commit, model_version
+            )
+            for r in results
+        ]
+        try:
+            with SQLiteStore(str(path)) as store:
+                store.save_decisions(entries)
+            self._py_logger.info(
+                f"决策日志已写入 {len(entries)} 行（SQLite）: {path}"
+            )
+        except Exception as e:
+            self._py_logger.error(f"写入决策日志失败: {e}")
+
+    def _build_decision_entry(
+        self,
+        result: AuditResult,
+        target: TargetConfig | None,
+        pipeline_commit: str | None,
+        model_version: str | None,
+    ) -> DecisionEntry:
+        """由 AuditResult（+ 标的 thesis + 运行期元数据）构造一条 DecisionEntry。
+
+        缺数据 / NaN（fail-closed 行的 our_growth/implied_growth/gap）一律转 NULL，**不编造**，
+        使其自然被 IC/命中率统计（要求非 NULL）排除。catalyst / confidence_pct / horizon_days
+        等暂无可靠来源的字段留 NULL（P1-6 催化剂落地后再接，勿造）。
+        """
+        asof = result.date.strftime("%Y-%m-%d")
+        market = self._market_code(result.ticker)
+        # 证伪条件 = S1 RefinedThesis.kill_criteria，运行期已落在 result.structural_exit
+        # （RiskEngine.assess_one 回填）；风控关闭时为 None → 留 NULL。
+        structural_exit = getattr(result, "structural_exit", None)
+        falsification = "; ".join(structural_exit) if structural_exit else None
+        return DecisionEntry(
+            decision_id=f"{result.ticker}-{asof}",
+            asof_date=asof,
+            ticker=result.ticker,
+            action=self._signal_to_action(result.signal),
+            market=market,
+            benchmark=_BENCHMARK_BY_MARKET.get(market),
+            currency=_CURRENCY_BY_MARKET.get(market),
+            signal=result.signal.value,
+            suggested_weight=self._nan_to_none(
+                getattr(result, "suggested_weight", None)
+            ),
+            our_growth=self._nan_to_none(result.our_growth),
+            implied_growth=self._nan_to_none(result.implied_growth),
+            gap=self._nan_to_none(result.gap),
+            thesis_summary=(target.thesis if target else None),
+            falsification=falsification,
+            source_artifact=getattr(result, "artifact_dir", None),
+            pipeline_commit=pipeline_commit,
+            model_version=model_version,
+        )
+
+    @staticmethod
+    def _signal_to_action(signal: AuditSignal) -> str:
+        """信号 → 决策动作占位映射（OPPORTUNITY→BUY，其余含 WAIT/OVERHEATED→WAIT）。
+
+        初期占位；真正人拍板的 action 待 S7 人审入口接入后覆盖（schema 已支持
+        BUY/ADD/HOLD/TRIM/SELL/WAIT 全集）。
+        """
+        return "BUY" if signal == AuditSignal.OPPORTUNITY else "WAIT"
+
+    @staticmethod
+    def _market_code(ticker: str) -> str:
+        """按 ticker 后缀派生市场码 CN/HK/US（与 TargetConfig.get_market 同口径）。"""
+        t = ticker.upper()
+        if t.endswith((".SH", ".SZ")):
+            return "CN"
+        if t.endswith(".HK"):
+            return "HK"
+        return "US"
+
+    @staticmethod
+    def _nan_to_none(value: float | None) -> float | None:
+        """NaN / None → None（决策日志不存 NaN，避免污染 IC/命中率样本）。"""
+        if value is None:
+            return None
+        try:
+            if math.isnan(value):
+                return None
+        except TypeError:
+            return value
+        return value
+
+    def _resolve_pipeline_commit(self) -> str | None:
+        """尽力获取运行期 git short commit（复现锚）；不可用时 None，不阻塞。"""
+        cached = getattr(self, "_pipeline_commit_cache", "__unset__")
+        if cached != "__unset__":
+            return cached
+        commit: str | None = None
+        try:
+            import subprocess
+
+            proc = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(Path(__file__).resolve().parent.parent),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if proc.returncode == 0:
+                commit = proc.stdout.strip() or None
+        except Exception:
+            commit = None
+        self._pipeline_commit_cache = commit
+        return commit
 
     def _apply_portfolio_risk(
         self, results: list[AuditResult], targets: list[TargetConfig]

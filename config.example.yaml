@@ -144,6 +144,17 @@ output:
   path: "./output/audit_report.csv"
 
 # ============================================
+# 持久化配置（P2：决策日志 / 持仓 / 风控史 / alpha 同库 SQLite）
+# ============================================
+# backend=csv（默认）：仅写上面 output 的审计报告 CSV。
+# backend=sqlite：在审计报告之外，把每笔 S7 决策（含 WAIT、含 fail-closed 标记行）落进
+#   决策日志 SQLite——供日后回填兑现、算命中率 + IC（IR=IC×√breadth 验证时钟，P0-5）。
+#   决策按 decision_id = f"{ticker}-{asof_date}" 幂等 upsert，同交易日重跑不重复。
+persistence:
+  backend: "csv"            # 或 "sqlite"
+  sqlite_path: "data/alice.db"  # backend=sqlite 时的 DB 文件路径
+
+# ============================================
 # S6 组合层风控配置（RiskEngine）
 # ============================================
 # 在 S5 认知差信号之上叠加组合层风控：仓位 sizing、行业聚类、双路退出。
