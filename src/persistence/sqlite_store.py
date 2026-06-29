@@ -95,7 +95,8 @@ class OutcomeEntry:
     excess_return: Optional[float] = None       # vs benchmark — feeds IC
     horizon_label: Optional[str] = None         # "30d" / "final"
     is_final: int = 0
-    observed_at: Optional[str] = None
+    observed_at: Optional[str] = None           # 观测时刻（可回填/可倒填到过去）
+    created_at: Optional[str] = None            # **入账时刻**（落库自动盖戳，point-in-time 锚）
     note: Optional[str] = None
 
 
@@ -189,6 +190,7 @@ class SQLiteStore:
                 outcome_id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 decision_id        TEXT NOT NULL REFERENCES decision_log(decision_id),
                 observed_at        TEXT NOT NULL,
+                created_at         TEXT NOT NULL,
                 horizon_label      TEXT,
                 realized_value     REAL,
                 realized_direction INTEGER,
@@ -210,7 +212,23 @@ class SQLiteStore:
             );
             """
         )
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """轻量前向迁移：``CREATE TABLE IF NOT EXISTS`` 不会给**既存**表加列，故旧库需手动补。
+
+        decision_outcome.created_at 是本 PR 后期才加的列；早期 schema 建的 DB 缺它，
+        直接开库 + record_outcome 会 ``OperationalError: no column named created_at``。
+        SQLite 不能 ADD 一个非空默认的 NOT NULL 列，故加可空列后用 observed_at 回填旧行
+        （最佳可得的入账时间代理）；新行仍由 record_outcome 显式盖戳，新建库走 NOT NULL DDL。
+        """
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(decision_outcome)")}
+        if "created_at" not in cols:
+            self.conn.execute("ALTER TABLE decision_outcome ADD COLUMN created_at TEXT")
+            self.conn.execute(
+                "UPDATE decision_outcome SET created_at = observed_at WHERE created_at IS NULL"
+            )
 
     # ---- validation (fail-closed discipline) -------------------------------
     @staticmethod
@@ -309,6 +327,9 @@ class SQLiteStore:
         d = asdict(outcome)
         if not d.get("observed_at"):
             d["observed_at"] = _utcnow()
+        # created_at = 落库时刻，绝不由调用方倒填——point-in-time 快照据此判「该结果当时是否已入账」。
+        if not d.get("created_at"):
+            d["created_at"] = _utcnow()
         self._validate_outcome(d)
         cols = _OUTCOME_COLS
         cur = self.conn.execute(
@@ -328,8 +349,11 @@ class SQLiteStore:
     def get_open_decisions(self, asof: Optional[str] = None) -> list[dict]:
         """Decisions with no FINAL outcome (as of `asof`, if given).
 
-        point-in-time：`asof` 同时约束**决策行本身**（created_at ≤ asof，未来才入账的决策
-        不算当时的 open 决策）与终态判定（只看 asof 前的 final outcome）。
+        point-in-time：`asof` 同时约束**决策行本身**（``d.created_at`` ≤ asof，未来才入账的
+        决策不算当时的 open 决策）与终态判定（只看 asof 前**已入账**的 final outcome）。
+        终态判定按结果的**入账时刻** ``o.created_at`` 而非 ``observed_at``：``observed_at`` 可被
+        回填/倒填到过去（如 6/29 backfill 一条 observed_at=6/20 的 final），用它会把一条 6/25
+        当时尚未入账的 final 误当作已存在、错误地把该决策判为已结。
         """
         outer = ""
         sub = ""
@@ -337,7 +361,7 @@ class SQLiteStore:
         if asof:
             eod = _eod(asof)
             outer = " AND d.created_at <= ?"
-            sub = " AND o.observed_at <= ?"
+            sub = " AND o.created_at <= ?"
             p = [eod, eod]
         return [dict(r) for r in self.conn.execute(
             "SELECT d.* FROM decision_log d WHERE 1=1" + outer +
@@ -349,7 +373,8 @@ class SQLiteStore:
 
     # ---- the P0-5 payoff: hit-rate + IC over resolved decisions -----------
     def hit_rate(self, since: Optional[str] = None, until: Optional[str] = None,
-                 include_wait: bool = False) -> Optional[float]:
+                 include_wait: bool = False, horizon: Optional[str] = None,
+                 asof: Optional[str] = None) -> Optional[float]:
         """终态命中率；`since`/`until` 按决策的 ``asof_date`` 闭区间限定验证窗口
         （滚动 / 回测报告需要：否则窗口会被窗外的旧/新决策污染）。
 
@@ -357,14 +382,36 @@ class SQLiteStore:
         故先按 ``MAX(outcome_id)``（自增、单调、无并列）取每 decision 的**最新 final**，再对那
         一行套 ``o.hit IS NOT NULL`` —— 若最新 final 的 hit 为 NULL，该 decision 整体剔除，
         **不回退**到更早 final（fail-closed / 不编造）。同理见 information_coefficient()；二者各自
-        在「最新 final、本指标列非空」上取样，故当 NULL 落在不同列时入样集合可不同（非 bug）。"""
+        在「最新 final、本指标列非空」上取样，故当 NULL 落在不同列时入样集合可不同（非 bug）。
+
+        ``horizon``：None（默认）= 每 decision 取**跨 horizon 的最新 final**（一决策一行，不重复
+        计数）；该默认按写入顺序（outcome_id）取「最新」，故跨 decision 可能混用不同 horizon 的
+        final（取决于哪档后写）。要按单一 horizon 稳定打分请显式传 horizon（如 ``"30d"``）——仅在
+        该 horizon 的 final 内取最新，使其**不被更晚 horizon（90d/final）的 final 覆盖或改变**。
+
+        ``asof``：复现「截至 asof 的命中率」，按结果**入账时刻** ``o.created_at`` ≤ asof 取样
+        （倒填 observed_at 的 backfill 不影响）。与 get_open_decisions(asof) 同源。注意 decision
+        侧字段（action 等）取最新内容（内容版本化 = v0.2），故 asof 是**结果时序意义上**的快照。"""
+        hz_outer = " AND o.horizon_label = ?" if horizon else ""
+        hz_sub = " AND o2.horizon_label = ?" if horizon else ""
+        asof_outer = " AND o.created_at <= ?" if asof else ""
+        asof_sub = " AND o2.created_at <= ?" if asof else ""
         q = ("SELECT d.action, o.hit FROM decision_log d "
              "JOIN decision_outcome o ON o.decision_id=d.decision_id "
-             "WHERE o.is_final=1 AND o.hit IS NOT NULL "
-             "AND o.outcome_id = ("
+             "WHERE o.is_final=1 AND o.hit IS NOT NULL" + hz_outer + asof_outer +
+             " AND o.outcome_id = ("
              "  SELECT MAX(o2.outcome_id) FROM decision_outcome o2 "
-             "  WHERE o2.decision_id=d.decision_id AND o2.is_final=1)")
+             "  WHERE o2.decision_id=d.decision_id AND o2.is_final=1" + hz_sub + asof_sub + ")")
         p: list[Any] = []
+        # 绑定顺序须与 SQL 文本一致：hz_outer, asof_outer, hz_sub, asof_sub, since, until
+        if horizon:
+            p.append(horizon)
+        if asof:
+            p.append(_eod(asof))
+        if horizon:
+            p.append(horizon)
+        if asof:
+            p.append(_eod(asof))
         if since:
             q += " AND d.asof_date >= ?"; p.append(since)
         if until:
@@ -374,20 +421,42 @@ class SQLiteStore:
                 if (include_wait or r["action"] != "WAIT")]
         return (sum(hits) / len(hits)) if hits else None
 
-    def information_coefficient(self, predictor: str = "gap") -> Optional[float]:
+    def information_coefficient(self, predictor: str = "gap",
+                                horizon: Optional[str] = None,
+                                asof: Optional[str] = None) -> Optional[float]:
         """Spearman rank-corr between the predictor (gap|confidence_pct|our_alpha)
-        and realized excess_return over FINAL outcomes. IR = IC * sqrt(breadth)."""
+        and realized excess_return over FINAL outcomes. IR = IC * sqrt(breadth).
+
+        去重 / NULL / ``horizon`` / ``asof`` 语义同 hit_rate()：按 MAX(outcome_id) 取每 decision
+        的最新 final（``horizon`` 限定档位、``asof`` 限定结果入账时刻 ``o.created_at`` ≤ asof），
+        再套 ``o.excess_return IS NOT NULL``。"""
         if predictor not in ("gap", "confidence_pct", "our_alpha"):
             raise ValueError("predictor must be gap|confidence_pct|our_alpha")
         # 与 hit_rate 同：append-only 下按 MAX(outcome_id) 取每 decision 的最新 final，再对那一行
         # 套 o.excess_return IS NOT NULL（最新 final 无收益值则该 decision 不进样本，不回退旧 final）。
+        hz_outer = " AND o.horizon_label = ?" if horizon else ""
+        hz_sub = " AND o2.horizon_label = ?" if horizon else ""
+        asof_outer = " AND o.created_at <= ?" if asof else ""
+        asof_sub = " AND o2.created_at <= ?" if asof else ""
+        # 绑定顺序须与 SQL 文本一致：hz_outer, asof_outer, hz_sub, asof_sub
+        params: list[Any] = []
+        if horizon:
+            params.append(horizon)
+        if asof:
+            params.append(_eod(asof))
+        if horizon:
+            params.append(horizon)
+        if asof:
+            params.append(_eod(asof))
         rows = self.conn.execute(
             f"SELECT d.{predictor} AS x, o.excess_return AS y FROM decision_log d "
             "JOIN decision_outcome o ON o.decision_id=d.decision_id "
-            "WHERE o.is_final=1 AND o.excess_return IS NOT NULL AND d." + predictor + " IS NOT NULL "
-            "AND o.outcome_id = ("
+            "WHERE o.is_final=1 AND o.excess_return IS NOT NULL AND d." + predictor + " IS NOT NULL"
+            + hz_outer + asof_outer +
+            " AND o.outcome_id = ("
             "  SELECT MAX(o2.outcome_id) FROM decision_outcome o2 "
-            "  WHERE o2.decision_id=d.decision_id AND o2.is_final=1)"
+            "  WHERE o2.decision_id=d.decision_id AND o2.is_final=1" + hz_sub + asof_sub + ")",
+            params,
         ).fetchall()
         xs = [r["x"] for r in rows]
         ys = [r["y"] for r in rows]

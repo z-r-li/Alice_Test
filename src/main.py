@@ -418,9 +418,17 @@ class AliceTestPipeline:
         if getattr(result, "status", "ok") != "ok":
             return "WAIT"
         ra = getattr(result, "risk_adjusted_action", None)
-        if ra:
+        if ra is not None:  # 组合层已裁定（含 WAIT）；None 才表示风控关闭、走回退
             return _RISK_ACTION_TO_DECISION.get(ra, "WAIT")
-        return "BUY" if result.signal == AuditSignal.OPPORTUNITY else "WAIT"
+        # 风控关闭（risk_adjusted_action 为 None）→ 占位映射：BUY 须 OPPORTUNITY **且
+        # thesis_aligned**（镜像 RiskEngine._eligible——系统里唯一校验信念对齐之处）；否则一个
+        # 被流水线标为「未对齐」的 thesis 会在风控关闭时被记成 actionable BUY。
+        return (
+            "BUY"
+            if (result.signal == AuditSignal.OPPORTUNITY
+                and getattr(result, "thesis_aligned", False))
+            else "WAIT"
+        )
 
     @staticmethod
     def _market_code(ticker: str) -> str:

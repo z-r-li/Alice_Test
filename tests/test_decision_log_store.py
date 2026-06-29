@@ -210,6 +210,99 @@ class TestDecisionLogStore:
                                           observed_at="2026-01-01T00:00:00Z"))
             assert s.hit_rate() == pytest.approx(1.0)   # 取后写入(hit=1)，不被 observed_at 误导
 
+    def test_hit_rate_horizon_filter_isolates_30d_from_final(self):
+        # 一决策有 30d final(hit=0) 与更晚的 final final(hit=1)。默认取跨 horizon 最新 → 1.0；
+        # 但按 horizon 的验证须稳定：hit_rate(horizon="30d") 仍为 0.0，不被更晚 final 覆盖。
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="d", action="BUY"))
+            s.record_outcome(OutcomeEntry(decision_id="d", is_final=1, hit=0, horizon_label="30d"))
+            s.record_outcome(OutcomeEntry(decision_id="d", is_final=1, hit=1, horizon_label="final"))
+            assert s.hit_rate() == pytest.approx(1.0)                 # 默认=最新 final
+            assert s.hit_rate(horizon="30d") == pytest.approx(0.0)    # 30d 仍可单独复现
+            assert s.hit_rate(horizon="final") == pytest.approx(1.0)
+
+    def test_ic_horizon_filter_isolates_30d_from_final(self):
+        # 两决策、各有 30d 与 final 两档 final，excess 方向按 horizon 相反。
+        # horizon="30d" → 与 gap 正序对齐(IC=+1)；默认(取 final) → 反序(IC=-1)。
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="t0", gap=-2.0))
+            s.save_decision(_entry(decision_id="t1", gap=5.0))
+            for did, hz, exc in [
+                ("t0", "30d", -0.01), ("t0", "final", 0.05),
+                ("t1", "30d", 0.03), ("t1", "final", -0.02),
+            ]:
+                s.record_outcome(OutcomeEntry(decision_id=did, is_final=1,
+                                              excess_return=exc, horizon_label=hz))
+            assert s.information_coefficient("gap", horizon="30d") == pytest.approx(1.0)
+            assert s.information_coefficient("gap") == pytest.approx(-1.0)  # 默认=final
+
+    def test_open_decisions_filter_on_outcome_created_at_not_observed_at(self):
+        # 6/29 backfill 一条 observed_at 倒填到 6/20 的 final，但入账(created_at)是 6/29。
+        # 截至 6/25 该 final 尚未入账 → 决策仍应为 open（按 created_at 而非 observed_at 判定）。
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="d", created_at="2026-06-19T10:00:00Z"))
+            s.record_outcome(OutcomeEntry(
+                decision_id="d", is_final=1, hit=1,
+                observed_at="2026-06-20T10:00:00Z",      # 倒填的观测日
+                created_at="2026-06-29T10:00:00Z",       # 真实入账日
+            ))
+            assert [r["decision_id"] for r in s.get_open_decisions(asof="2026-06-25")] == ["d"]
+            assert s.get_open_decisions() == []          # 现在（已入账）则已结
+
+    def test_migrates_legacy_decision_outcome_without_created_at(self, tmp_path):
+        # 早期 schema 的 DB（decision_outcome 无 created_at）：新代码开库须自动补列 + 回填，
+        # 否则 record_outcome 直接 OperationalError（CREATE TABLE IF NOT EXISTS 不给既存表加列）。
+        import sqlite3
+        db = str(tmp_path / "legacy.db")
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            """
+            CREATE TABLE decision_log (
+                decision_id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
+                asof_date TEXT NOT NULL, ticker TEXT NOT NULL, action TEXT NOT NULL
+            );
+            CREATE TABLE decision_outcome (
+                outcome_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_id TEXT NOT NULL REFERENCES decision_log(decision_id),
+                observed_at TEXT NOT NULL, horizon_label TEXT, realized_value REAL,
+                realized_direction INTEGER, hit INTEGER, excess_return REAL,
+                is_final INTEGER NOT NULL DEFAULT 0, note TEXT
+            );
+            INSERT INTO decision_log VALUES
+                ('d','2026-06-20T10:00:00Z','2026-06-20','601985.SH','BUY');
+            INSERT INTO decision_outcome (decision_id, observed_at, is_final, hit)
+                VALUES ('d','2026-06-20T10:00:00Z',1,1);
+            """
+        )
+        conn.commit()
+        conn.close()
+        with SQLiteStore(db) as s:
+            outs = s.get_outcomes("d")
+            assert outs[0]["created_at"] == "2026-06-20T10:00:00Z"   # 旧行回填=observed_at
+            new_id = s.record_outcome(OutcomeEntry(decision_id="d", is_final=1, hit=0))
+            assert new_id > 0                                        # 关键回归：不再 OperationalError
+            assert len(s.get_outcomes("d")) == 2
+
+    def test_hit_rate_asof_excludes_unlogged_backfill(self):
+        # final 6/29 才入账（observed_at 倒填 6/20）：hit_rate(asof=6/25) 不应计入它。
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="b", action="BUY"))
+            s.record_outcome(OutcomeEntry(decision_id="b", is_final=1, hit=1,
+                                          observed_at="2026-06-20T10:00:00Z",
+                                          created_at="2026-06-29T10:00:00Z"))
+            assert s.hit_rate() == pytest.approx(1.0)        # 现在
+            assert s.hit_rate(asof="2026-06-25") is None     # 6/25 时尚未入账 → 无样本
+
+    def test_ic_asof_excludes_unlogged_backfill(self):
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="t0", gap=-2.0))
+            s.save_decision(_entry(decision_id="t1", gap=5.0))
+            for did, exc in [("t0", 0.01), ("t1", 0.09)]:
+                s.record_outcome(OutcomeEntry(decision_id=did, is_final=1, excess_return=exc,
+                                              created_at="2026-06-29T10:00:00Z"))
+            assert s.information_coefficient("gap") == pytest.approx(1.0)       # 现在
+            assert s.information_coefficient("gap", asof="2026-06-25") is None  # 6/25 时样本<2
+
 
 class TestSQLiteReportStore:
     """audit_reports SQLite 后端（原 NotImplementedError 桩 → 可用实现）。"""
@@ -277,6 +370,43 @@ class TestSQLiteReportStore:
             assert len(dec_store.get_decisions()) == 1
         with SQLiteReportStore(db) as report_store:
             assert len(report_store.get_by_ticker(sample_audit_result.ticker)) == 1
+
+
+class TestResolveActionThesisGate:
+    """_resolve_action：风控关闭(回退)路径下 BUY 必须 thesis_aligned（comment 3494574223）。"""
+
+    @staticmethod
+    def _result(**kw):
+        base = dict(
+            date=datetime(2026, 6, 29), ticker="601985.SH", name="中国核电", price=10.0,
+            pe_ttm=None, sentiment_score=30, sentiment_label="悲观", implied_growth=5.0,
+            key_narrative="", key_worry="", key_hope="", thesis_aligned=True,
+            our_growth=20.0, confidence="高", reasoning="", gap=15.0,
+            signal=AuditSignal.OPPORTUNITY,
+        )
+        base.update(kw)
+        return AuditResult(**base)
+
+    def test_fallback_buy_requires_thesis_aligned(self):
+        from src.main import AliceTestPipeline
+        # 风控关闭 → risk_adjusted_action 为 None，走回退占位映射
+        assert AliceTestPipeline._resolve_action(
+            self._result(thesis_aligned=False)) == "WAIT"      # 未对齐 → 不记 BUY
+        assert AliceTestPipeline._resolve_action(
+            self._result(thesis_aligned=True)) == "BUY"
+
+    def test_risk_action_takes_precedence(self):
+        from src.main import AliceTestPipeline
+        # 风控启用：以组合层裁定为准（已含对齐校验），即便此处 thesis_aligned=False
+        assert AliceTestPipeline._resolve_action(
+            self._result(thesis_aligned=False, risk_adjusted_action="BUY")) == "BUY"
+        assert AliceTestPipeline._resolve_action(
+            self._result(risk_adjusted_action="WAIT")) == "WAIT"
+
+    def test_non_ok_status_always_wait(self):
+        from src.main import AliceTestPipeline
+        assert AliceTestPipeline._resolve_action(
+            self._result(status="data_error")) == "WAIT"
 
 
 # ---- 端到端：backend=sqlite mock 流水线（待办 5） ---------------------------
