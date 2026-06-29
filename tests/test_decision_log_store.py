@@ -168,6 +168,48 @@ class TestDecisionLogStore:
             with pytest.raises(ValueError):
                 s.record_outcome(OutcomeEntry(decision_id="601985-2026-06-29", **bad))
 
+    def test_hit_rate_dedups_rescored_final(self):
+        # append-only：同一决策被 re-score 留两条 is_final=1（hit=0 → backfill hit=1）。
+        # 只能按最新 final 计一次 → 1.0；旧 SQL 会两条都计入得 0.5（污染）。
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="b", action="BUY"))
+            s.record_outcome(OutcomeEntry(decision_id="b", is_final=1, hit=0))
+            s.record_outcome(OutcomeEntry(decision_id="b", is_final=1, hit=1))  # 修正
+            assert s.hit_rate() == pytest.approx(1.0)
+
+    def test_ic_dedups_rescored_final(self):
+        # 两决策、其一被 re-score。去重后 (gap,-) 完美正序对齐 → IC=+1；
+        # 不去重则混入旧 final 的反向 excess，IC 被污染。
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="t0", gap=-2.0))
+            s.save_decision(_entry(decision_id="t1", gap=5.0))
+            s.record_outcome(OutcomeEntry(decision_id="t0", is_final=1, excess_return=0.01))
+            s.record_outcome(OutcomeEntry(decision_id="t1", is_final=1, excess_return=-0.50))  # 错值
+            s.record_outcome(OutcomeEntry(decision_id="t1", is_final=1, excess_return=0.09))   # 修正
+            assert s.information_coefficient("gap") == pytest.approx(1.0)
+
+    def test_hit_rate_latest_final_null_drops_decision(self):
+        # 决策 A 最新 final 的 hit=NULL → 整条剔除，**不回退**到更早 final 的 hit=0；
+        # 只剩 B(hit=1) → 1.0。若错误回退则 hits=[0,1]→0.5。
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="A", action="BUY"))
+            s.save_decision(_entry(decision_id="B", action="BUY"))
+            s.record_outcome(OutcomeEntry(decision_id="A", is_final=1, hit=0))
+            s.record_outcome(OutcomeEntry(decision_id="A", is_final=1, hit=None))  # 最新无值
+            s.record_outcome(OutcomeEntry(decision_id="B", is_final=1, hit=1))
+            assert s.hit_rate() == pytest.approx(1.0)
+
+    def test_dedup_picks_max_outcome_id_not_observed_at(self):
+        # 锁死去重轴 = max(outcome_id)（写入顺序），而非 observed_at（可乱序）。
+        # 较早写入(outcome_id 小)的 final 带较晚 observed_at、hit=0；较晚写入的 hit=1。
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="b", action="BUY"))
+            s.record_outcome(OutcomeEntry(decision_id="b", is_final=1, hit=0,
+                                          observed_at="2026-12-31T00:00:00Z"))
+            s.record_outcome(OutcomeEntry(decision_id="b", is_final=1, hit=1,
+                                          observed_at="2026-01-01T00:00:00Z"))
+            assert s.hit_rate() == pytest.approx(1.0)   # 取后写入(hit=1)，不被 observed_at 误导
+
 
 class TestSQLiteReportStore:
     """audit_reports SQLite 后端（原 NotImplementedError 桩 → 可用实现）。"""

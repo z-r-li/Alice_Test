@@ -14,9 +14,12 @@ alpha 追踪统一落 SQLite）：
 
 设计不变量（承接已合入纪律）：
 - 幂等 upsert（决策按 ``decision_id``；报告按 ``(date, ticker)``）——同日重跑不产生重复行。
-- point-in-time：决策行带 ``created_at`` + ``asof_date``；``get_decisions(asof=...)`` 复现
-  「截至某日我们**记录过**什么」（IR=IC*sqrt(breadth) 验证时钟，P0-5 的地基）。
-- 结果 append-only：决策入账行不可变；重新评分 = 往 ``decision_outcome`` 追加一行。
+- point-in-time（v0.1 = **粗·存在性快照，非内容版本化**）：决策行带 ``created_at`` + ``asof_date``；
+  ``get_decisions(asof=...)`` 复现「截至某日我们**记录过哪些 decision_id**」（IR=IC*sqrt(breadth)
+  验证时钟，P0-5 的地基）。它只保证「这条决策当时是否已入账」，**不**保证「当时的内容是什么」——
+  内容级 point-in-time 重放（versioned rows）显式留待 v0.2「真·回测 point-in-time 重放」。
+- 结果 append-only：决策入账行不可变；重新评分 = 往 ``decision_outcome`` 追加一行（hit_rate / IC
+  在聚合前按 decision 取**最新 final**，故 backfill / 修正多条 final 不会被重复计数）。
 - 不编造（fail-closed）：未知字段留 ``NULL``，**绝不补 0.0**；与 PR-A（C1/C2）同纪律。
 - 两个语义未拍的口径（``confidence_basis`` / ``ic_outcome_def``）存成 per-row 标签、**不写
   死在 schema**，使团队日后标准化 M4 时无需迁移表。
@@ -233,8 +236,11 @@ class SQLiteStore:
         cols = _DECISION_COLS
         placeholders = ",".join(":" + c for c in cols)
         # 幂等 upsert：除主键外整列覆盖，但 **保留首次 created_at**——它是 point-in-time
-        # 锚（get_decisions(asof=) 据此重建快照）；同日重跑若刷新 created_at，会让旧决策在
+        # 锚（get_decisions(asof=) 据此重建存在性快照）；同日重跑若刷新 created_at，会让旧决策在
         # 「原入账时刻 ~ 重跑时刻」之间从历史快照里凭空消失。
+        # 注意（v0.1 边界）：整列覆盖在**跨 asof_date 改写一笔旧决策**时，会让 get_decisions(asof=)
+        # 在「原入账 ~ 重处理」之间的快照返回该行的**最新**内容（非当时内容）。v0.1 主用例是
+        # 「同交易日重跑幂等」（保持同一 asof_date，无此泄漏）；内容级 point-in-time = v0.2 versioned rows。
         _immutable = ("decision_id", "created_at")
         updates = ",".join(f"{c}=excluded.{c}" for c in cols if c not in _immutable)
         self.conn.execute(
@@ -260,6 +266,15 @@ class SQLiteStore:
 
     def get_decisions(self, asof: Optional[str] = None, ticker: Optional[str] = None,
                       since: Optional[str] = None, until: Optional[str] = None) -> list[dict]:
+        """决策日志查询。
+
+        ``asof``（v0.1 语义，**粗·存在性快照，非内容版本化**）：按 ``created_at <= eod(asof)``
+        过滤，复现「截至 asof 我们**记录过哪些 decision_id**」。它回答「这条决策在 asof 之前是否
+        已入账」，**不**回答「它在 asof 当时的内容是什么」——若同一 decision_id 在更晚的日子被以
+        不同内容重处理（跨 asof_date 改写旧决策），快照会返回该行**最新**的 action/gap/model。
+        内容级 point-in-time 重放（versioned rows）显式留待 v0.2。``since`` / ``until`` 按
+        ``asof_date`` 闭区间过滤决策日（与 ``asof`` 的 created_at 维度正交）。
+        """
         q = "SELECT * FROM decision_log WHERE 1=1"
         p: list[Any] = []
         if asof:    # point-in-time: only what was LOGGED by end of asof day
@@ -336,10 +351,19 @@ class SQLiteStore:
     def hit_rate(self, since: Optional[str] = None, until: Optional[str] = None,
                  include_wait: bool = False) -> Optional[float]:
         """终态命中率；`since`/`until` 按决策的 ``asof_date`` 闭区间限定验证窗口
-        （滚动 / 回测报告需要：否则窗口会被窗外的旧/新决策污染）。"""
+        （滚动 / 回测报告需要：否则窗口会被窗外的旧/新决策污染）。
+
+        decision_outcome 是 append-only，同一 decision 可有多条 is_final=1（修正 / backfill）。
+        故先按 ``MAX(outcome_id)``（自增、单调、无并列）取每 decision 的**最新 final**，再对那
+        一行套 ``o.hit IS NOT NULL`` —— 若最新 final 的 hit 为 NULL，该 decision 整体剔除，
+        **不回退**到更早 final（fail-closed / 不编造）。同理见 information_coefficient()；二者各自
+        在「最新 final、本指标列非空」上取样，故当 NULL 落在不同列时入样集合可不同（非 bug）。"""
         q = ("SELECT d.action, o.hit FROM decision_log d "
              "JOIN decision_outcome o ON o.decision_id=d.decision_id "
-             "WHERE o.is_final=1 AND o.hit IS NOT NULL")
+             "WHERE o.is_final=1 AND o.hit IS NOT NULL "
+             "AND o.outcome_id = ("
+             "  SELECT MAX(o2.outcome_id) FROM decision_outcome o2 "
+             "  WHERE o2.decision_id=d.decision_id AND o2.is_final=1)")
         p: list[Any] = []
         if since:
             q += " AND d.asof_date >= ?"; p.append(since)
@@ -355,10 +379,15 @@ class SQLiteStore:
         and realized excess_return over FINAL outcomes. IR = IC * sqrt(breadth)."""
         if predictor not in ("gap", "confidence_pct", "our_alpha"):
             raise ValueError("predictor must be gap|confidence_pct|our_alpha")
+        # 与 hit_rate 同：append-only 下按 MAX(outcome_id) 取每 decision 的最新 final，再对那一行
+        # 套 o.excess_return IS NOT NULL（最新 final 无收益值则该 decision 不进样本，不回退旧 final）。
         rows = self.conn.execute(
             f"SELECT d.{predictor} AS x, o.excess_return AS y FROM decision_log d "
             "JOIN decision_outcome o ON o.decision_id=d.decision_id "
-            "WHERE o.is_final=1 AND o.excess_return IS NOT NULL AND d." + predictor + " IS NOT NULL"
+            "WHERE o.is_final=1 AND o.excess_return IS NOT NULL AND d." + predictor + " IS NOT NULL "
+            "AND o.outcome_id = ("
+            "  SELECT MAX(o2.outcome_id) FROM decision_outcome o2 "
+            "  WHERE o2.decision_id=d.decision_id AND o2.is_final=1)"
         ).fetchall()
         xs = [r["x"] for r in rows]
         ys = [r["y"] for r in rows]
