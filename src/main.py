@@ -377,10 +377,11 @@ class AliceTestPipeline:
         asof = result.date.strftime("%Y-%m-%d")
         market = self._market_code(result.ticker)
         status_ok = getattr(result, "status", "ok") == "ok"
-        # 证伪条件 = S1 RefinedThesis.kill_criteria，运行期已落在 result.structural_exit
-        # （RiskEngine.assess_one 回填）；风控关闭时为 None → 留 NULL。
-        structural_exit = getattr(result, "structural_exit", None)
-        falsification = "; ".join(structural_exit) if structural_exit else None
+        # 证伪条件 = S1 RefinedThesis.kill_criteria：优先取 _process_single_target 无条件挂上的
+        # _s1_kill_criteria（独立于风控）；回退到 structural_exit（风控开时的同源回填）。
+        # 二者皆空 → 留 NULL（如 fail-closed / 流水线回退路径无 refined_thesis）。
+        kc = getattr(result, "_s1_kill_criteria", None) or getattr(result, "structural_exit", None)
+        falsification = "; ".join(kc) if kc else None
         return DecisionEntry(
             decision_id=f"{result.ticker}-{asof}",
             asof_date=asof,
@@ -681,11 +682,16 @@ class AliceTestPipeline:
                     f"  [{target.ticker}] 尽调队列 {len(pipeline_result.due_diligence_queue)} 项"
                 )
 
+        # S1 kill_criteria（证伪条件）来自 thesis 流水线、**独立于风控**：决策日志 falsification
+        # 取它，故无论 risk.enabled 与否都算出来挂到 result 上（不入 CSV、不经 RiskEngine）。
+        # 否则「pipeline 开 + 风控关」时 structural_exit 不被回填 → falsification 丢失 S7 审计护栏。
+        kill_criteria = self._kill_criteria_of(pipeline_result)
+        result._s1_kill_criteria = kill_criteria
+
         # S6: 单标的风控基线——结构性退出 + 量化退出占位（kill_criteria 在 PipelineResult
         # 作用域内可达）。跨标的 sizing / 相关性 / 最终 risk_adjusted_action 由循环后的
         # assess_portfolio 统一裁定（权威写者），故此处只填按标的产物、不写 action。
         if self._risk_engine is not None:
-            kill_criteria = self._kill_criteria_of(pipeline_result)
             ra = self._risk_engine.assess_one(result, kill_criteria=kill_criteria)
             result.structural_exit = ra.structural_exit
             result.quant_exit_target = ra.quant_exit_target
@@ -736,10 +742,11 @@ class AliceTestPipeline:
         """从 S1 RefinedThesis 取结构性退出条件（kill_criteria），空安全。
 
         回退路径（used_pipeline=False）下 refined_thesis 为 None → 返回空列表。
+        过滤空白项，与 RiskEngine.assess_one 同口径——使风控开/关两条路径的 falsification 一致。
         """
         if pr is None or pr.refined_thesis is None:
             return []
-        return list(pr.refined_thesis.kill_criteria or [])
+        return [s for s in (pr.refined_thesis.kill_criteria or []) if str(s).strip()]
 
     @staticmethod
     def _summarize_evidence(pr: PipelineResult) -> str:

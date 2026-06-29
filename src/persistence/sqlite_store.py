@@ -32,7 +32,7 @@ import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from .base import AuditReportStore
 from ..engines.gap_calculator import AuditResult, AuditSignal
@@ -96,8 +96,9 @@ class OutcomeEntry:
     horizon_label: Optional[str] = None         # "30d" / "final"
     is_final: int = 0
     observed_at: Optional[str] = None           # 观测时刻（可回填/可倒填到过去）
-    created_at: Optional[str] = None            # **入账时刻**（落库自动盖戳，point-in-time 锚）
     note: Optional[str] = None
+    # 注：入账时刻 created_at **不是** OutcomeEntry 字段——它由 store 时钟在 record_outcome 内
+    # 无条件盖戳（调用方不可倒填），是 point-in-time 锚（get_open_decisions/hit_rate/IC 的 asof 据此）。
 
 
 _DECISION_COLS = [f.name for f in dataclasses.fields(DecisionEntry)]
@@ -136,8 +137,11 @@ def _pearson(xs: list[float], ys: list[float]) -> Optional[float]:
 class SQLiteStore:
     """One DB file for P2 persistence. v0.1 = decision log fully usable."""
 
-    def __init__(self, path: str = ":memory:"):
+    def __init__(self, path: str = ":memory:", clock: Optional[Callable[[], str]] = None):
+        """``clock``：可注入的「现在」时钟（返回 ISO8601 UTC 串），默认真实墙钟。
+        仅供测试注入确定性入账时刻；生产路径绝不由调用方提供入账时间。"""
         self.path = path
+        self._clock = clock or _utcnow
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -248,8 +252,13 @@ class SQLiteStore:
     # ---- decision log ------------------------------------------------------
     def save_decision(self, entry: DecisionEntry) -> str:
         d = asdict(entry)
+        # created_at 默认 store 时钟；**显式 DecisionEntry.created_at 被尊重**——与 outcome
+        # 的「无条件盖戳」是有意的不对称：决策的 created_at 是「做出决策的时刻」（生产路径恒 ≈
+        # asof_date，main.py 永不显式设、总走时钟），允许显式值是为了**历史决策回填**（按真实
+        # 决策日重建台账）。而 outcome 的 created_at 是「获知结果的时刻」，倒填它会伪称提前知道
+        # 结果、污染 hit_rate/IC/open 的 point-in-time，故 outcome 侧绝不取调用方值。
         if not d.get("created_at"):
-            d["created_at"] = _utcnow()
+            d["created_at"] = self._clock()
         self._validate(d)
         cols = _DECISION_COLS
         placeholders = ",".join(":" + c for c in cols)
@@ -326,12 +335,12 @@ class SQLiteStore:
     def record_outcome(self, outcome: OutcomeEntry) -> int:
         d = asdict(outcome)
         if not d.get("observed_at"):
-            d["observed_at"] = _utcnow()
-        # created_at = 落库时刻，绝不由调用方倒填——point-in-time 快照据此判「该结果当时是否已入账」。
-        if not d.get("created_at"):
-            d["created_at"] = _utcnow()
+            d["observed_at"] = self._clock()
+        # created_at = **store 时钟**的落库时刻，无条件盖戳、绝不取调用方值——point-in-time 快照据此
+        # 判「该结果当时是否已入账」；若信任调用方 created_at，backfill 倒填会让结果看似提前存在。
+        d["created_at"] = self._clock()
         self._validate_outcome(d)
-        cols = _OUTCOME_COLS
+        cols = _OUTCOME_COLS + ["created_at"]   # created_at 非 OutcomeEntry 字段，单独补入 INSERT
         cur = self.conn.execute(
             f"INSERT INTO decision_outcome ({','.join(cols)}) "
             f"VALUES ({','.join(':' + c for c in cols)})",
@@ -423,13 +432,16 @@ class SQLiteStore:
 
     def information_coefficient(self, predictor: str = "gap",
                                 horizon: Optional[str] = None,
-                                asof: Optional[str] = None) -> Optional[float]:
+                                asof: Optional[str] = None,
+                                since: Optional[str] = None,
+                                until: Optional[str] = None) -> Optional[float]:
         """Spearman rank-corr between the predictor (gap|confidence_pct|our_alpha)
         and realized excess_return over FINAL outcomes. IR = IC * sqrt(breadth).
 
-        去重 / NULL / ``horizon`` / ``asof`` 语义同 hit_rate()：按 MAX(outcome_id) 取每 decision
-        的最新 final（``horizon`` 限定档位、``asof`` 限定结果入账时刻 ``o.created_at`` ≤ asof），
-        再套 ``o.excess_return IS NOT NULL``。"""
+        去重 / NULL / ``horizon`` / ``asof`` / ``since`` / ``until`` 语义同 hit_rate()：按
+        MAX(outcome_id) 取每 decision 的最新 final（``horizon`` 限定档位、``asof`` 限定结果入账
+        时刻 ``o.created_at`` ≤ asof），再套 ``o.excess_return IS NOT NULL``；``since`` / ``until``
+        按决策 ``asof_date`` 闭区间限定窗口，使 IC 与 hit_rate 能一致地按验证窗口取样。"""
         if predictor not in ("gap", "confidence_pct", "our_alpha"):
             raise ValueError("predictor must be gap|confidence_pct|our_alpha")
         # 与 hit_rate 同：append-only 下按 MAX(outcome_id) 取每 decision 的最新 final，再对那一行
@@ -438,7 +450,14 @@ class SQLiteStore:
         hz_sub = " AND o2.horizon_label = ?" if horizon else ""
         asof_outer = " AND o.created_at <= ?" if asof else ""
         asof_sub = " AND o2.created_at <= ?" if asof else ""
-        # 绑定顺序须与 SQL 文本一致：hz_outer, asof_outer, hz_sub, asof_sub
+        q = (f"SELECT d.{predictor} AS x, o.excess_return AS y FROM decision_log d "
+             "JOIN decision_outcome o ON o.decision_id=d.decision_id "
+             "WHERE o.is_final=1 AND o.excess_return IS NOT NULL AND d." + predictor + " IS NOT NULL"
+             + hz_outer + asof_outer +
+             " AND o.outcome_id = ("
+             "  SELECT MAX(o2.outcome_id) FROM decision_outcome o2 "
+             "  WHERE o2.decision_id=d.decision_id AND o2.is_final=1" + hz_sub + asof_sub + ")")
+        # 绑定顺序须与 SQL 文本一致：hz_outer, asof_outer, hz_sub, asof_sub, since, until
         params: list[Any] = []
         if horizon:
             params.append(horizon)
@@ -448,16 +467,11 @@ class SQLiteStore:
             params.append(horizon)
         if asof:
             params.append(_eod(asof))
-        rows = self.conn.execute(
-            f"SELECT d.{predictor} AS x, o.excess_return AS y FROM decision_log d "
-            "JOIN decision_outcome o ON o.decision_id=d.decision_id "
-            "WHERE o.is_final=1 AND o.excess_return IS NOT NULL AND d." + predictor + " IS NOT NULL"
-            + hz_outer + asof_outer +
-            " AND o.outcome_id = ("
-            "  SELECT MAX(o2.outcome_id) FROM decision_outcome o2 "
-            "  WHERE o2.decision_id=d.decision_id AND o2.is_final=1" + hz_sub + asof_sub + ")",
-            params,
-        ).fetchall()
+        if since:
+            q += " AND d.asof_date >= ?"; params.append(since)
+        if until:
+            q += " AND d.asof_date <= ?"; params.append(until)
+        rows = self.conn.execute(q, params).fetchall()
         xs = [r["x"] for r in rows]
         ys = [r["y"] for r in rows]
         if len(xs) < 2:

@@ -237,15 +237,12 @@ class TestDecisionLogStore:
             assert s.information_coefficient("gap") == pytest.approx(-1.0)  # 默认=final
 
     def test_open_decisions_filter_on_outcome_created_at_not_observed_at(self):
-        # 6/29 backfill 一条 observed_at 倒填到 6/20 的 final，但入账(created_at)是 6/29。
-        # 截至 6/25 该 final 尚未入账 → 决策仍应为 open（按 created_at 而非 observed_at 判定）。
-        with SQLiteStore() as s:
+        # store 时钟=6/29：final 入账即 6/29（即便 observed_at 倒填到 6/20）。截至 6/25 该 final
+        # 尚未入账 → 决策仍应为 open（按 created_at 而非可倒填的 observed_at 判定）。
+        with SQLiteStore(clock=lambda: "2026-06-29T10:00:00Z") as s:
             s.save_decision(_entry(decision_id="d", created_at="2026-06-19T10:00:00Z"))
-            s.record_outcome(OutcomeEntry(
-                decision_id="d", is_final=1, hit=1,
-                observed_at="2026-06-20T10:00:00Z",      # 倒填的观测日
-                created_at="2026-06-29T10:00:00Z",       # 真实入账日
-            ))
+            s.record_outcome(OutcomeEntry(decision_id="d", is_final=1, hit=1,
+                                          observed_at="2026-06-20T10:00:00Z"))  # 倒填观测日
             assert [r["decision_id"] for r in s.get_open_decisions(asof="2026-06-25")] == ["d"]
             assert s.get_open_decisions() == []          # 现在（已入账）则已结
 
@@ -284,24 +281,63 @@ class TestDecisionLogStore:
             assert len(s.get_outcomes("d")) == 2
 
     def test_hit_rate_asof_excludes_unlogged_backfill(self):
-        # final 6/29 才入账（observed_at 倒填 6/20）：hit_rate(asof=6/25) 不应计入它。
-        with SQLiteStore() as s:
+        # store 时钟=6/29：final 入账即 6/29（observed_at 倒填 6/20 无效）。hit_rate(asof=6/25) 不计它。
+        with SQLiteStore(clock=lambda: "2026-06-29T10:00:00Z") as s:
             s.save_decision(_entry(decision_id="b", action="BUY"))
             s.record_outcome(OutcomeEntry(decision_id="b", is_final=1, hit=1,
-                                          observed_at="2026-06-20T10:00:00Z",
-                                          created_at="2026-06-29T10:00:00Z"))
+                                          observed_at="2026-06-20T10:00:00Z"))
             assert s.hit_rate() == pytest.approx(1.0)        # 现在
             assert s.hit_rate(asof="2026-06-25") is None     # 6/25 时尚未入账 → 无样本
 
     def test_ic_asof_excludes_unlogged_backfill(self):
-        with SQLiteStore() as s:
+        with SQLiteStore(clock=lambda: "2026-06-29T10:00:00Z") as s:
             s.save_decision(_entry(decision_id="t0", gap=-2.0))
             s.save_decision(_entry(decision_id="t1", gap=5.0))
             for did, exc in [("t0", 0.01), ("t1", 0.09)]:
-                s.record_outcome(OutcomeEntry(decision_id=did, is_final=1, excess_return=exc,
-                                              created_at="2026-06-29T10:00:00Z"))
+                s.record_outcome(OutcomeEntry(decision_id=did, is_final=1, excess_return=exc))
             assert s.information_coefficient("gap") == pytest.approx(1.0)       # 现在
             assert s.information_coefficient("gap", asof="2026-06-25") is None  # 6/25 时样本<2
+
+    def test_record_outcome_ignores_caller_created_at(self):
+        # 入账时刻由 store 时钟无条件盖戳，调用方传 OutcomeEntry 已无 created_at 字段、不可倒填。
+        import dataclasses
+        assert "created_at" not in {f.name for f in dataclasses.fields(OutcomeEntry)}
+        with SQLiteStore(clock=lambda: "2026-06-29T10:00:00Z") as s:
+            s.save_decision(_entry(decision_id="d"))
+            s.record_outcome(OutcomeEntry(decision_id="d", is_final=1, hit=1,
+                                          observed_at="2026-06-20T10:00:00Z"))
+            out = s.get_outcomes("d")[0]
+            assert out["created_at"] == "2026-06-29T10:00:00Z"   # store 时钟，非 observed_at
+            assert out["observed_at"] == "2026-06-20T10:00:00Z"  # 观测仍可倒填
+
+    def test_ic_honors_decision_window(self):
+        # IC 与 hit_rate 一致支持 since/until：窗外旧决策不应污染窗内 IC。
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="old", gap=10.0, asof_date="2026-05-01"))
+            s.save_decision(_entry(decision_id="a", gap=-2.0, asof_date="2026-06-21"))
+            s.save_decision(_entry(decision_id="b", gap=5.0, asof_date="2026-06-21"))
+            s.record_outcome(OutcomeEntry(decision_id="old", is_final=1, excess_return=-0.50))
+            s.record_outcome(OutcomeEntry(decision_id="a", is_final=1, excess_return=0.01))
+            s.record_outcome(OutcomeEntry(decision_id="b", is_final=1, excess_return=0.09))
+            full = s.information_coefficient("gap")
+            assert full is not None and full < 1.0                    # old 拉反全样本
+            assert s.information_coefficient(
+                "gap", since="2026-06-01", until="2026-06-30") == pytest.approx(1.0)  # 仅 a,b
+
+    def test_ic_all_filters_combined(self):
+        # horizon + asof + since + until 全开：绑定顺序正确、各门协同。
+        with SQLiteStore(clock=lambda: "2026-06-22T00:00:00Z") as s:
+            s.save_decision(_entry(decision_id="a", gap=-2.0, asof_date="2026-06-21"))
+            s.save_decision(_entry(decision_id="b", gap=5.0, asof_date="2026-06-21"))
+            # 窗外旧决策（since 排除）
+            s.save_decision(_entry(decision_id="old", gap=9.0, asof_date="2026-05-01"))
+            for did in ("a", "b", "old"):
+                s.record_outcome(OutcomeEntry(decision_id=did, is_final=1,
+                                              excess_return={"a": 0.01, "b": 0.09, "old": -0.5}[did],
+                                              horizon_label="30d"))
+            ic = s.information_coefficient(
+                "gap", horizon="30d", asof="2026-06-25", since="2026-06-01", until="2026-06-30")
+            assert ic == pytest.approx(1.0)   # 仅窗内 a,b 的 30d final（入账 6/22 ≤ asof）→ 正序
 
 
 class TestSQLiteReportStore:
@@ -436,7 +472,7 @@ class _FailingQuotesProvider:
 
 
 def _make_sqlite_pipeline(monkeypatch, tmp_path, *, our_growth=25.0,
-                          implied_growth=8.0, targets=None):
+                          implied_growth=8.0, targets=None, risk_enabled=True):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     from src.main import AliceTestPipeline
 
@@ -453,7 +489,7 @@ def _make_sqlite_pipeline(monkeypatch, tmp_path, *, our_growth=25.0,
         "data_sources": {"crawler": {"use_mock": True}},
         "financial_analysis": {"use_mock": True},
         "pipeline": {"enabled": True},
-        "risk": {"enabled": True},
+        "risk": {"enabled": risk_enabled},
         "output": {
             "path": str(tmp_path / "out.csv"),
             "artifacts_dir": str(tmp_path / "artifacts"),
@@ -520,6 +556,7 @@ class TestDecisionLogPipeline:
         assert rows[0]["action"] == "WAIT"
         assert rows[0]["our_growth"] is None       # NaN 不落库
         assert rows[0]["gap"] is None
+        assert rows[0]["falsification"] is None     # fail-closed 无 refined_thesis → 无 kill_criteria
 
     def test_idempotent_across_reruns(self, monkeypatch, tmp_path):
         pipeline, _config, db_path = _make_sqlite_pipeline(monkeypatch, tmp_path)
@@ -545,6 +582,19 @@ class TestDecisionLogPipeline:
         hk = next(r for r in rows if r["ticker"] == "0700.HK")
         assert hk["market"] == "HK"
         assert hk["benchmark"] == "HSI"
+
+    def test_falsification_preserved_when_risk_disabled(self, monkeypatch, tmp_path):
+        # pipeline 开 + 风控关：structural_exit 不回填，但 falsification 仍须来自 S1 kill_criteria
+        # （否则决策日志丢 S7 审计护栏）。FakeLLMClient 的 kill_criteria 含「核心政策逆转」。
+        pipeline, _config, db_path = _make_sqlite_pipeline(
+            monkeypatch, tmp_path, risk_enabled=False
+        )
+        assert pipeline._risk_engine is None
+        results = pipeline.run()
+        assert results[0].structural_exit is None        # 风控关 → 该风控字段不回填
+        with SQLiteStore(str(db_path)) as store:
+            rows = store.get_decisions()
+        assert rows[0]["falsification"] and "核心政策逆转" in rows[0]["falsification"]
 
     def test_csv_backend_writes_no_decision_db(self, monkeypatch, tmp_path):
         # 默认 backend=csv：不创建决策日志 DB（开关关闭时零副作用）。
