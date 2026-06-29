@@ -232,7 +232,11 @@ class SQLiteStore:
         self._validate(d)
         cols = _DECISION_COLS
         placeholders = ",".join(":" + c for c in cols)
-        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "decision_id")
+        # 幂等 upsert：除主键外整列覆盖，但 **保留首次 created_at**——它是 point-in-time
+        # 锚（get_decisions(asof=) 据此重建快照）；同日重跑若刷新 created_at，会让旧决策在
+        # 「原入账时刻 ~ 重跑时刻」之间从历史快照里凭空消失。
+        _immutable = ("decision_id", "created_at")
+        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c not in _immutable)
         self.conn.execute(
             f"INSERT INTO decision_log ({','.join(cols)}) VALUES ({placeholders}) "
             f"ON CONFLICT(decision_id) DO UPDATE SET {updates}",
@@ -270,10 +274,27 @@ class SQLiteStore:
         return [dict(r) for r in self.conn.execute(q, p).fetchall()]
 
     # ---- outcomes ----------------------------------------------------------
+    @staticmethod
+    def _validate_outcome(d: dict) -> None:
+        """fail-closed：拒绝越界的兑现值，避免污染 hit_rate / open 判定。
+
+        hit / is_final 直接进命中率求和与「是否终态」判定，realized_direction 是有向标签——
+        越界（如 hit=2 / is_final=3）必须在落库前拦截。
+        """
+        if d.get("hit") not in (None, 0, 1):
+            raise ValueError(f"hit {d['hit']!r} must be 0/1/None")
+        if d.get("is_final") not in (0, 1):
+            raise ValueError(f"is_final {d['is_final']!r} must be 0/1")
+        if d.get("realized_direction") not in (None, -1, 0, 1):
+            raise ValueError(
+                f"realized_direction {d.get('realized_direction')!r} must be -1/0/1/None"
+            )
+
     def record_outcome(self, outcome: OutcomeEntry) -> int:
         d = asdict(outcome)
         if not d.get("observed_at"):
             d["observed_at"] = _utcnow()
+        self._validate_outcome(d)
         cols = _OUTCOME_COLS
         cur = self.conn.execute(
             f"INSERT INTO decision_outcome ({','.join(cols)}) "
@@ -290,26 +311,41 @@ class SQLiteStore:
         ).fetchall()]
 
     def get_open_decisions(self, asof: Optional[str] = None) -> list[dict]:
-        """Decisions with no FINAL outcome (as of `asof`, if given)."""
-        clause = ""
+        """Decisions with no FINAL outcome (as of `asof`, if given).
+
+        point-in-time：`asof` 同时约束**决策行本身**（created_at ≤ asof，未来才入账的决策
+        不算当时的 open 决策）与终态判定（只看 asof 前的 final outcome）。
+        """
+        outer = ""
+        sub = ""
         p: list[Any] = []
         if asof:
-            clause = " AND o.observed_at <= ?"; p.append(_eod(asof))
+            eod = _eod(asof)
+            outer = " AND d.created_at <= ?"
+            sub = " AND o.observed_at <= ?"
+            p = [eod, eod]
         return [dict(r) for r in self.conn.execute(
-            "SELECT d.* FROM decision_log d WHERE NOT EXISTS ("
+            "SELECT d.* FROM decision_log d WHERE 1=1" + outer +
+            " AND NOT EXISTS ("
             "  SELECT 1 FROM decision_outcome o WHERE o.decision_id=d.decision_id "
-            f"  AND o.is_final=1{clause}) ORDER BY d.asof_date, d.ticker",
+            f"  AND o.is_final=1{sub}) ORDER BY d.asof_date, d.ticker",
             p,
         ).fetchall()]
 
     # ---- the P0-5 payoff: hit-rate + IC over resolved decisions -----------
     def hit_rate(self, since: Optional[str] = None, until: Optional[str] = None,
                  include_wait: bool = False) -> Optional[float]:
-        rows = self.conn.execute(
-            "SELECT d.action, o.hit FROM decision_log d "
-            "JOIN decision_outcome o ON o.decision_id=d.decision_id "
-            "WHERE o.is_final=1 AND o.hit IS NOT NULL"
-        ).fetchall()
+        """终态命中率；`since`/`until` 按决策的 ``asof_date`` 闭区间限定验证窗口
+        （滚动 / 回测报告需要：否则窗口会被窗外的旧/新决策污染）。"""
+        q = ("SELECT d.action, o.hit FROM decision_log d "
+             "JOIN decision_outcome o ON o.decision_id=d.decision_id "
+             "WHERE o.is_final=1 AND o.hit IS NOT NULL")
+        p: list[Any] = []
+        if since:
+            q += " AND d.asof_date >= ?"; p.append(since)
+        if until:
+            q += " AND d.asof_date <= ?"; p.append(until)
+        rows = self.conn.execute(q, p).fetchall()
         hits = [r["hit"] for r in rows
                 if (include_wait or r["action"] != "WAIT")]
         return (sum(hits) / len(hits)) if hits else None

@@ -129,6 +129,45 @@ class TestDecisionLogStore:
             with pytest.raises(ValueError):
                 s.save_decision(_entry(action="YOLO"))
 
+    def test_upsert_preserves_original_created_at(self):
+        # 同 decision_id 重跑：created_at 是 point-in-time 锚，必须保留首次入账时刻，
+        # 否则旧决策会在「原入账 ~ 重跑」之间从历史快照里凭空消失。
+        with SQLiteStore() as s:
+            s.save_decision(_entry(created_at="2026-06-20T10:00:00Z"))
+            s.save_decision(_entry(action="WAIT", notes="rerun later"))  # created_at 自动盖戳
+            r = s.get_decision("601985-2026-06-29")
+            assert r["created_at"] == "2026-06-20T10:00:00Z"   # 保留首次
+            assert r["action"] == "WAIT"                       # 其余列照常更新
+            # 截至 2026-06-25 的快照仍包含它（不因重跑而消失）
+            assert len(s.get_decisions(asof="2026-06-25")) == 1
+
+    def test_hit_rate_honors_date_window(self):
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="old", action="BUY", asof_date="2026-05-01"))
+            s.save_decision(_entry(decision_id="new", action="BUY", asof_date="2026-06-29"))
+            s.record_outcome(OutcomeEntry(decision_id="old", is_final=1, hit=0))
+            s.record_outcome(OutcomeEntry(decision_id="new", is_final=1, hit=1))
+            assert s.hit_rate() == pytest.approx(0.5)                       # 全样本
+            assert s.hit_rate(since="2026-06-01") == pytest.approx(1.0)     # 只剩 new
+            assert s.hit_rate(until="2026-05-31") == pytest.approx(0.0)     # 只剩 old
+
+    def test_open_decisions_excludes_future_with_asof(self):
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="early", created_at="2026-06-20T10:00:00Z"))
+            s.save_decision(_entry(decision_id="late", created_at="2026-06-29T10:00:00Z"))
+            # 截至 2026-06-25：late 尚未入账，不应作为当时的 open 决策返回
+            open_ids = [r["decision_id"] for r in s.get_open_decisions(asof="2026-06-25")]
+            assert open_ids == ["early"]
+
+    @pytest.mark.parametrize("bad", [
+        dict(hit=2), dict(is_final=3), dict(realized_direction=5),
+    ])
+    def test_record_outcome_rejects_out_of_range(self, bad):
+        with SQLiteStore() as s:
+            s.save_decision(_entry())
+            with pytest.raises(ValueError):
+                s.record_outcome(OutcomeEntry(decision_id="601985-2026-06-29", **bad))
+
 
 class TestSQLiteReportStore:
     """audit_reports SQLite 后端（原 NotImplementedError 桩 → 可用实现）。"""
@@ -205,6 +244,17 @@ class _FakeQuotesProvider:
             date=datetime(2026, 6, 4), ticker=ticker,
             price_close=10.0, pe_ttm=18.0, pb=2.0,
         )
+
+    def get_historical_quotes(self, ticker, start_date, end_date):
+        return []
+
+    def is_market_supported(self, ticker):
+        return True
+
+
+class _FailingQuotesProvider:
+    def get_quote(self, ticker, date=None):
+        raise RuntimeError("all quote sources down")
 
     def get_historical_quotes(self, ticker, start_date, end_date):
         return []
@@ -331,3 +381,24 @@ class TestDecisionLogPipeline:
         config.persistence.backend = "csv"
         pipeline.run()
         assert not db_path.exists()
+
+    def test_degraded_opportunity_logged_wait_with_null_predictors(self, monkeypatch, tmp_path):
+        # 行情全失败 → status=data_error，占位 price=0.0；gap/sentiment 仍判为 OPPORTUNITY。
+        # 决策日志绝不能记 BUY（与审计「不可操作」矛盾），且预测子不得进 IC 样本 → 置 NULL。
+        pipeline, _config, db_path = _make_sqlite_pipeline(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            pipeline, "_select_quotes_provider",
+            lambda ticker: _FailingQuotesProvider(),
+        )
+        results = pipeline.run()
+        assert results[0].status == "data_error"
+        assert results[0].signal is AuditSignal.OPPORTUNITY  # 信号本身不被否决
+        with SQLiteStore(str(db_path)) as store:
+            rows = store.get_decisions()
+            assert len(rows) == 1
+            assert rows[0]["action"] == "WAIT"          # 降级行不记 BUY
+            assert rows[0]["our_growth"] is None        # 非 ok → 预测子 NULL（不进 IC）
+            assert rows[0]["implied_growth"] is None
+            assert rows[0]["gap"] is None
+            # 决策行仍留底（可追溯），但 gap=NULL → 不进 IC 样本（未被污染）
+            assert store.information_coefficient("gap") is None
