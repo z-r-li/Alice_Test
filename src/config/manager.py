@@ -198,6 +198,11 @@ def load_config_from_dict(data: dict[str, Any]) -> AppConfig:
 
     用于测试或程序化构建配置。
 
+    与 :meth:`ConfigManager._prepare_config` 一致：先对**非密钥**字段做 ``${ENV}`` 插值
+    （缺失即 fail-closed 抛 ``ConfigError``），让 dict 入口与 YAML 入口（``load_config``）
+    语义对齐——否则同样的占位经 dict 入口会原样残留、不解析也不 fail-closed。密钥字段占位
+    跳过、由运行期 getter 解析（密钥不驻留）。
+
     Args:
         data: 配置字典
 
@@ -205,7 +210,7 @@ def load_config_from_dict(data: dict[str, Any]) -> AppConfig:
         AppConfig: 解析后的配置对象
 
     Raises:
-        ConfigError: 配置验证失败
+        ConfigError: ``${ENV}`` 占位引用了未设置的环境变量，或配置验证失败
 
     Example:
         >>> config = load_config_from_dict({
@@ -215,7 +220,11 @@ def load_config_from_dict(data: dict[str, Any]) -> AppConfig:
         ... })
     """
     try:
-        return AppConfig.model_validate(data)
+        interpolated = interpolate_config(data)
+    except EnvPlaceholderError as e:
+        raise ConfigError(str(e)) from e
+    try:
+        return AppConfig.model_validate(interpolated)
     except ValidationError as e:
         raise ConfigError(f"配置验证失败:\n{e}")
 

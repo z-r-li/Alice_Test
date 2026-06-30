@@ -508,6 +508,28 @@ class TestLLMResponse:
         # 显式覆盖输入单价为 1.0 → 不走 pro 档
         assert response.get_cost_estimate(input_price_per_1m=1.0) == pytest.approx(1.0)
 
+    def test_get_cost_estimate_versioned_model_name(self):
+        """路由 / 版本后缀名按子串落 pro 档，不被静默当 flash 低估。"""
+        response = LLMResponse(
+            content="test",
+            model="deepseek-v4-pro-2026-01-01",  # 带日期后缀
+            prompt_tokens=1_000_000,
+            completion_tokens=1_000_000,
+        )
+        assert response.get_cost_estimate() == pytest.approx(0.435 + 0.87)
+
+    def test_get_cost_estimate_unknown_model_warns_and_falls_back(self):
+        """未知模型告警并保守回退 flash 档（不静默）。"""
+        response = LLMResponse(
+            content="test",
+            model="some-unknown-model",
+            prompt_tokens=1_000_000,
+            completion_tokens=1_000_000,
+        )
+        with pytest.warns(UserWarning, match="无价格档"):
+            cost = response.get_cost_estimate()
+        assert cost == pytest.approx(0.14 + 0.28)
+
 
 class TestAuditSignalModel:
     """AuditSignal Pydantic 模型测试类"""

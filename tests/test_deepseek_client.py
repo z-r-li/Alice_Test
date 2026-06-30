@@ -67,8 +67,12 @@ class TestThinkingEffortPassthrough:
         client.chat("sys", "user", use_thinking=True)
 
         assert captured["model"] == "deepseek-v4-pro"
-        assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
-        assert captured["reasoning_effort"] == "high"
+        # reasoning_effort 与 thinking 同走 extra_body（兼容老版 SDK，避免顶层 kwarg TypeError）
+        assert captured["extra_body"] == {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+        }
+        assert "reasoning_effort" not in captured  # 不作为顶层 create() kwarg 透传
         # thinking 下 temperature 为 no-op，不应透传
         assert "temperature" not in captured
 
@@ -78,7 +82,8 @@ class TestThinkingEffortPassthrough:
 
         client.chat("sys", "user", use_thinking=True, reasoning_effort="max")
 
-        assert captured["reasoning_effort"] == "max"
+        assert captured["extra_body"]["reasoning_effort"] == "max"
+        assert "reasoning_effort" not in captured  # 仍只走 extra_body
 
 
 class TestDeterministicPathExplicitDisabled:

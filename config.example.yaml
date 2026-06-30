@@ -13,16 +13,18 @@ llm_api:
   #      该环境变量解析。占位只是引用、不是明文；解析值绝不写回配置 / dump / 日志。
   api_key: ""  # 运行期只从环境变量 DEEPSEEK_API_KEY 读取（或写 ${YOUR_ENV} 占位）
 
-  # 模型按阶段分流（参 PRD 4.2 / 迁移计划 §4）：
+  # 模型按阶段分流（参 PRD 4.2 / 迁移计划 §4 目标矩阵）：
   #   - 非 thinking 打分 / 汇总路径（Module A / S3 / S7）用 model（v4-flash）；
-  #   - thinking 深推理路径（S1/S2/S4/S5/B）用 model_pro（v4-pro）。
+  #   - thinking 深推理路径（目标 S1/S2/S4/S5/B）用 model_pro（v4-pro）。
+  # 现状：thinking 仅 Module B / S5 经 thesis_thinking_enabled 接线，S1–S4 待 Q2/Q3 定后接。
   model: "deepseek-v4-flash"  # 非 thinking 路径；`deepseek-chat` 别名 2026-07-24 退役
   model_pro: "deepseek-v4-pro"  # thinking 路径；`deepseek-reasoner` 别名同期退役
   temperature: 0  # 非 thinking 路径必须为 0（非 0 直接报错）；thinking 路径此参数为 no-op
   max_tokens: 4096
   max_retries: 2  # 请求失败时的最大重试次数
 
-  # thinking 路径推理强度：high（默认，绝大多数够用）| max（仅最难阶段如 S4，成本/延迟最高）
+  # thinking 路径推理强度：high（默认，绝大多数够用）| max（目标仅最难阶段如 S4 开）。
+  # 现状为客户端级默认，作用于已启用 thinking 的 Module B / S5；per-stage max 待 Q2 定。
   reasoning_effort: "high"
 
   # thinking 模式配置（可选；当前驱动 Module B / S5 信念投影与综合）

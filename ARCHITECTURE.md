@@ -204,9 +204,14 @@ class LLMConfig(BaseModel):
 - **非 thinking 路径**（Module A 打分、S3、S7）：`model`（v4-flash）+ 客户端显式
   `thinking: disabled` + `temperature=0` 硬锁——保证评分逐位可复现。v4 系列模型级
   thinking 默认开启，不显式关闭会被静默拉进 thinking、temperature 被忽略（已真调用核实）。
-- **thinking 路径**（S1/S2/S4/S5、Module B/S5）：`model_pro`（v4-pro）+ `thinking: enabled`
+- **thinking 路径**（目标 S1/S2/S4/S5、Module B/S5）：`model_pro`（v4-pro）+ `thinking: enabled`
   + `reasoning_effort`（默认 high，最难的 S4 / 必要时 S5 开 max）。temperature 为 no-op，
   复现性改由硬编码量表 + JSON schema 保证。
+
+> **现状（本期接线）**：以上为迁移目标矩阵。当前 `DeepSeekClient` 仅 `get_thesis_synthesis`（S5）
+> 与 `get_thesis_projection`（Module B）以 `use_thinking=thesis_thinking_enabled` 启用 thinking；
+> `reasoning_effort` 为客户端级默认（`high`），`chat()` 支持 per-call 覆盖但 S1–S4 调用点尚未接线
+> （待迁移计划 Q2/Q3 拍板）。S1–S4、Module A、S3、S7 当前均走非 thinking + v4-flash 路径。
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|

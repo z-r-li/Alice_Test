@@ -78,6 +78,10 @@ def call_chat(
         "model": model,
         "messages": messages,
         "temperature": temperature,
+        # 显式关闭 thinking：v4 系列模型级 thinking 默认开启，否则 temperature 被静默忽略、
+        # 破坏确定性（同 DeepSeekClient.chat 非 thinking 分支）。
+        # 注：本 helper 仅 __main__ 演示用，不在确定性关键路径；生产走 DeepSeekClient。
+        "extra_body": {"thinking": {"type": "disabled"}},
     }
 
     # 若 response_format="json"，启用 JSON 输出模式
@@ -226,10 +230,15 @@ class DeepSeekClient:
             if use_thinking:
                 # thinking 深推理路径：v4-pro + thinking enabled + effort 透传。
                 # 思考模式下 temperature / top_p 等为 no-op（故不传），复现性由量表 + schema 保证。
+                # reasoning_effort 经 extra_body 下发（与 thinking 扩展同走 body），不作顶层 kwarg：
+                # requirements 下限 openai>=1.0.0，老版 SDK 不识别顶层 reasoning_effort 会 TypeError；
+                # SDK 把 extra_body 合并到请求体根部，effort 落在 DeepSeek 期望的位置，跨版本稳。
                 kwargs["model"] = self._model_pro
                 kwargs["max_tokens"] = self._thinking_max_tokens
-                kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-                kwargs["reasoning_effort"] = reasoning_effort or self._reasoning_effort
+                kwargs["extra_body"] = {
+                    "thinking": {"type": "enabled"},
+                    "reasoning_effort": reasoning_effort or self._reasoning_effort,
+                }
             else:
                 # 非 thinking 打分 / 汇总路径：v4-flash + 显式 thinking disabled + temperature。
                 # v4 系列模型级 thinking 默认开启，若不显式 disabled 会被静默拉进 thinking、

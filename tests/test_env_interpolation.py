@@ -16,7 +16,7 @@ from src.config.env_interpolation import (
     is_secret_key,
     resolve_env_placeholders,
 )
-from src.config.manager import ConfigError, load_config
+from src.config.manager import ConfigError, load_config, load_config_from_dict
 
 
 class TestResolveEnvPlaceholders:
@@ -161,3 +161,47 @@ class TestConfigLoadEnvInterpolation:
         assert secret not in repr(config)
         assert secret not in config.model_dump_json()
         assert config.data_sources.a_shares.token == "${ALICE_TS_TOKEN}"
+
+
+class TestLoadConfigFromDictInterpolation:
+    """dict 入口（load_config_from_dict）与 YAML 入口语义对齐：同样做 ${ENV} 插值。"""
+
+    def test_non_secret_interpolated(self, monkeypatch):
+        """非密钥字段 ${VAR} 经 dict 入口也被解析（不再原样残留）。"""
+        monkeypatch.setenv("ALICE_OUT_DIR", "/tmp/aliceout")
+        config = load_config_from_dict(
+            {
+                "output": {"path": "${ALICE_OUT_DIR}/audit.csv"},
+                "targets": [{"ticker": "T.SH", "name": "n", "thesis": "t"}],
+            }
+        )
+        assert config.output.path == "/tmp/aliceout/audit.csv"
+
+    def test_missing_env_fail_closed(self, monkeypatch):
+        """缺失 env 经 dict 入口也 fail-closed 抛 ConfigError（含 VAR 名），不静默残留。"""
+        monkeypatch.delenv("ALICE_NOPE", raising=False)
+        with pytest.raises(ConfigError) as exc_info:
+            load_config_from_dict(
+                {
+                    "output": {"path": "${ALICE_NOPE}/x.csv"},
+                    "targets": [{"ticker": "T.SH", "name": "n", "thesis": "t"}],
+                }
+            )
+        assert "ALICE_NOPE" in str(exc_info.value)
+
+    def test_secret_field_skipped_and_input_not_mutated(self, monkeypatch):
+        """密钥字段占位经 dict 入口仍跳过、不驻留；且不修改调用方传入的 dict。"""
+        secret = "dict-secret-7777"
+        monkeypatch.setenv("ALICE_LLM_KEY2", secret)
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        data = {
+            "llm_api": {"api_key": "${ALICE_LLM_KEY2}"},
+            "targets": [{"ticker": "T.SH", "name": "n", "thesis": "t"}],
+        }
+        config = load_config_from_dict(data)
+
+        assert config.llm_api.get_api_key() == secret
+        assert config.llm_api.api_key == "${ALICE_LLM_KEY2}"
+        assert secret not in config.model_dump_json()
+        # interpolate_config 非破坏性：调用方原 dict 不被改写
+        assert data["llm_api"]["api_key"] == "${ALICE_LLM_KEY2}"

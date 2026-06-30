@@ -24,13 +24,18 @@ class LLMConfig(ConfigModel):
     """
     LLM API 配置
 
-    模型 / thinking / effort 按阶段分流（参 LLM 迁移计划 §4 矩阵）：
+    模型 / thinking / effort 按阶段分流（参 LLM 迁移计划 §4 *目标矩阵*）：
 
     - **非 thinking 打分 / 汇总路径**（Module A、S3、S7）：``model``（v4-flash）+ 客户端
       显式 thinking ``disabled`` + ``temperature=0`` 硬锁，保证评分逐位可复现。
-    - **thinking 深推理路径**（S1/S2/S4/S5、Module B）：``model_pro``（v4-pro）+ thinking
-      ``enabled`` + ``reasoning_effort``（默认 high，最难阶段开 max）；此路径 temperature
-      为 no-op，复现性改由硬编码量表 + JSON schema 保证。
+    - **thinking 深推理路径**（目标：S1/S2/S4/S5、Module B）：``model_pro``（v4-pro）+
+      thinking ``enabled`` + ``reasoning_effort``；此路径 temperature 为 no-op，复现性改由
+      硬编码量表 + JSON schema 保证。
+
+    **现状（本期接线）**：thinking 仅 **Module B / S5**（信念投影 / 综合）经
+    ``thesis_thinking_enabled`` 启用；``reasoning_effort`` 为客户端级默认（``high``）。
+    S1–S4 的 per-stage thinking 与 S4 的 ``effort=max`` 待团队拍板（迁移计划 Q2/Q3）后
+    再接 pipeline 调用点——上表为迁移目标，非当前全部生效。
 
     Attributes:
         provider: LLM 提供商，当前仅支持 deepseek

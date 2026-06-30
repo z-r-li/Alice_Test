@@ -250,7 +250,9 @@ python src/main.py --verbose
 
 ### 思考模式（高级）
 
-模型 / thinking / effort 按阶段分流（参 PRD 4.2 / 迁移计划 §4）：非 thinking 打分与汇总路径（Module A / S3 / S7）用 `model`（v4-flash）+ `temperature=0`，保证评分逐位可复现；thinking 深推理路径（S1/S2/S4/S5、Module B/S5）用 `model_pro`（v4-pro）+ `reasoning_effort`。thinking 下 `temperature` 为 no-op，复现性改由硬编码量表 + JSON schema 保证。
+模型 / thinking / effort 按阶段分流（参 PRD 4.2 / 迁移计划 §4 **目标矩阵**）：非 thinking 打分与汇总路径（Module A / S3 / S7）用 `model`（v4-flash）+ `temperature=0`，保证评分逐位可复现；thinking 深推理路径（目标 S1/S2/S4/S5、Module B/S5）用 `model_pro`（v4-pro）+ `reasoning_effort`。thinking 下 `temperature` 为 no-op，复现性改由硬编码量表 + JSON schema 保证。
+
+> **现状**：thinking 当前仅 **Module B / S5** 经 `thesis_thinking_enabled` 接线，`reasoning_effort` 为客户端级默认（`high`）；S1–S4 的 per-stage thinking 与 S4 的 `effort=max` 待团队拍板后接线。
 
 Module B / S5（信念投影与综合）可启用 DeepSeek 思考模式，在输出前进行深度推理：
 

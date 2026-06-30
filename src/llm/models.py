@@ -6,6 +6,7 @@ LLM 响应数据模型定义
 """
 from __future__ import annotations
 
+import warnings
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -18,6 +19,24 @@ DEEPSEEK_PRICING_PER_1M: dict[str, dict[str, float]] = {
 }
 # 未知模型回退档（按 flash 计，最保守不高估）。
 _DEFAULT_PRICING_TIER = "deepseek-v4-flash"
+
+
+def _pricing_tier_for(model: str) -> dict[str, float]:
+    """按模型名选价格档；对路由 / 版本后缀名（如 ``deepseek-v4-pro-2026-xx``）做子串匹配，
+    避免精确键 miss 时把 pro 调用静默按 flash 低估 ~3x。未知模型告警后回退 flash。
+    """
+    if model in DEEPSEEK_PRICING_PER_1M:
+        return DEEPSEEK_PRICING_PER_1M[model]
+    if "v4-pro" in model:
+        return DEEPSEEK_PRICING_PER_1M["deepseek-v4-pro"]
+    if "v4-flash" in model:
+        return DEEPSEEK_PRICING_PER_1M["deepseek-v4-flash"]
+    warnings.warn(
+        f"未知模型 '{model}' 无价格档，按 {_DEFAULT_PRICING_TIER} 估算"
+        "（若实为 pro 调用会低估 ~3x）",
+        stacklevel=2,
+    )
+    return DEEPSEEK_PRICING_PER_1M[_DEFAULT_PRICING_TIER]
 
 
 class LLMResponse(BaseModel):
@@ -80,9 +99,7 @@ class LLMResponse(BaseModel):
         Returns:
             float: 估算成本（美元）
         """
-        tier = DEEPSEEK_PRICING_PER_1M.get(
-            self.model, DEEPSEEK_PRICING_PER_1M[_DEFAULT_PRICING_TIER]
-        )
+        tier = _pricing_tier_for(self.model)
         input_price = input_price_per_1m if input_price_per_1m is not None else tier["input"]
         output_price = (
             output_price_per_1m if output_price_per_1m is not None else tier["output"]

@@ -173,9 +173,10 @@ temperature: 0  # 关键：非 thinking 打分路径必须为 0（非 0 直接�
 # 不显式关闭会被静默拉进 thinking、temperature 被忽略，破坏确定性（已真调用核实）。
 ```
 
-> **模型 / thinking / effort 按阶段分流**（详见 5.1 与下表）：只有 Module A / S3 / S7
-> 这类受限打分 / 汇总走 v4-flash + 非 thinking + `temperature=0`；S1/S2/S4/S5、Module B/S5
-> 这类深推理走 `model_pro`（v4-pro）+ thinking + `reasoning_effort`。
+> **模型 / thinking / effort 按阶段分流**（详见 5.1 与下方目标矩阵）：Module A / S3 / S7
+> 这类受限打分 / 汇总走 v4-flash + 非 thinking + `temperature=0`（已生效）；S1/S2/S4/S5、
+> Module B/S5 这类深推理走 `model_pro`（v4-pro）+ thinking + `reasoning_effort`（**目标**；
+> 现状仅 Module B / S5 接线，见 §9 现状说明）。
 
 #### 4.2.2 System Prompt 模板
 
@@ -529,7 +530,7 @@ def parse_llm_response(response: str, retries: int = 1) -> dict:
 > - Prompt 中写死评分量表
 > - 强制结构化 JSON 输出
 >
-> **per-stage 模型 / thinking / effort 矩阵**（迁移计划 §4）：
+> **per-stage 模型 / thinking / effort 目标矩阵**（迁移计划 §4）：
 >
 > | 阶段 / 模块 | 模型 | thinking | effort | temperature |
 > |---|---|---|---|---|
@@ -542,6 +543,8 @@ def parse_llm_response(response: str, retries: int = 1) -> dict:
 > | S7 结论汇总 | v4-flash | off | — | 0 |
 >
 > effort 默认 `high`，`max` 按阶段可开关（仅最难的 S4，必要时 S5/B），非全局——避免成本失控。
+>
+> **现状（本期接线）**：上表为迁移目标。当前代码 thinking 仅 **Module B / S5** 经 `thesis_thinking_enabled` 启用，`reasoning_effort` 为客户端级默认（`high`）作用于该路径；S1–S4 的 per-stage thinking 与 S4 的 `effort=max` 待团队拍板（迁移计划 Q2/Q3）后再接 pipeline 调用点。Module A / S3 / S7 已是 v4-flash + 非 thinking + `temperature=0`。
 
 > **Token 预算：**
 > 
