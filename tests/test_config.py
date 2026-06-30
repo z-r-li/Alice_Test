@@ -507,16 +507,20 @@ class TestLLMConfig:
 
         assert "未配置 DeepSeek API Key" in str(exc_info.value)
 
-    def test_temperature_warning(self):
-        """测试非零温度警告"""
-        import warnings
+    def test_temperature_hard_block(self):
+        """非 thinking 打分路径硬锁 temperature=0：非 0 抛 ValidationError（原 warning 升级）。
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
+        对应 Codex §6 MAJOR / LLM 迁移计划 §7 待办 1：把「关键 JSON 路径未硬锁
+        temperature=0」从 warning 升级为硬拦截。thinking 路径 temperature 为 no-op。
+        """
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError) as exc_info:
             LLMConfig(temperature=0.5)
 
-            assert len(w) == 1
-            assert "temperature" in str(w[0].message)
+        assert "temperature" in str(exc_info.value)
+        # temperature=0 仍合法
+        assert LLMConfig(temperature=0.0).temperature == 0.0
 
 
 class TestTextSourceConfig:

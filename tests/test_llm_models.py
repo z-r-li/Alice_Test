@@ -471,6 +471,43 @@ class TestLLMResponse:
             expected
         )
 
+    def test_get_cost_estimate_v4_pro(self):
+        """v4-pro 价格档：按 self.model 自动选档（输入未命中 $0.435/1M、输出 $0.87/1M）。"""
+        response = LLMResponse(
+            content="test",
+            model="deepseek-v4-pro",
+            prompt_tokens=1_000_000,  # 1M tokens
+            completion_tokens=1_000_000,  # 1M tokens
+        )
+        # v4-pro 现价（迁移计划 §1）：输入未命中 $0.435/1M，输出 $0.87/1M
+        expected_cost = 0.435 + 0.87
+        assert response.get_cost_estimate() == pytest.approx(expected_cost)
+
+    def test_get_cost_estimate_v4_pro_with_cache_hits(self):
+        """v4-pro 缓存命中按 $0.003625/1M 计价，未命中部分按 $0.435/1M。"""
+        response = LLMResponse(
+            content="test",
+            model="deepseek-v4-pro",
+            prompt_tokens=1_000_000,
+            completion_tokens=1_000_000,
+        )
+        # 60% 命中：0.4M×0.435 + 0.6M×0.003625 + 1M×0.87
+        expected = 0.4 * 0.435 + 0.6 * 0.003625 + 0.87
+        assert response.get_cost_estimate(cached_tokens=600_000) == pytest.approx(
+            expected
+        )
+
+    def test_get_cost_estimate_explicit_override(self):
+        """显式传价仍覆盖按-model 选档（向后兼容）。"""
+        response = LLMResponse(
+            content="test",
+            model="deepseek-v4-pro",
+            prompt_tokens=1_000_000,
+            completion_tokens=0,
+        )
+        # 显式覆盖输入单价为 1.0 → 不走 pro 档
+        assert response.get_cost_estimate(input_price_per_1m=1.0) == pytest.approx(1.0)
+
 
 class TestAuditSignalModel:
     """AuditSignal Pydantic 模型测试类"""

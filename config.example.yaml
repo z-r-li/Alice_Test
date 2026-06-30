@@ -7,17 +7,28 @@
 # ============================================
 llm_api:
   provider: "deepseek"
-  api_key: ""  # 运行期只从环境变量 DEEPSEEK_API_KEY 读取
-  model: "deepseek-v4-flash"  # `deepseek-chat` 别名 2026-07-24 退役，显式用 v4-flash
-  temperature: 0  # 必须为 0，保证评分稳定（思考模式下此参数不生效）
+  # 密钥来源（二选一，均不驻留配置对象）：
+  #   1) 留空 ""，运行期从固定环境变量 DEEPSEEK_API_KEY 读取；
+  #   2) 写成 ${ENV} 占位（如 api_key: "${DEEPSEEK_API_KEY}"），运行期 getter 即时从
+  #      该环境变量解析。占位只是引用、不是明文；解析值绝不写回配置 / dump / 日志。
+  api_key: ""  # 运行期只从环境变量 DEEPSEEK_API_KEY 读取（或写 ${YOUR_ENV} 占位）
+
+  # 模型按阶段分流（参 PRD 4.2 / 迁移计划 §4）：
+  #   - 非 thinking 打分 / 汇总路径（Module A / S3 / S7）用 model（v4-flash）；
+  #   - thinking 深推理路径（S1/S2/S4/S5/B）用 model_pro（v4-pro）。
+  model: "deepseek-v4-flash"  # 非 thinking 路径；`deepseek-chat` 别名 2026-07-24 退役
+  model_pro: "deepseek-v4-pro"  # thinking 路径；`deepseek-reasoner` 别名同期退役
+  temperature: 0  # 非 thinking 路径必须为 0（非 0 直接报错）；thinking 路径此参数为 no-op
   max_tokens: 4096
   max_retries: 2  # 请求失败时的最大重试次数
 
-  # Module B 思考模式配置（可选）
-  # 思考模式会让模型在输出最终答案前先进行深度推理
-  # 优点：可能提升增长率预估的准确性
-  # 缺点：增加 token 消耗和响应时间
-  thesis_thinking_enabled: false  # 是否为 Module B 启用思考模式
+  # thinking 路径推理强度：high（默认，绝大多数够用）| max（仅最难阶段如 S4，成本/延迟最高）
+  reasoning_effort: "high"
+
+  # thinking 模式配置（可选；当前驱动 Module B / S5 信念投影与综合）
+  # 思考模式会让模型在输出最终答案前先深度推理：提升增长率预估质量，但增加 token / 延迟 / 成本。
+  # 启用后该路径走 model_pro + reasoning_effort。
+  thesis_thinking_enabled: false  # 是否为 Module B / S5 启用思考模式
   thesis_thinking_max_tokens: 16384  # 思考模式下最大 token 数（含思维链），最大 65536
 
 # ============================================
@@ -27,7 +38,7 @@ data_sources:
   # A 股行情数据源
   a_shares:
     provider: "akshare"  # 或 "tushare"
-    token: ""  # 使用 Tushare 时运行期只从环境变量 TUSHARE_TOKEN 读取
+    token: ""  # 使用 Tushare 时运行期只从环境变量 TUSHARE_TOKEN 读取（或写 ${YOUR_ENV} 占位）
 
   # 港美股行情数据源
   hk_us:

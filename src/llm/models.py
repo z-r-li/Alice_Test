@@ -10,6 +10,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+# DeepSeek V4 定价表（美元 / 1M token），来源：LLM 迁移计划 §1 / 官方 pricing。
+# thinking 思维链按 **输出** token 计费，effort=max 会显著放大输出量。
+DEEPSEEK_PRICING_PER_1M: dict[str, dict[str, float]] = {
+    "deepseek-v4-flash": {"input": 0.14, "cache_hit": 0.0028, "output": 0.28},
+    "deepseek-v4-pro": {"input": 0.435, "cache_hit": 0.003625, "output": 0.87},
+}
+# 未知模型回退档（按 flash 计，最保守不高估）。
+_DEFAULT_PRICING_TIER = "deepseek-v4-flash"
+
 
 class LLMResponse(BaseModel):
     """
@@ -44,35 +53,51 @@ class LLMResponse(BaseModel):
 
     def get_cost_estimate(
         self,
-        input_price_per_1m: float = 0.14,
-        output_price_per_1m: float = 0.28,
-        cache_hit_price_per_1m: float = 0.0028,
+        input_price_per_1m: float | None = None,
+        output_price_per_1m: float | None = None,
+        cache_hit_price_per_1m: float | None = None,
         cached_tokens: int = 0,
     ) -> float:
         """
-        估算调用成本（基于 DeepSeek-V4-Flash 现价）
+        估算调用成本（默认按 ``self.model`` 选价格档，显式传参可覆盖）
 
-        DeepSeek-V4-Flash 定价（现价，`deepseek-chat` 已路由至此）:
-        - 输入（缓存未命中）: $0.14 / 1M tokens
-        - 输入（缓存命中）: $0.0028 / 1M tokens
-        - 输出: $0.28 / 1M tokens
+        DeepSeek V4 定价（现价，每 1M token；见 :data:`DEEPSEEK_PRICING_PER_1M`）:
 
-        （旧的 $0.27 / $1.10 是 V3/2024 价，高估 2–4 倍。）
+        | 模型 | 输入(未命中) | 输入(命中) | 输出 |
+        |---|---|---|---|
+        | v4-flash | $0.14 | $0.0028 | $0.28 |
+        | v4-pro | $0.435 | $0.003625 | $0.87 |
+
+        未在表中的模型回退到 v4-flash 档（最保守，不高估）。thinking 思维链按 **输出**
+        token 计费，effort=max 会显著放大输出量与成本。
 
         Args:
-            input_price_per_1m: 输入（缓存未命中）每百万 token 价格（美元）
-            output_price_per_1m: 输出每百万 token 价格（美元）
-            cache_hit_price_per_1m: 缓存命中输入每百万 token 价格（美元）
+            input_price_per_1m: 输入（缓存未命中）每百万 token 价格；None 时按 model 选档
+            output_price_per_1m: 输出每百万 token 价格；None 时按 model 选档
+            cache_hit_price_per_1m: 缓存命中输入每百万 token 价格；None 时按 model 选档
             cached_tokens: prompt_tokens 中命中缓存的 token 数（默认 0，即全部按未命中计价）
 
         Returns:
             float: 估算成本（美元）
         """
+        tier = DEEPSEEK_PRICING_PER_1M.get(
+            self.model, DEEPSEEK_PRICING_PER_1M[_DEFAULT_PRICING_TIER]
+        )
+        input_price = input_price_per_1m if input_price_per_1m is not None else tier["input"]
+        output_price = (
+            output_price_per_1m if output_price_per_1m is not None else tier["output"]
+        )
+        cache_price = (
+            cache_hit_price_per_1m
+            if cache_hit_price_per_1m is not None
+            else tier["cache_hit"]
+        )
+
         cached = max(0, min(cached_tokens, self.prompt_tokens))
         uncached_input = self.prompt_tokens - cached
-        input_cost = uncached_input / 1_000_000 * input_price_per_1m
-        cache_cost = cached / 1_000_000 * cache_hit_price_per_1m
-        output_cost = self.completion_tokens / 1_000_000 * output_price_per_1m
+        input_cost = uncached_input / 1_000_000 * input_price
+        cache_cost = cached / 1_000_000 * cache_price
+        output_cost = self.completion_tokens / 1_000_000 * output_price
         return input_cost + cache_cost + output_cost
 
 
