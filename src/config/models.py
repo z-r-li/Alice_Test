@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .env_interpolation import is_env_placeholder, resolve_env_placeholders
+
 
 class ConfigModel(BaseModel):
     """Base class for config sections: reject unknown keys instead of drifting."""
@@ -22,69 +24,106 @@ class LLMConfig(ConfigModel):
     """
     LLM API 配置
 
+    模型 / thinking / effort 按阶段分流（参 LLM 迁移计划 §4 *目标矩阵*）：
+
+    - **非 thinking 打分 / 汇总路径**（Module A、S3、S7）：``model``（v4-flash）+ 客户端
+      显式 thinking ``disabled`` + ``temperature=0`` 硬锁，保证评分逐位可复现。
+    - **thinking 深推理路径**（目标：S1/S2/S4/S5、Module B）：``model_pro``（v4-pro）+
+      thinking ``enabled`` + ``reasoning_effort``；此路径 temperature 为 no-op，复现性改由
+      硬编码量表 + JSON schema 保证。
+
+    **现状（本期接线）**：thinking 仅 **Module B / S5**（信念投影 / 综合）经
+    ``thesis_thinking_enabled`` 启用；``reasoning_effort`` 为客户端级默认（``high``）。
+    S1–S4 的 per-stage thinking 与 S4 的 ``effort=max`` 待团队拍板（迁移计划 Q2/Q3）后
+    再接 pipeline 调用点——上表为迁移目标，非当前全部生效。
+
     Attributes:
         provider: LLM 提供商，当前仅支持 deepseek
-        api_key: 兼容字段；运行期密钥只从环境变量 DEEPSEEK_API_KEY 读取
-        model: 模型名称
-        temperature: 温度参数，必须为 0 以保证评分稳定
+        api_key: 兼容字段；运行期密钥只从环境变量 DEEPSEEK_API_KEY 读取，或在配置写成
+            ``${ENV}`` 占位由 getter 运行期即时解析（两种都不驻留本对象）
+        model: 非 thinking 路径模型（打分 / 汇总），默认 deepseek-v4-flash
+        model_pro: thinking 深推理路径模型（S1/S2/S4/S5/B），默认 deepseek-v4-pro
+        temperature: 温度参数，非 thinking 路径必须为 0（硬拦截）；thinking 路径为 no-op
         max_tokens: 最大 token 数
         max_retries: 请求失败时的最大重试次数
-        thesis_thinking_enabled: 是否为 Module B（信念投影器）启用 DeepSeek 思考模式
-        thesis_thinking_max_tokens: 思考模式下的最大 token 数（含思维链）
+        reasoning_effort: thinking 路径推理强度（high|max）；默认 high，仅最难阶段开 max
+        thesis_thinking_enabled: 是否为 Module B / S5（信念投影 / 综合）启用 thinking
+        thesis_thinking_max_tokens: thinking 模式下的最大 token 数（含思维链）
     """
 
     provider: Literal["deepseek"] = "deepseek"
     api_key: str = Field(
         default="",
-        description="兼容字段；运行期密钥只从环境变量 DEEPSEEK_API_KEY 读取",
+        description="兼容字段；运行期密钥只从环境变量 DEEPSEEK_API_KEY 读取"
+        "（或配置写成 ${ENV} 占位运行期即时解析），不驻留本对象",
     )
     # `deepseek-chat` 别名 2026-07-24 退役；默认显式用 deepseek-v4-flash（当前路由目标）。
     model: str = "deepseek-v4-flash"
+    # thinking 深推理路径（S1/S2/S4/S5/B）模型；`deepseek-reasoner` 别名同期退役。
+    model_pro: str = "deepseek-v4-pro"
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, gt=0)
     max_retries: int = Field(default=2, ge=0, le=10, description="最大重试次数")
+    reasoning_effort: Literal["high", "max"] = Field(
+        default="high",
+        description="thinking 推理路径 effort；默认 high，仅最难阶段（S4，必要时 S5/B）开 max。"
+        "max 显著放大思维链输出 token / 成本，按阶段开关而非全局。",
+    )
 
-    # Module B 思考模式开关
+    # thinking 模式开关（per-stage：客户端按 use_thinking 逐次启用；此字段驱动 Module B / S5）。
     thesis_thinking_enabled: bool = Field(
         default=False,
-        description="是否为 Module B（信念投影器）启用 DeepSeek 思考模式。"
-        "启用后可能提升推理质量，但会增加 token 消耗和响应时间。",
+        description="是否为 Module B / S5（信念投影 / 综合）启用 DeepSeek thinking 模式。"
+        "启用后该路径走 model_pro + reasoning_effort，提升推理质量但增加 token / 延迟 / 成本。",
     )
     thesis_thinking_max_tokens: int = Field(
         default=16384,
         gt=0,
         le=65536,
-        description="思考模式下的最大 token 数（含思维链），默认 16K，最大 64K",
+        description="thinking 模式下的最大 token 数（含思维链），默认 16K，最大 64K",
     )
 
     @field_validator("temperature")
     @classmethod
     def validate_temperature(cls, v: float) -> float:
-        """PRD 要求 temperature 必须为 0 以保证评分稳定"""
-        if v != 0.0:
-            import warnings
+        """非 thinking 打分路径（Module A / S3 / S7）硬锁 temperature=0。
 
-            warnings.warn(
-                f"temperature={v} 不为 0，可能导致情绪评分不稳定。"
-                "PRD 要求 temperature=0 以保证可重复性。"
+        配置层温度是非 thinking 默认路径的取值来源；非 0 会让每日审计的 sentiment /
+        增长率 / JSON 形状可变，破坏可重复性与回归可比性。原 warning **升级为硬拦截**
+        （对应 Codex §6 MAJOR）。thinking 路径 temperature 为 no-op，无需在此设非 0 值，
+        复现性由量表 + JSON schema 保证。
+        """
+        if v != 0.0:
+            raise ValueError(
+                f"temperature={v} 非法：非 thinking 打分路径要求 temperature=0 "
+                "以保证评分可重复（PRD 底线）。thinking 推理路径 temperature 为 no-op，"
+                "复现性由量表 + JSON schema 保证，无需设非 0 温度。"
             )
         return v
 
     def get_api_key(self) -> str:
-        """
-        获取 API Key，优先从环境变量读取
+        """获取 API Key（运行期即时读取，不驻留本对象）。
+
+        优先级：
+        1. 配置 ``api_key`` 写成 ``${ENV}`` 占位 → 运行期即时解析该环境变量（CDX-5）；
+        2. 否则从固定环境变量 ``DEEPSEEK_API_KEY`` 读取。
+
+        解析结果只即时返回、绝不写回 AppConfig（密钥不驻留不变量）。
 
         Returns:
             str: API Key
 
         Raises:
-            ValueError: 未配置 API Key
+            ValueError: 未配置 API Key（且无 ``${ENV}`` 占位可解析）
+            EnvPlaceholderError: ``${ENV}`` 占位引用的环境变量缺失
         """
+        if is_env_placeholder(self.api_key):
+            return resolve_env_placeholders(self.api_key)
         key = os.environ.get("DEEPSEEK_API_KEY")
         if not key:
             raise ValueError(
                 "未配置 DeepSeek API Key。"
-                "请设置环境变量 DEEPSEEK_API_KEY"
+                "请设置环境变量 DEEPSEEK_API_KEY（或在配置写成 ${YOUR_ENV} 占位）"
             )
         return key
 
@@ -107,20 +146,28 @@ class ASharesSourceConfig(ConfigModel):
     )
 
     def get_token(self) -> str:
-        """
-        获取 Token，优先从环境变量读取
+        """获取 Token（运行期即时读取，不驻留本对象）。
+
+        优先级：
+        1. 配置 ``token`` 写成 ``${ENV}`` 占位 → 运行期即时解析该环境变量（CDX-5）；
+        2. 否则从固定环境变量 ``TUSHARE_TOKEN`` 读取。
+
+        解析结果只即时返回、绝不写回 AppConfig（密钥不驻留不变量）。
 
         Returns:
             str: Token
 
         Raises:
-            ValueError: 使用 tushare 但未配置 Token
+            ValueError: 使用 tushare 但未配置 Token（且无 ``${ENV}`` 占位可解析）
+            EnvPlaceholderError: ``${ENV}`` 占位引用的环境变量缺失
         """
+        if is_env_placeholder(self.token):
+            return resolve_env_placeholders(self.token)
         token = os.environ.get("TUSHARE_TOKEN")
         if self.provider == "tushare" and not token:
             raise ValueError(
                 "使用 tushare 数据源需配置 Token。"
-                "请设置环境变量 TUSHARE_TOKEN"
+                "请设置环境变量 TUSHARE_TOKEN（或在配置写成 ${YOUR_ENV} 占位）"
             )
         return token
 

@@ -90,16 +90,18 @@ pip install -r requirements.txt
 # LLM 配置
 llm_api:
   provider: "deepseek"
-  model: "deepseek-v4-flash"
-  api_key: ""  # 运行期从环境变量 DEEPSEEK_API_KEY 读取
-  temperature: 0  # 重要：保持为 0 以确保评分一致性
+  model: "deepseek-v4-flash"      # 非 thinking 打分/汇总路径（Module A/S3/S7）
+  model_pro: "deepseek-v4-pro"    # thinking 深推理路径（S1/S2/S4/S5/B）
+  api_key: ""  # 运行期从环境变量 DEEPSEEK_API_KEY 读取（或写 ${YOUR_ENV} 占位，见下）
+  temperature: 0  # 非 thinking 路径必须为 0（非 0 直接报错）；thinking 路径此参数为 no-op
   max_tokens: 4096
+  reasoning_effort: "high"        # thinking 路径推理强度：high（默认）| max（仅最难阶段）
 
 # 数据源配置
 data_sources:
   a_shares:
     provider: "akshare"  # 可选: "tushare" 或 "akshare"
-    token: ""  # 使用 tushare 时从环境变量 TUSHARE_TOKEN 读取
+    token: ""  # 使用 tushare 时从环境变量 TUSHARE_TOKEN 读取（或写 ${YOUR_ENV} 占位）
   hk_us:
     provider: "yfinance"
   # 文本数据源配置
@@ -234,14 +236,32 @@ python src/main.py --verbose
 | `SERPER_API_KEY` | 否 | 港美股文本搜索 (2,500次/月免费) |
 | `TUSHARE_TOKEN` | 否 | A股数据备选方案 |
 
+### 密钥来源与 `${ENV}` 占位
+
+密钥**绝不驻留配置对象**：`api_key` / `token` 等密钥字段在加载和导出（`dump` / `repr` / 日志）中永远不出现明文，运行期由各 getter 即时读取。两种写法：
+
+1. **留空**（推荐）：字段写 `""`，运行期从固定环境变量（`DEEPSEEK_API_KEY` / `TUSHARE_TOKEN`）读取。
+2. **`${ENV}` 占位**：字段写成 `api_key: "${MY_KEY}"`，运行期 getter 即时从环境变量 `MY_KEY` 解析。占位只是**引用**、不是明文；解析值不写回配置对象。
+
+`${ENV}` 占位规则：
+- **非密钥字段**（如路径）在加载时即解析 `${VAR}`，支持一值多次出现、与文本混排（如 `${HOME}/data`）。
+- **被引用的环境变量缺失**会直接报错（fail-closed，指明缺失的变量名），绝不静默置空。
+- 仅支持 `${VAR}` 一种语法（不支持 `${VAR:-default}` / `$` 转义）。
+
 ### 思考模式（高级）
 
-Module B（信念投影器）支持 DeepSeek 思考模式，可在输出前进行深度推理：
+模型 / thinking / effort 按阶段分流（参 PRD 4.2 / 迁移计划 §4 **目标矩阵**）：非 thinking 打分与汇总路径（Module A / S3 / S7）用 `model`（v4-flash）+ `temperature=0`，保证评分逐位可复现；thinking 深推理路径（目标 S1/S2/S4/S5、Module B/S5）用 `model_pro`（v4-pro）+ `reasoning_effort`。thinking 下 `temperature` 为 no-op，复现性改由硬编码量表 + JSON schema 保证。
+
+> **现状**：thinking 当前仅 **Module B / S5** 经 `thesis_thinking_enabled` 接线，`reasoning_effort` 为客户端级默认（`high`）；S1–S4 的 per-stage thinking 与 S4 的 `effort=max` 待团队拍板后接线。
+
+Module B / S5（信念投影与综合）可启用 DeepSeek 思考模式，在输出前进行深度推理：
 
 ```yaml
 llm_api:
   # ... 其他配置 ...
-  thesis_thinking_enabled: true  # 启用思考模式
+  model_pro: "deepseek-v4-pro"   # thinking 路径模型
+  reasoning_effort: "high"        # high（默认）| max（仅最难阶段，成本最高）
+  thesis_thinking_enabled: true   # 为 Module B / S5 启用思考模式
   thesis_thinking_max_tokens: 16384
 ```
 

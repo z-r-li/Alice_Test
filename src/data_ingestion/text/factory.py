@@ -160,6 +160,8 @@ class TextProviderFactory:
                         max_tokens=llm_config.max_tokens,
                         thinking_enabled=llm_config.thesis_thinking_enabled,
                         thinking_max_tokens=llm_config.thesis_thinking_max_tokens,
+                        model_pro=llm_config.model_pro,
+                        reasoning_effort=llm_config.reasoning_effort,
                     )
                 except Exception as e:
                     logger.warning(f"无法创建 LLM 客户端，将禁用内容提取: {e}")

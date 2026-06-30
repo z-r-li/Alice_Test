@@ -82,10 +82,13 @@ alice_test/
 @dataclass
 class LLMConfig:
     provider: Literal["deepseek"]
-    api_key: str
-    model: str
-    temperature: float  # 必须为 0
+    api_key: str             # 不驻留：getter 运行期读 env / 解析 ${ENV} 占位
+    model: str               # 非 thinking 路径（v4-flash）
+    model_pro: str           # thinking 深推理路径（v4-pro）
+    temperature: float       # 非 thinking 路径硬锁 0（非 0 报错）；thinking 路径 no-op
     max_tokens: int
+    reasoning_effort: Literal["high", "max"]  # thinking 路径 effort；默认 high
+    thesis_thinking_enabled: bool             # 驱动 Module B / S5 thinking
 
 @dataclass
 class TargetConfig:
@@ -181,25 +184,46 @@ class TrustedSourcesConfig:
 # config/models.py - LLM 配置
 class LLMConfig(BaseModel):
     provider: Literal["deepseek"] = "deepseek"
-    api_key: str = ""
-    model: str = "deepseek-chat"
-    temperature: float = 0.0
+    api_key: str = ""                          # 不驻留：getter 读 env / 解析 ${ENV} 占位
+    model: str = "deepseek-v4-flash"           # 非 thinking 打分/汇总路径
+    model_pro: str = "deepseek-v4-pro"         # thinking 深推理路径（S1/S2/S4/S5/B）
+    temperature: float = 0.0                   # 非 thinking 路径硬锁 0；thinking 路径 no-op
     max_tokens: int = 4096
     max_retries: int = 2
+    reasoning_effort: Literal["high", "max"] = "high"  # thinking 路径 effort
 
-    # Module B 思考模式配置
-    thesis_thinking_enabled: bool = False  # 是否启用思考模式
-    thesis_thinking_max_tokens: int = 16384  # 思考模式最大 token 数
+    # thinking 模式配置（驱动 Module B / S5）
+    thesis_thinking_enabled: bool = False      # 是否启用思考模式
+    thesis_thinking_max_tokens: int = 16384    # 思考模式最大 token 数
 ```
 
-#### 思考模式说明
+#### 模型 / thinking / effort 按阶段分流
 
-Module B（信念投影器）支持可选的 DeepSeek 思考模式：
+按阶段分流（迁移计划 §4），不一刀切：
+
+- **非 thinking 路径**（Module A 打分、S3、S7）：`model`（v4-flash）+ 客户端显式
+  `thinking: disabled` + `temperature=0` 硬锁——保证评分逐位可复现。v4 系列模型级
+  thinking 默认开启，不显式关闭会被静默拉进 thinking、temperature 被忽略（已真调用核实）。
+- **thinking 路径**（目标 S1/S2/S4/S5、Module B/S5）：`model_pro`（v4-pro）+ `thinking: enabled`
+  + `reasoning_effort`（默认 high，最难的 S4 / 必要时 S5 开 max）。temperature 为 no-op，
+  复现性改由硬编码量表 + JSON schema 保证。
+
+> **现状（本期接线）**：以上为迁移目标矩阵。当前 `DeepSeekClient` 仅 `get_thesis_synthesis`（S5）
+> 与 `get_thesis_projection`（Module B）以 `use_thinking=thesis_thinking_enabled` 启用 thinking；
+> `reasoning_effort` 为客户端级默认（`high`），`chat()` 支持 per-call 覆盖但 S1–S4 调用点尚未接线
+> （待迁移计划 Q2/Q3 拍板）。S1–S4、Module A、S3、S7 当前均走非 thinking + v4-flash 路径。
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `thesis_thinking_enabled` | 是否启用思考模式 | `false` |
+| `model` | 非 thinking 路径模型 | `deepseek-v4-flash` |
+| `model_pro` | thinking 路径模型 | `deepseek-v4-pro` |
+| `reasoning_effort` | thinking 路径 effort（high\|max） | `high` |
+| `thesis_thinking_enabled` | 是否为 Module B / S5 启用思考模式 | `false` |
 | `thesis_thinking_max_tokens` | 思考模式最大 token 数 | `16384` |
+
+> 密钥不驻留：`api_key` / `token` 等密钥字段绝不进 `dump` / `repr` / 日志；可留空（运行期读固定
+> env）或写 `${ENV}` 占位（getter 运行期即时解析、不写回配置）。`${ENV}` 占位对非密钥字段在
+> load 时解析，引用缺失即 fail-closed 报错。
 
 **使用建议：**
 - 初期建议保持关闭（`false`），使用标准模式
@@ -233,13 +257,27 @@ class DeepSeekClient:
     def __init__(
         self,
         api_key: str,
-        model: str | None = None,
+        model: str | None = None,          # 非 thinking 路径模型
         temperature: float | None = None,
         max_tokens: int | None = None,
         base_url: str = "https://api.deepseek.com",
+        thinking_enabled: bool = False,
+        thinking_max_tokens: int | None = None,
+        model_pro: str | None = None,      # thinking 路径模型（回退到 model）
+        reasoning_effort: str | None = None,  # thinking effort（high|max）
     ): ...
 
-    def chat(self, system_prompt: str, user_prompt: str, temperature: float | None = None) -> LLMResponse: ...
+    # use_thinking=True → 走 model_pro + thinking enabled + reasoning_effort（可按调用覆盖）；
+    # use_thinking=False → 走 model + 显式 thinking disabled + temperature。
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float | None = None,
+        json_mode: bool = False,
+        use_thinking: bool = False,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse: ...
 
     def chat_with_json_output(
         self,
@@ -247,6 +285,8 @@ class DeepSeekClient:
         user_prompt: str,
         result_class: Type[T],
         max_retries: int | None = None,
+        use_thinking: bool = False,
+        reasoning_effort: str | None = None,
     ) -> T: ...
 
     def get_consensus(

@@ -163,10 +163,20 @@ quota_weights:
 
 #### 4.2.1 LLM 配置
 
+Module A 是**非 thinking 打分路径**：用 `model`（v4-flash）+ 显式 thinking `disabled` +
+`temperature=0`，保证情绪 / 隐含增长评分逐位可复现。
+
 ```yaml
 model: deepseek-v4-flash
-temperature: 0  # 关键：必须为 0，确保评分一致性
+temperature: 0  # 关键：非 thinking 打分路径必须为 0（非 0 直接报错），确保评分一致性
+# 客户端对非 thinking 路径显式发送 thinking: disabled——v4 系列模型级 thinking 默认开启，
+# 不显式关闭会被静默拉进 thinking、temperature 被忽略，破坏确定性（已真调用核实）。
 ```
+
+> **模型 / thinking / effort 按阶段分流**（详见 5.1 与下方目标矩阵）：Module A / S3 / S7
+> 这类受限打分 / 汇总走 v4-flash + 非 thinking + `temperature=0`（已生效）；S1/S2/S4/S5、
+> Module B/S5 这类深推理走 `model_pro`（v4-pro）+ thinking + `reasoning_effort`（**目标**；
+> 现状仅 Module B / S5 接线，见 §9 现状说明）。
 
 #### 4.2.2 System Prompt 模板
 
@@ -284,12 +294,16 @@ def generate_signal(gap: float, sentiment: int) -> str:
 # LLM 配置
 llm_api:
   provider: "deepseek"
-  api_key: ""  # 运行期只从环境变量 DEEPSEEK_API_KEY 读取
-  model: "deepseek-v4-flash"
-  temperature: 0  # 必须为 0，保证评分稳定
+  # 密钥不驻留：留空则运行期从 DEEPSEEK_API_KEY 读取；或写 ${ENV} 占位（如 "${DEEPSEEK_API_KEY}"）
+  # 由 getter 运行期即时解析。两种写法解析值都不写回配置 / dump / 日志。
+  api_key: ""  # 运行期只从环境变量 DEEPSEEK_API_KEY 读取（或 ${YOUR_ENV} 占位）
+  model: "deepseek-v4-flash"     # 非 thinking 打分/汇总路径（Module A / S3 / S7）
+  model_pro: "deepseek-v4-pro"   # thinking 深推理路径（S1/S2/S4/S5/B）
+  temperature: 0  # 非 thinking 路径必须为 0（非 0 直接报错）；thinking 路径为 no-op
   max_tokens: 4096
   max_retries: 2
-  # Module B 思考模式配置（可选）
+  reasoning_effort: "high"       # thinking 路径推理强度：high（默认）| max（仅最难阶段）
+  # thinking 模式配置（可选；驱动 Module B / S5）。启用后该路径走 model_pro + reasoning_effort。
   thesis_thinking_enabled: false
   thesis_thinking_max_tokens: 16384
 
@@ -298,7 +312,7 @@ data_sources:
   # A 股行情数据源
   a_shares:
     provider: "akshare"  # 或 "tushare"
-    token: ""  # 使用 Tushare 时运行期只从环境变量 TUSHARE_TOKEN 读取
+    token: ""  # 使用 Tushare 时运行期只从环境变量 TUSHARE_TOKEN 读取（或 ${YOUR_ENV} 占位）
 
   # 港美股行情数据源
   hk_us:
@@ -508,10 +522,29 @@ def parse_llm_response(response: str, retries: int = 1) -> dict:
 > 重点任务是稳定步骤二的情绪打分 —— 避免相同输入下评分大幅波动
 > （例如今天 30 分，明天 80 分）。
 > 
-> 核心控制手段：
-> - `Temperature = 0` 是底线，不可妥协
+> 核心控制手段（按路径分流）：
+> - **非 thinking 打分路径**（Module A 情绪/隐含增长、S3、S7）：`Temperature = 0` 是底线，
+>   不可妥协（配置层非 0 直接报错；客户端显式发送 `thinking: disabled` 锁定确定性）。
+> - **thinking 推理路径**（S1/S2/S4/S5、Module B/S5）：`temperature` 为 no-op，复现性改由
+>   下面两条 + `reasoning_effort` 管理保证。
 > - Prompt 中写死评分量表
 > - 强制结构化 JSON 输出
+>
+> **per-stage 模型 / thinking / effort 目标矩阵**（迁移计划 §4）：
+>
+> | 阶段 / 模块 | 模型 | thinking | effort | temperature |
+> |---|---|---|---|---|
+> | Module A 情绪 & 隐含增长打分（4.2） | v4-flash | off（显式 disabled） | — | 0（硬锁） |
+> | S1 命题完善 / S2 逻辑链 | v4-pro | on | high | no-op |
+> | S3 proxy 映射 | v4-flash（或 pro） | off（或 on high） | — | 0 |
+> | S4 证据/估值反推 | v4-pro | on | max | no-op |
+> | Module B / S5 信念投影 & 综合（4.3） | v4-pro | on | high→max | no-op |
+> | S6 RiskEngine | 不走 LLM | — | — | — |
+> | S7 结论汇总 | v4-flash | off | — | 0 |
+>
+> effort 默认 `high`，`max` 按阶段可开关（仅最难的 S4，必要时 S5/B），非全局——避免成本失控。
+>
+> **现状（本期接线）**：上表为迁移目标。当前代码 thinking 仅 **Module B / S5** 经 `thesis_thinking_enabled` 启用，`reasoning_effort` 为客户端级默认（`high`）作用于该路径；S1–S4 的 per-stage thinking 与 S4 的 `effort=max` 待团队拍板（迁移计划 Q2/Q3）后再接 pipeline 调用点。Module A / S3 / S7 已是 v4-flash + 非 thinking + `temperature=0`。
 
 > **Token 预算：**
 > 

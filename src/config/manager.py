@@ -15,6 +15,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from .env_interpolation import EnvPlaceholderError, interpolate_config
 from .models import AppConfig, TargetConfig
 
 # 全局配置单例
@@ -95,18 +96,29 @@ class ConfigManager:
 
     def _prepare_config(self, config: dict[str, Any]) -> dict[str, Any]:
         """
-        加载前预处理配置。
+        加载前预处理配置：解析**非密钥**字段的 ``${ENV}`` 占位（CDX-5 / D-20260629-2 B 案）。
 
-        环境变量中的 secret 不写回配置字典；`LLMConfig.get_api_key()`、
-        `ASharesSourceConfig.get_token()` 等运行期 getter 会直接读取 os.environ。
+        - **${ENV} 插值**：非密钥字段的字符串值在此把 ``${VAR}`` 解析为环境变量值；
+          被引用的 env 缺失即 fail-closed 抛 ``ConfigError``（报文含缺失的 ``VAR`` 名），
+          绝不静默置空。
+        - **密钥不驻留**：密钥类字段（``api_key`` / ``token`` / ``secret`` …）的 ``${VAR}``
+          **不在此解析**（``interpolate_config`` 跳过这些键），占位原样保留；运行期由各
+          getter（``get_api_key`` / ``get_token``）即时解析、绝不写回 ``AppConfig``。
+          环境变量中的 secret 同样不写回配置字典。
 
         Args:
             config: 原始配置字典
 
         Returns:
-            dict: 预处理后的配置
+            dict: ``${ENV}`` 占位解析后的配置
+
+        Raises:
+            ConfigError: 非密钥字段的 ``${ENV}`` 占位引用了未设置的环境变量
         """
-        return config
+        try:
+            return interpolate_config(config)
+        except EnvPlaceholderError as e:
+            raise ConfigError(str(e)) from e
 
     def get_config(self) -> AppConfig:
         """
@@ -186,6 +198,11 @@ def load_config_from_dict(data: dict[str, Any]) -> AppConfig:
 
     用于测试或程序化构建配置。
 
+    与 :meth:`ConfigManager._prepare_config` 一致：先对**非密钥**字段做 ``${ENV}`` 插值
+    （缺失即 fail-closed 抛 ``ConfigError``），让 dict 入口与 YAML 入口（``load_config``）
+    语义对齐——否则同样的占位经 dict 入口会原样残留、不解析也不 fail-closed。密钥字段占位
+    跳过、由运行期 getter 解析（密钥不驻留）。
+
     Args:
         data: 配置字典
 
@@ -193,7 +210,7 @@ def load_config_from_dict(data: dict[str, Any]) -> AppConfig:
         AppConfig: 解析后的配置对象
 
     Raises:
-        ConfigError: 配置验证失败
+        ConfigError: ``${ENV}`` 占位引用了未设置的环境变量，或配置验证失败
 
     Example:
         >>> config = load_config_from_dict({
@@ -203,7 +220,11 @@ def load_config_from_dict(data: dict[str, Any]) -> AppConfig:
         ... })
     """
     try:
-        return AppConfig.model_validate(data)
+        interpolated = interpolate_config(data)
+    except EnvPlaceholderError as e:
+        raise ConfigError(str(e)) from e
+    try:
+        return AppConfig.model_validate(interpolated)
     except ValidationError as e:
         raise ConfigError(f"配置验证失败:\n{e}")
 

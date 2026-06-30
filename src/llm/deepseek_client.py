@@ -78,6 +78,10 @@ def call_chat(
         "model": model,
         "messages": messages,
         "temperature": temperature,
+        # 显式关闭 thinking：v4 系列模型级 thinking 默认开启，否则 temperature 被静默忽略、
+        # 破坏确定性（同 DeepSeekClient.chat 非 thinking 分支）。
+        # 注：本 helper 仅 __main__ 演示用，不在确定性关键路径；生产走 DeepSeekClient。
+        "extra_body": {"thinking": {"type": "disabled"}},
     }
 
     # 若 response_format="json"，启用 JSON 输出模式
@@ -124,6 +128,11 @@ class DeepSeekClient:
     DEFAULT_THINKING_MAX_TOKENS = 16384
     MAX_RETRIES = 2
 
+    # thinking 深推理路径默认模型（v4-pro）；`deepseek-reasoner` 别名 2026-07-24 退役。
+    DEFAULT_MODEL_PRO = "deepseek-v4-pro"
+    # thinking 路径默认 effort（high|max）；max 仅最难阶段开，全局放大成本。
+    DEFAULT_REASONING_EFFORT = "high"
+
     def __init__(
         self,
         api_key: str,
@@ -133,18 +142,26 @@ class DeepSeekClient:
         base_url: str = "https://api.deepseek.com",
         thinking_enabled: bool = False,
         thinking_max_tokens: int | None = None,
+        model_pro: str | None = None,
+        reasoning_effort: str | None = None,
     ):
         """
         初始化 DeepSeek 客户端
 
+        模型 / thinking / effort 按阶段分流（参 LLM 迁移计划 §4）：非 thinking 打分
+        路径用 ``model``（v4-flash）+ 显式 thinking disabled + temperature；thinking
+        深推理路径用 ``model_pro``（v4-pro）+ thinking enabled + ``reasoning_effort``。
+
         Args:
             api_key: API Key
-            model: 模型名称，默认 "deepseek-v4-flash"
-            temperature: 温度参数，默认 0.0
+            model: 非 thinking 路径模型名称，默认 "deepseek-v4-flash"
+            temperature: 温度参数，默认 0.0（仅非 thinking 路径生效）
             max_tokens: 最大 token 数，默认 4096
             base_url: API 基础 URL
-            thinking_enabled: 是否启用思考模式（用于 Module B）
+            thinking_enabled: 是否启用思考模式（用于 Module B / S5）
             thinking_max_tokens: 思考模式下的最大 token 数
+            model_pro: thinking 路径模型名称，默认回退到 ``model``（向后兼容）
+            reasoning_effort: thinking 路径 effort（high|max），默认 "high"
         """
         self._api_key = api_key
         self._model = model or self.DEFAULT_MODEL
@@ -153,6 +170,10 @@ class DeepSeekClient:
         self._base_url = base_url
         self._thinking_enabled = thinking_enabled
         self._thinking_max_tokens = thinking_max_tokens or self.DEFAULT_THINKING_MAX_TOKENS
+        # 未显式给 model_pro 时回退到 model：客户端独立使用时不强制切 pro（向后兼容）；
+        # 经 config 注入时 main.py / factory.py 会传入 LLMConfig.model_pro。
+        self._model_pro = model_pro or self._model
+        self._reasoning_effort = reasoning_effort or self.DEFAULT_REASONING_EFFORT
         self._client = OpenAI(api_key=api_key, base_url=base_url)
 
     def chat(
@@ -162,6 +183,7 @@ class DeepSeekClient:
         temperature: float | None = None,
         json_mode: bool = False,
         use_thinking: bool = False,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """
         发送聊天请求
@@ -169,9 +191,11 @@ class DeepSeekClient:
         Args:
             system_prompt: 系统提示词
             user_prompt: 用户消息
-            temperature: 可选覆盖温度参数
+            temperature: 可选覆盖温度参数（仅非 thinking 路径生效）
             json_mode: 是否启用 JSON 输出模式
             use_thinking: 是否启用思考模式（仅对当前请求生效）
+            reasoning_effort: 可选覆盖本次 thinking effort（high|max）；
+                None 时用客户端配置的默认 effort。仅 thinking 路径生效。
 
         Returns:
             LLMResponse: 响应对象
@@ -196,22 +220,35 @@ class DeepSeekClient:
         try:
             # 构建请求参数
             kwargs: dict = {
-                "model": self._model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
             }
 
-            # 思考模式处理
+            # 模型 / thinking / effort 按路径分流（LLM 迁移计划 §4）
             if use_thinking:
-                # 思考模式下不支持 temperature 参数，使用 extra_body 启用
+                # thinking 深推理路径：v4-pro + thinking enabled + effort 透传。
+                # 思考模式下 temperature / top_p 等为 no-op（故不传），复现性由量表 + schema 保证。
+                # reasoning_effort 经 extra_body 下发（与 thinking 扩展同走 body），不作顶层 kwarg：
+                # requirements 下限 openai>=1.0.0，老版 SDK 不识别顶层 reasoning_effort 会 TypeError；
+                # SDK 把 extra_body 合并到请求体根部，effort 落在 DeepSeek 期望的位置，跨版本稳。
+                kwargs["model"] = self._model_pro
                 kwargs["max_tokens"] = self._thinking_max_tokens
-                kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-                # 注意：思考模式下 temperature 参数不会生效
+                kwargs["extra_body"] = {
+                    "thinking": {"type": "enabled"},
+                    "reasoning_effort": reasoning_effort or self._reasoning_effort,
+                }
             else:
-                kwargs["temperature"] = temperature if temperature is not None else self._temperature
+                # 非 thinking 打分 / 汇总路径：v4-flash + 显式 thinking disabled + temperature。
+                # v4 系列模型级 thinking 默认开启，若不显式 disabled 会被静默拉进 thinking、
+                # temperature 被忽略 → 破坏确定性（已用真调用核实，见迁移计划 §2 / 待办 0）。
+                kwargs["model"] = self._model
+                kwargs["temperature"] = (
+                    temperature if temperature is not None else self._temperature
+                )
                 kwargs["max_tokens"] = self._max_tokens
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
             # 启用 JSON 输出模式（PRD 4.2, 4.3 要求）
             if json_mode:
@@ -251,6 +288,7 @@ class DeepSeekClient:
         result_class: Type[T],
         max_retries: int | None = None,
         use_thinking: bool = False,
+        reasoning_effort: str | None = None,
     ) -> T:
         """
         发送聊天请求并解析 JSON 响应
@@ -294,6 +332,7 @@ class DeepSeekClient:
                     user_prompt,
                     json_mode=True,  # 启用 response_format={"type": "json_object"}
                     use_thinking=use_thinking,  # 传递思考模式开关
+                    reasoning_effort=reasoning_effort,  # 透传本次 effort 覆盖（None=用默认）
                 )
 
                 # 解析并验证响应

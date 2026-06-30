@@ -228,6 +228,8 @@ class AliceTestPipeline:
             max_tokens=llm_config.max_tokens,
             thinking_enabled=llm_config.thesis_thinking_enabled,
             thinking_max_tokens=llm_config.thesis_thinking_max_tokens,
+            model_pro=llm_config.model_pro,
+            reasoning_effort=llm_config.reasoning_effort,
         )
 
     def run(self) -> list[AuditResult]:
