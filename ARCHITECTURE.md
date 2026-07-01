@@ -6,38 +6,34 @@
 alice_test/
 ├── src/
 │   ├── __init__.py
-│   ├── main.py                      # 程序入口
+│   ├── main.py                      # 程序入口（逐标的流水线 + S6 组合叠加 + S7 决策日志接线）
 │   │
 │   ├── config/                      # 配置管理模块
 │   │   ├── __init__.py
 │   │   ├── manager.py               # ConfigManager 配置加载器
-│   │   └── models.py                # 配置数据模型
+│   │   ├── models.py                # 配置数据模型
+│   │   └── env_interpolation.py     # ${ENV} 占位插值（缺失 fail-closed；密钥不驻留 AppConfig）
 │   │
 │   ├── data_ingestion/              # 数据摄入模块
 │   │   ├── __init__.py
 │   │   ├── models.py                # TickerRawData, TextItem 数据模型
-│   │   ├── quotes/                  # 行情数据采集
-│   │   │   ├── __init__.py
-│   │   │   ├── base.py              # QuotesProvider 抽象基类
-│   │   │   ├── tushare_client.py    # Tushare 实现 (A股)
-│   │   │   ├── akshare_client.py    # AkShare 实现 (A股备选)
-│   │   │   └── yfinance_client.py   # yfinance 实现 (港/美股)
-│   │   ├── text/                    # 文本数据采集
-│   │   │   ├── __init__.py
-│   │   │   ├── base.py              # TextProvider 抽象基类
-│   │   │   ├── research_crawler.py  # 研报爬虫
-│   │   │   └── news_crawler.py      # 新闻爬虫
+│   │   ├── quotes/                  # 行情数据采集（base / tushare / akshare / yfinance / fallback 降级）
+│   │   ├── text/                    # 文本数据采集（factory 路由；a_share/ + hk_us/ + akshare/ + mock_provider）
+│   │   ├── financials/              # S4 财报/盈利预测采集（A股 AkShare|Tushare；港美 yfinance；mock 离线）
 │   │   └── preprocessor.py          # 文本去噪与过滤
 │   │
 │   ├── engines/                     # 核心引擎模块
 │   │   ├── __init__.py
 │   │   ├── consensus_engine.py      # Module A: 市场共识引擎
 │   │   ├── thesis_projector.py      # Module B: 信念投影器
-│   │   └── gap_calculator.py        # Gap 计算与信号判定
+│   │   ├── thesis_pipeline.py       # S1–S5 多阶段命题流水线
+│   │   ├── financial_analysis.py    # S4: 财务证据 / 估值反推
+│   │   ├── gap_calculator.py        # Gap 计算与信号判定
+│   │   └── risk_engine.py           # S6: 组合风控叠加（纯数学、无 LLM，见 §3.5）
 │   │
 │   ├── llm/                         # LLM 封装模块
 │   │   ├── __init__.py
-│   │   ├── deepseek_client.py       # DeepSeek API 客户端
+│   │   ├── deepseek_client.py       # DeepSeek API 客户端（per-stage thinking/effort，见 §3.1）
 │   │   ├── prompts.py               # Prompt 模板管理
 │   │   └── models.py                # LLM 响应数据模型
 │   │
@@ -45,11 +41,13 @@ alice_test/
 │   │   ├── __init__.py
 │   │   ├── base.py                  # 存储抽象接口
 │   │   ├── csv_writer.py            # CSV 实现
-│   │   └── sqlite_store.py          # SQLite 实现 (预留)
+│   │   ├── sqlite_store.py          # SQLite：审计报告 + S7 决策日志（#81 落地，见 §3.6）
+│   │   └── artifact_store.py        # 阶段产物 JSON 存储（证据链工件）
 │   │
 │   └── utils/                       # 工具模块
 │       ├── __init__.py
-│       └── logger.py                # 日志工具
+│       ├── logger.py                # 日志工具
+│       └── sanitizer.py             # LLM 前文本脱敏（防内容审核误伤）
 │
 ├── config.yaml                      # 配置文件
 ├── audit_report.csv                 # 审计报告输出
@@ -61,17 +59,22 @@ alice_test/
 
 | 模块 | 职责 |
 |------|------|
-| `config/` | 加载并解析 config.yaml，提供类型安全的配置对象 |
-| `data_ingestion/quotes/` | 从 Tushare/AkShare/yfinance 获取行情数据 |
-| `data_ingestion/text/` | 爬取研报摘要、新闻标题，限定在配置的权威来源内 |
+| `config/` | 加载并解析 config.yaml，提供类型安全的配置对象；`${ENV}` 占位插值（缺失即错、密钥不驻留） |
+| `data_ingestion/quotes/` | 从 Tushare/AkShare/yfinance 获取行情数据（含不可达源降级） |
+| `data_ingestion/text/` | 按市场路由采集研报/新闻文本，限定在配置的权威来源内；mock provider 供离线开发 |
+| `data_ingestion/financials/` | S4 财报与盈利预测数据（A股东财免 token 接口 / 港美 yfinance / mock） |
 | `data_ingestion/preprocessor.py` | 文本去噪、正则过滤、保留有观点密度的内容 |
 | `engines/consensus_engine.py` | 调用 LLM 提取市场共识、情绪评分、隐含增长率 |
 | `engines/thesis_projector.py` | 调用 LLM 基于用户宏观信念评估合理增长率 |
+| `engines/thesis_pipeline.py` | S1–S5：命题完善 → 逻辑链拆解 → proxy 映射 → 证据/估值反推 → 信念综合 |
+| `engines/financial_analysis.py` | S4 财务证据分析与估值反推（配合 financials/ 数据） |
 | `engines/gap_calculator.py` | 本地计算 Gap 值，生成 OPPORTUNITY/OVERHEATED/WAIT 信号 |
-| `llm/deepseek_client.py` | 封装 DeepSeek API 调用、重试机制、JSON 解析 |
+| `engines/risk_engine.py` | S6 组合风控叠加：软参考 sizing + 行业聚类上限 + 总风险预算（纯数学、离线确定性可测） |
+| `llm/deepseek_client.py` | 封装 DeepSeek API 调用、重试机制、JSON 解析；per-stage thinking/effort 与非 thinking 路径 temp=0 硬锁 |
 | `llm/prompts.py` | 管理 Consensus Engine 和 Thesis Projector 的 Prompt 模板 |
-| `persistence/` | 将审计结果写入 CSV 或 SQLite，支持追加模式 |
+| `persistence/` | 审计结果写 CSV/SQLite（追加模式）；S7 决策日志（`SQLiteStore`）；阶段产物工件（`ArtifactStore`） |
 | `utils/logger.py` | 统一日志格式，记录运行统计信息 |
+| `utils/sanitizer.py` | LLM 调用前文本脱敏，避免触发内容审核 |
 
 ## 3. 关键类和接口定义汇总
 
@@ -387,7 +390,27 @@ class GapCalculator:
     ) -> AuditResult: ...
 ```
 
-### 3.5 持久化模块 (`persistence/`)
+### 3.5 S6 风控引擎 (`engines/risk_engine.py`)
+
+```python
+# 纯数学、无 LLM、离线确定性可测（#76 接入流水线）
+@dataclass
+class RiskConfig:      # ref_weight / soft_cap / target_positions / max_cluster_weight / total_risk_budget / sizing_mode
+@dataclass
+class RiskAssessment:  # 单标的评估：建议权重、risk_adjusted_action (BUY/TRIM/WAIT/EXIT)、证伪条件等
+@dataclass
+class PortfolioState:  # 组合状态（v0.1 greenfield 空仓起步）
+
+class RiskEngine:
+    def assess_one(self, item: AuditLike) -> RiskAssessment: ...
+    def assess_portfolio(self, items) -> list[RiskAssessment]: ...
+    # 跨标的第二遍：等权软参考 → 行业聚类上限（空/未知行业归 UNKNOWN）→ 总风险预算缩放
+    # 资格门 _eligible = signal==OPPORTUNITY 且 thesis_aligned
+```
+
+v0.1 语义（decision-free）：输出是**软参考**，单笔不设硬顶；「买/多大仓」仍由 S7 人工拍板。⚠ OVERHEATED 的 α/风险语义待 CDX-1 团队决策，勿抢跑实现。
+
+### 3.6 持久化模块 (`persistence/`)
 
 ```python
 # persistence/base.py
@@ -411,20 +434,38 @@ class CSVReportWriter(AuditReportStore):
     def __init__(self, file_path: str | Path = "audit_report.csv"): ...
     # 实现所有抽象方法
 
-# persistence/sqlite_store.py (预留)
+# persistence/sqlite_store.py —— #81 已完整落地（不再是预留桩）
 class SQLiteReportStore(AuditReportStore):
+    """审计报告的 SQLite 后端（与 CSVReportWriter 同接口）"""
     def __init__(self, db_path: str | Path = "audit_data.db"): ...
-    # 预留接口，空实现
+
+# S7 决策日志（CDX-2 终态）；config.persistence.backend="sqlite" 时由 main 接线写入
+@dataclass
+class DecisionEntry: ...   # decision_id = f"{ticker}-{asof_date}"；缺数据留 NULL，不造数
+@dataclass
+class OutcomeEntry: ...    # created_at 由 store 时钟盖戳，调用方不可倒填
+
+class SQLiteStore:
+    # 表：decision_log / decision_outcome / position_history / alpha_track（后两者写方法 = v0.2）
+    def save_decision(self, entry) -> str: ...        # 幂等 upsert
+    def record_outcome(self, outcome) -> int: ...     # append-only
+    def get_decisions(self, asof=None, ...): ...      # point-in-time 按 created_at（存在性快照，非内容版本化）
+    def get_open_decisions(self, asof=None): ...
+    def hit_rate(self, since=None, until=None, horizon=None, asof=None): ...
+    def information_coefficient(self, predictor="gap", ...): ...  # 与 hit_rate 同源窗口/PIT 口径
 ```
 
-### 3.6 主程序 (`main.py`)
+### 3.7 主程序 (`main.py`)
 
 ```python
 class AliceTestPipeline:
     def __init__(self, config: AppConfig): ...
-    def run(self) -> list[AuditResult]: ...
+    def run(self) -> list[AuditResult]: ...   # 逐标的流水线 → S6 组合叠加（第二遍）→ S7 决策日志
     def _process_single_target(self, target: TargetConfig) -> AuditResult: ...
     def _ingest_data(self, target: TargetConfig) -> TickerRawData: ...
+    def _build_risk_engine(self) -> RiskEngine | None: ...   # config.risk.enabled=False → 跳过叠加
+    def _build_decision_entry(self, result) -> DecisionEntry: ...
+    # 决策日志覆盖所有结果（含 WAIT 与 fail-closed）；回退 BUY 门控 = OPPORTUNITY 且 thesis_aligned
 
 def main() -> None:
     """命令行入口: python -m src.main --config config.yaml"""
@@ -479,13 +520,23 @@ def main() -> None:
 │        │  GapCalculator  │                                  │
 │        └────────┬────────┘                                  │
 │                 ▼                                           │
-│           AuditResult                                       │
+│           AuditResult (逐标的)                               │
 └─────────────────┬───────────────────────────────────────────┘
-                  │
+                  │ 全部标的完成后
                   ▼
          ┌─────────────────┐
-         │ AuditReportStore│ ──▶ audit_report.csv / SQLite
-         └─────────────────┘
+         │   RiskEngine    │  S6 跨标的第二遍（#76）：
+         │   (组合叠加)     │  软参考权重 + 聚类上限 + 总预算
+         └────────┬────────┘  → risk_adjusted_action
+                  │
+        ┌─────────┴──────────────┐
+        ▼                        ▼
+┌─────────────────┐   ┌───────────────────────┐
+│ AuditReportStore│   │ SQLiteStore 决策日志   │
+│ csv / sqlite    │   │ decision_log / outcome │
+└─────────────────┘   └───────────────────────┘
+                        (backend=sqlite 时写入；
+                         覆盖 WAIT 与 fail-closed)
 ```
 
 ## 5. 信号判定逻辑
@@ -500,21 +551,14 @@ else:
     signal = "WAIT"          # 观望
 ```
 
-## 6. 后续实现优先级建议
+阈值来自 `config.yaml` 的 `gap_thresholds`（代码默认 = PRD 标准值）。⚠ OVERHEATED 的信号语义（纯风险态 vs 对称负 α、是否计入 actionable/IC）= 开放决策 **CDX-1**，团队拍板后本节将更新——实现侧勿抢跑。
 
-1. **MVP 阶段**
-   - `config/` 模块完整实现
-   - `llm/deepseek_client.py` 完整实现
-   - `engines/` 三个引擎完整实现
-   - `persistence/csv_writer.py` 完整实现
-   - `main.py` 基本流程
+## 6. 实现状态与后续优先级（2026-07-01）
 
-2. **数据源阶段**
-   - `data_ingestion/quotes/tushare_client.py`
-   - `data_ingestion/quotes/yfinance_client.py`
-   - 简单的文本爬虫实现
+**已完成**：MVP 全链路 + S1–S5 命题流水线（P1）、S6 风控叠加（#76）、fail-closed 不造数 / 外部文本围栏 / temperature=0 硬锁（#77–#80）、S7 决策日志 SQLite（#81）、LLM per-stage 基建 + `${ENV}` 插值（#82）。
 
-3. **增强阶段**
-   - `persistence/sqlite_store.py` 完整实现
-   - 文本预处理增强
-   - 调度功能集成
+**下一步**（权威清单见团队内部 ItemList / 决策台账）：
+
+1. daily-run 自动化（cron 化入口）—— P0-5 验证起跑的最后前置
+2. 待拍决策后接线：CDX-1 信号语义；LLM per-stage 剩余接线（S1–S4 thinking、effort=max 范围）
+3. S7 v0.2：versioned rows（内容级 point-in-time）、`position_history` / `alpha_track` 写方法、跨日改写护栏
