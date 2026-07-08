@@ -4,6 +4,8 @@
 ① 非 thinking 路径非零温度负例（应被拒）；
 ② thinking 路径 reasoning_effort 透传 + thinking enabled + 切 model_pro；
 ③ 确定性打分路径：非 thinking 分支显式 thinking disabled，且返回无 reasoning_content。
+④ usage_callback 统计接线（验收 §五 #10）：成功调用回报 token/延迟、
+   钩子异常不打断主路径、失败调用不回报。
 
 均用打桩的 ``chat.completions.create`` 捕获 kwargs，不触达真实网络。
 """
@@ -105,3 +107,55 @@ class TestDeterministicPathExplicitDisabled:
         assert captured["temperature"] == 0.0
         # 确定性路径：无思维链
         assert resp.reasoning_content is None
+
+
+class TestUsageCallback:
+    """④ usage_callback 统计接线：修复运行摘要「0 LLM calls, 0 tokens used」假遥测。"""
+
+    def test_success_reports_tokens_and_latency(self, monkeypatch):
+        calls: list[tuple[int, float]] = []
+        client = DeepSeekClient(
+            api_key="test-key",
+            usage_callback=lambda tokens, ms: calls.append((tokens, ms)),
+        )
+        _stub_create(client, monkeypatch, _fake_response())
+
+        client.chat("sys", "user")
+
+        assert len(calls) == 1
+        tokens, latency_ms = calls[0]
+        assert tokens == 15  # _fake_response 桩值：prompt 10 + completion 5
+        assert latency_ms >= 0
+
+    def test_callback_error_does_not_break_chat(self, monkeypatch):
+        # 统计钩子异常若逃逸会被 chat 的 except 误包装成 APICallError，
+        # 把一次成功的 LLM 调用误报为 API 失败——必须被 _report_usage 吞掉。
+        def _boom(tokens, ms):
+            raise RuntimeError("stats hook down")
+
+        client = DeepSeekClient(api_key="test-key", usage_callback=_boom)
+        _stub_create(client, monkeypatch, _fake_response(content="ok"))
+
+        resp = client.chat("sys", "user")
+
+        assert resp.content == "ok"
+
+    def test_failed_call_not_reported(self, monkeypatch):
+        # 失败调用无 usage 可回报，且已由 llm_error 口径单独计数，不得计入 LLM calls。
+        calls: list[tuple[int, float]] = []
+        client = DeepSeekClient(
+            api_key="test-key",
+            usage_callback=lambda tokens, ms: calls.append((tokens, ms)),
+        )
+
+        def _fail_create(**kwargs):
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(
+            client._client.chat.completions, "create", _fail_create
+        )
+
+        with pytest.raises(APICallError):
+            client.chat("sys", "user")
+
+        assert calls == []

@@ -230,6 +230,9 @@ class AliceTestPipeline:
             thinking_max_tokens=llm_config.thesis_thinking_max_tokens,
             model_pro=llm_config.model_pro,
             reasoning_effort=llm_config.reasoning_effort,
+            # 统计接线（验收 §五 #10）：不接则 Module A + S1–S5 的调用 / token 全部
+            # 不进 RunStatistics，运行摘要恒报「0 LLM calls, 0 tokens used」假遥测。
+            usage_callback=self._logger.log_llm_call,
         )
 
     def run(self) -> list[AuditResult]:

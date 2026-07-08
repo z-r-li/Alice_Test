@@ -7,7 +7,7 @@ import logging
 import os
 import json
 import time
-from typing import Literal, TypeVar, Type
+from typing import Callable, Literal, TypeVar, Type
 
 from openai import OpenAI
 
@@ -144,6 +144,7 @@ class DeepSeekClient:
         thinking_max_tokens: int | None = None,
         model_pro: str | None = None,
         reasoning_effort: str | None = None,
+        usage_callback: Callable[[int, float], None] | None = None,
     ):
         """
         初始化 DeepSeek 客户端
@@ -162,6 +163,8 @@ class DeepSeekClient:
             thinking_max_tokens: 思考模式下的最大 token 数
             model_pro: thinking 路径模型名称，默认回退到 ``model``（向后兼容）
             reasoning_effort: thinking 路径 effort（high|max），默认 "high"
+            usage_callback: 每次成功调用后的用量回调 ``(total_tokens, latency_ms)``，
+                供运行统计（AuditLogger.log_llm_call）接线；回调异常绝不打断调用主路径
         """
         self._api_key = api_key
         self._model = model or self.DEFAULT_MODEL
@@ -174,6 +177,7 @@ class DeepSeekClient:
         # 经 config 注入时 main.py / factory.py 会传入 LLMConfig.model_pro。
         self._model_pro = model_pro or self._model
         self._reasoning_effort = reasoning_effort or self.DEFAULT_REASONING_EFFORT
+        self._usage_callback = usage_callback
         self._client = OpenAI(api_key=api_key, base_url=base_url)
 
     def chat(
@@ -254,7 +258,9 @@ class DeepSeekClient:
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
 
+            start = time.perf_counter()
             response = self._client.chat.completions.create(**kwargs)
+            latency_ms = (time.perf_counter() - start) * 1000
 
             content = response.choices[0].message.content or ""
 
@@ -267,19 +273,35 @@ class DeepSeekClient:
 
             usage = response.usage
 
-            return LLMResponse(
+            llm_response = LLMResponse(
                 content=content,
                 model=response.model,
                 prompt_tokens=usage.prompt_tokens if usage else 0,
                 completion_tokens=usage.completion_tokens if usage else 0,
                 reasoning_content=reasoning_content,
             )
+            # 仅成功调用回报用量（失败调用无 usage，且已由 llm_error 口径单独计数）。
+            # _report_usage 自吞异常：统计钩子失败若逃逸到此处的 except，会被误包装成
+            # APICallError、把一次成功的 LLM 调用误报为 API 失败。
+            self._report_usage(llm_response.get_total_tokens(), latency_ms)
+            return llm_response
         except Exception as e:
             error_msg = str(e)
             # 检测内容审核错误
             if "Content Exists Risk" in error_msg or "content_filter" in error_msg.lower():
                 raise ContentModerationError(f"内容审核失败: {e}") from e
             raise APICallError(f"API 调用失败: {e}") from e
+
+    def _report_usage(self, tokens_used: int, latency_ms: float) -> None:
+        """把单次调用用量回报给统计钩子；钩子异常绝不打断调用主路径。"""
+        if self._usage_callback is None:
+            return
+        try:
+            self._usage_callback(tokens_used, latency_ms)
+        except Exception:
+            logging.getLogger("alice_test").warning(
+                "usage_callback 执行失败（已忽略，不影响调用）", exc_info=True
+            )
 
     def chat_with_json_output(
         self,

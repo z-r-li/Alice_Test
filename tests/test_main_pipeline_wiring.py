@@ -311,3 +311,56 @@ class TestMainFailClosed:
         assert r.needs_due_diligence is True
         assert r.suggested_weight == 0.0
         assert r.risk_adjusted_action != "BUY"
+
+
+class TestLLMUsageStatsWiring:
+    """统计接线（验收 §五 #10）：主客户端调用用量必须回流 AuditLogger。
+
+    此前 ``AuditLogger.log_llm_call`` 无任何调用方，运行摘要恒报
+    「0 LLM calls, 0 tokens used」假遥测（p1_acceptance_20260609 §五 #10）。
+    """
+
+    def test_llm_usage_flows_into_run_statistics(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        from src.main import AliceTestPipeline
+
+        TextProviderFactory.reset()
+        config = load_config_from_dict({
+            "data_sources": {"crawler": {"use_mock": True}},
+            "financial_analysis": {"use_mock": True},
+            "output": {
+                "path": str(tmp_path / "out.csv"),
+                "artifacts_dir": str(tmp_path / "artifacts"),
+            },
+            "targets": [
+                {"ticker": "601985.SH", "name": "中国核电",
+                 "thesis": "AI算力需要稳定基荷电力，核电是物理刚需。"}
+            ],
+        })
+        # 不打桩 _create_llm_client：验证真实 DeepSeekClient 与 AuditLogger 的接线
+        pipeline = AliceTestPipeline(config=config, output_path=tmp_path / "out.csv")
+
+        # 桩 OpenAI create（离线），固定 usage：prompt 10 + completion 5
+        message = SimpleNamespace(content="{}", reasoning_content=None)
+        fake_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=message)],
+            model="deepseek-v4-flash",
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+        )
+        monkeypatch.setattr(
+            pipeline._llm_client._client.chat.completions,
+            "create",
+            lambda **kwargs: fake_response,
+        )
+
+        pipeline._logger.start_run(1)
+        pipeline._llm_client.chat("sys", "user")
+        pipeline._llm_client.chat("sys", "user")
+        stats = pipeline._logger.end_run()
+
+        assert stats is not None
+        assert stats.total_llm_calls == 2
+        assert stats.total_tokens_used == 30
+        assert stats.avg_llm_latency_ms >= 0
