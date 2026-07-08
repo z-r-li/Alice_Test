@@ -84,15 +84,19 @@ class AShareTextCoordinator(TextProvider):
         "cls": 1,
     }
 
-    # 各源在本部署网络下的可达性（#65）。host 静态分类：
-    # datacenter.eastmoney / akshare 系可达；cninfo 系不可达；财联社挂起风险高归 uncertain。
-    # irm 例外（市场相关）：沪市走上证 e互动（可达）、深市走巨潮 IRM（cninfo 不可达），见 _classify_reachability。
+    # 各源在本部署网络下的可达性（#65；2026-07-08 按 P2 专用机 CDX-6 逐源实测更新）。
+    # 实测口径：eastmoney（datacenter/em）与 cninfo 系均可达——旧「cninfo 不可达」
+    # 系原部署 DNS 问题，已证伪；财联社静默挂死归 uncertain（30s 护栏兜底）；
+    # rating 的新浪页面已改 JS 渲染、akshare 1.18.64 解析失效（P2+开发机双网实测
+    # 同败，属上游漂移非网络），在上游修复前按不可达处理。
     SOURCE_REACHABILITY: dict[str, SourceReachability] = {
         "research": SourceReachability.REACHABLE,   # stock_research_report_em
         "news": SourceReachability.REACHABLE,       # stock_news_em
-        "rating": SourceReachability.REACHABLE,     # stock_institute_recommend_detail
+        # stock_institute_recommend_detail：sina 页面 JS 化 → 解析失败（2026-07-08 实测），待 akshare 修复
+        "rating": SourceReachability.UNREACHABLE,
         "forecast": SourceReachability.REACHABLE,   # stock_profit_forecast_em（#65 新增源）
-        "announcement": SourceReachability.UNREACHABLE,  # stock_zh_a_disclosure_report_cninfo
+        "announcement": SourceReachability.REACHABLE,  # stock_zh_a_disclosure_report_cninfo（2026-07-08 实测 3/3）
+        "irm": SourceReachability.REACHABLE,        # 沪 stock_sns_sseinfo / 深 stock_irm_cninfo 均实测可达
         "cls": SourceReachability.UNCERTAIN,        # 财联社（挂起风险高，有 30s 超时护栏）
     }
 
@@ -356,13 +360,11 @@ class AShareTextCoordinator(TextProvider):
             return "巨潮互动易"
 
     def _classify_reachability(self, source_key: str, ticker: str) -> SourceReachability:
-        """该源在本部署网络下的可达性（#65）。irm 按市场区分：沪市可达、深市(cninfo)不可达。"""
-        if source_key == "irm":
-            return (
-                SourceReachability.REACHABLE
-                if ticker.upper().endswith(".SH")
-                else SourceReachability.UNREACHABLE
-            )
+        """该源在本部署网络下的可达性（#65）。
+
+        2026-07-08 起 irm 沪深两路均实测可达（深市巨潮 IRM 随 cninfo 系翻案），
+        不再按市场区分，统一走静态分类表；ticker 参数保留以兼容调用方签名。
+        """
         return self.SOURCE_REACHABILITY.get(source_key, SourceReachability.UNCERTAIN)
 
     def _skip_unreachable(self) -> bool:

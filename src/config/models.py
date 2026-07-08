@@ -245,9 +245,10 @@ class AShareTextSourceConfig(ConfigModel):
     skip_unreachable_sources: bool = Field(
         default=True,
         description=(
-            "#65：本部署网络不可达的源（sina/cninfo/push2his 系，如公告/深市互动易）"
-            "静默跳过并计入「未覆盖」，避免无谓超时/挂起。部署到可达网络的 P2 机器时设 False "
-            "以尝试全部源。"
+            "#65：本部署网络不可达的源静默跳过并计入「未覆盖」，避免无谓超时/挂起。"
+            "分类见 coordinator.SOURCE_REACHABILITY（2026-07-08 P2 实测：cninfo 系可达已翻案；"
+            "rating 因新浪页面改版+akshare 解析失效不可用；财联社挂起）。"
+            "全部源稳定可达时可设 False 让不可达源报错而非静默跳过。"
         ),
     )
 
