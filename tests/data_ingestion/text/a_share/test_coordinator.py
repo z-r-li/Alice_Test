@@ -58,6 +58,9 @@ def default_config() -> AShareTextSourceConfig:
             "rating": 2,
             "news": 3,
         },
+        # 单测验证抓取/配额/去重逻辑本身，不受部署可达性分类影响；
+        # 分类与跳过行为由 TestReachabilityClassification / TestCoverageMetadata 专门覆盖。
+        skip_unreachable_sources=False,
     )
 
 
@@ -727,16 +730,24 @@ class TestReachabilityClassification:
     """#65：各源在本网络下的可达性分类。"""
 
     def test_reachable_eastmoney_sources(self, coordinator: AShareTextCoordinator):
-        for src in ("research", "news", "rating", "forecast"):
+        for src in ("research", "news", "forecast"):
             assert (
                 coordinator._classify_reachability(src, "601985.SH")
                 == SourceReachability.REACHABLE
             )
 
-    def test_unreachable_cninfo_announcement(self, coordinator: AShareTextCoordinator):
+    def test_unreachable_rating_upstream_drift(self, coordinator: AShareTextCoordinator):
+        """rating：新浪页面 JS 化致 akshare 1.18.64 解析失效（2026-07-08 双网实测同败），按不可达处理。"""
+        assert (
+            coordinator._classify_reachability("rating", "601985.SH")
+            == SourceReachability.UNREACHABLE
+        )
+
+    def test_reachable_cninfo_announcement(self, coordinator: AShareTextCoordinator):
+        """公告（cninfo）：2026-07-08 P2 实测 3/3 可达——旧「不可达」结论系原部署 DNS 问题，已翻案。"""
         assert (
             coordinator._classify_reachability("announcement", "601985.SH")
-            == SourceReachability.UNREACHABLE
+            == SourceReachability.REACHABLE
         )
 
     def test_uncertain_cls(self, coordinator: AShareTextCoordinator):
@@ -745,15 +756,15 @@ class TestReachabilityClassification:
             == SourceReachability.UNCERTAIN
         )
 
-    def test_irm_market_dependent(self, coordinator: AShareTextCoordinator):
-        # 沪市走上证 e互动（可达）；深市走巨潮 IRM（cninfo 不可达）
+    def test_irm_reachable_both_markets(self, coordinator: AShareTextCoordinator):
+        # 2026-07-08 实测：沪市上证 e互动、深市巨潮 IRM 均可达，不再按市场区分
         assert (
             coordinator._classify_reachability("irm", "601985.SH")
             == SourceReachability.REACHABLE
         )
         assert (
             coordinator._classify_reachability("irm", "000001.SZ")
-            == SourceReachability.UNREACHABLE
+            == SourceReachability.REACHABLE
         )
 
 
@@ -787,10 +798,10 @@ class TestCoverageMetadata:
         assert "research" in cov.uncovered_sources
 
     def test_unreachable_source_skipped_silently_and_uncovered(self):
-        """启用公告（cninfo 不可达）→ 静默跳过、不调用其 akshare 接口、计入未覆盖。"""
+        """启用 rating（上游失效，分类不可达）→ 静默跳过、不调用其 akshare 接口、计入未覆盖。"""
         config = AShareTextSourceConfig(
-            enabled_sources=["news", "announcement"],
-            quota_weights={"news": 3, "announcement": 2},
+            enabled_sources=["news", "rating"],
+            quota_weights={"news": 3, "rating": 2},
         )
         coordinator = AShareTextCoordinator(config=config)
         now = datetime.now()
@@ -803,29 +814,29 @@ class TestCoverageMetadata:
         coordinator.fetch_texts(ticker="601985.SH", name="中国核电", max_items=10)
 
         # 不可达源未被真正抓取（其 akshare 接口未被调用）
-        mock_akshare.stock_zh_a_disclosure_report_cninfo.assert_not_called()
+        mock_akshare.stock_institute_recommend_detail.assert_not_called()
         cov = coordinator.get_last_coverage()
-        ann = next(c for c in cov.per_source if c.source == "announcement")
-        assert ann.attempted is False
-        assert ann.status == "skipped_unreachable"
-        assert "announcement" in cov.uncovered_sources
+        rat = next(c for c in cov.per_source if c.source == "rating")
+        assert rat.attempted is False
+        assert rat.status == "skipped_unreachable"
+        assert "rating" in cov.uncovered_sources
 
     def test_unreachable_attempted_when_skip_disabled(self):
-        """P2 可达机器：skip_unreachable_sources=False → 不可达源也尝试抓取。"""
+        """skip_unreachable_sources=False → 不可达源也尝试抓取（不可达将报错而非静默跳过）。"""
         config = AShareTextSourceConfig(
-            enabled_sources=["announcement"],
-            quota_weights={"announcement": 2},
+            enabled_sources=["rating"],
+            quota_weights={"rating": 2},
             skip_unreachable_sources=False,
         )
         coordinator = AShareTextCoordinator(config=config)
-        mock_akshare.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
+        mock_akshare.stock_institute_recommend_detail.return_value = pd.DataFrame()
 
         coordinator.fetch_texts(ticker="601985.SH", name="中国核电", max_items=10)
 
-        mock_akshare.stock_zh_a_disclosure_report_cninfo.assert_called()
+        mock_akshare.stock_institute_recommend_detail.assert_called()
         cov = coordinator.get_last_coverage()
-        ann = next(c for c in cov.per_source if c.source == "announcement")
-        assert ann.attempted is True
+        rat = next(c for c in cov.per_source if c.source == "rating")
+        assert rat.attempted is True
 
     def test_nonempty_consensus_when_some_sources_empty(self):
         """部分源为空时仍产出非空共识，并在覆盖度中标注命中/未覆盖。"""
