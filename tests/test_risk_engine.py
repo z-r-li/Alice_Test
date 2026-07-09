@@ -15,7 +15,10 @@ try:  # 常规：在装好依赖的 venv / CI 里
         RiskConfig,
         PortfolioState,
         OPPORTUNITY,
+        OVERHEATED,
         WAIT,
+        AVOID,
+        SENTIMENT_OVERHEAT,
         UNKNOWN_CLUSTER,
     )
 except Exception:  # 隔离/离线：把自包含模块作为顶层模块导入，绕过包 __init__（避免拖入数据栈）
@@ -28,7 +31,10 @@ except Exception:  # 隔离/离线：把自包含模块作为顶层模块导入�
         RiskConfig,
         PortfolioState,
         OPPORTUNITY,
+        OVERHEATED,
         WAIT,
+        AVOID,
+        SENTIMENT_OVERHEAT,
         UNKNOWN_CLUSTER,
     )
 
@@ -45,6 +51,7 @@ class FakeAudit:
     thesis_aligned: bool = False
     our_growth: float = 0.0
     industry: str = UNKNOWN_CLUSTER
+    sentiment_overheat: bool = False
 
 
 def _opp(ticker: str, industry: str = UNKNOWN_CLUSTER, gap: float = 12.0) -> FakeAudit:
@@ -176,6 +183,59 @@ def test_assess_one_structural_exit_and_action():
     assert ra.structural_exit == ["护城河瓦解"]  # 空白项被过滤
     assert ra.risk_adjusted_action == "BUY"
     assert eng.assess_one(FakeAudit("W.SH")).risk_adjusted_action == WAIT
+
+
+# ---- 信号语义 v2（D-20260705-1）：OVERHEATED → AVOID + weight 0 + flag 透传 ---- #
+
+
+def test_overheated_gets_avoid_with_zero_weight():
+    """OVERHEATED（负 α）→ AVOID、weight=0；不占预算、不进簇 flag。"""
+    items = [
+        FakeAudit("HOT.SH", signal=OVERHEATED, gap=-15.0, thesis_aligned=True,
+                  industry="半导体"),
+        _opp("OK.SH", industry="电力"),
+    ]
+    out = RiskEngine().assess_portfolio(items)
+    hot, ok = out
+    assert hot.risk_adjusted_action == AVOID
+    assert hot.suggested_weight == 0.0
+    assert hot.correlation_flags == []           # 不合格 → 不参与聚类 flag
+    assert ok.risk_adjusted_action == "BUY"      # 邻座不受影响
+    assert math.isclose(ok.suggested_weight, 0.05, abs_tol=EPS)
+
+
+def test_overheated_not_eligible_for_buy_gate():
+    """_eligible（BUY 门）不动：OVERHEATED 即便 thesis_aligned 也绝不 BUY。"""
+    item = FakeAudit("HOT.SH", signal=OVERHEATED, gap=-20.0, thesis_aligned=True)
+    assert RiskEngine()._eligible(item) is False
+    out = RiskEngine().assess_portfolio([item])
+    assert out[0].risk_adjusted_action == AVOID
+
+
+def test_assess_one_overheated_avoid():
+    """单标的路径同口径：assess_one 对 OVERHEATED 产 AVOID。"""
+    eng = RiskEngine()
+    ra = eng.assess_one(FakeAudit("HOT.SH", signal=OVERHEATED, gap=-12.0))
+    assert ra.risk_adjusted_action == AVOID
+    assert ra.suggested_weight == 0.0
+
+
+def test_sentiment_overheat_flag_appended():
+    """sentiment_overheat=True → correlation_flags 追加 SENTIMENT_OVERHEAT（只登记，不折减权重）。"""
+    items = [
+        _opp("A.SH", industry="电力"),
+        FakeAudit("B.SH", signal=OPPORTUNITY, gap=12.0, thesis_aligned=True,
+                  our_growth=15.0, industry="电力", sentiment_overheat=True),
+        FakeAudit("C.SH", signal=OVERHEATED, gap=-15.0, sentiment_overheat=True),
+    ]
+    out = RiskEngine().assess_portfolio(items)
+    a, b, c = out
+    assert SENTIMENT_OVERHEAT not in a.correlation_flags
+    assert SENTIMENT_OVERHEAT in b.correlation_flags
+    assert "A.SH" in b.correlation_flags          # 簇 flag 与情绪 flag 并存
+    assert SENTIMENT_OVERHEAT in c.correlation_flags
+    # 不折减：B 权重与无 flag 的 A 相同（折减系数未拍，登记即止）
+    assert math.isclose(b.suggested_weight, a.suggested_weight, abs_tol=EPS)
 
 
 def test_industry_map_param_when_no_attr():

@@ -38,6 +38,8 @@ __all__ = [
     "OPPORTUNITY",
     "OVERHEATED",
     "WAIT",
+    "AVOID",
+    "SENTIMENT_OVERHEAT",
     "UNKNOWN_CLUSTER",
 ]
 
@@ -45,6 +47,14 @@ __all__ = [
 OPPORTUNITY = "OPPORTUNITY"
 OVERHEATED = "OVERHEATED"
 WAIT = "WAIT"
+
+# 信号语义 v2（D-20260705-1）：OVERHEATED（负 α）→ AVOID（不进场，weight=0）。
+# 持仓感知的 TRIM/SELL 依赖 position_history（v0.2）；本流水线无持仓上下文，统一产 AVOID。
+# SHORT 零代码路径（2026-07-08 澄清：做空为远期规划，届时另拍，不加开关）。
+AVOID = "AVOID"
+
+# 情绪过热 flag（sentiment 摘出信号门后单列给风控 overlay 的登记名；只登记不折减权重）
+SENTIMENT_OVERHEAT = "SENTIMENT_OVERHEAT"
 
 UNKNOWN_CLUSTER = "UNKNOWN"  # 无已知行业/簇：不参与相关性假设与同簇上限
 
@@ -84,10 +94,10 @@ class RiskAssessment:
 
     ticker: str
     suggested_weight: float = 0.0                 # 建议仓位；~ref_weight 为软参考、非硬顶
-    correlation_flags: list[str] = field(default_factory=list)  # 同簇/高相关的其他 ticker
+    correlation_flags: list[str] = field(default_factory=list)  # 同簇/高相关 ticker + SENTIMENT_OVERHEAT flag
     structural_exit: list[str] = field(default_factory=list)    # 结构性退出触发（来自 S1 kill_criteria）
     quant_exit_target: float | None = None        # 量化退出目标价/估值（D3 待定，v0.1 留空）
-    risk_adjusted_action: str = WAIT              # BUY / TRIM / WAIT / EXIT
+    risk_adjusted_action: str = WAIT              # BUY / TRIM / WAIT / EXIT / AVOID
     risk_contribution: float | None = None        # 对组合总风险的贡献（v0.2 接相关阵后算）
     notes: str = ""
 
@@ -120,7 +130,7 @@ class RiskEngine:
         ra = RiskAssessment(ticker=item.ticker)
         ra.structural_exit = [s for s in (kill_criteria or []) if str(s).strip()]
         ra.quant_exit_target = None  # D3 待定
-        ra.risk_adjusted_action = "BUY" if self._eligible(item) else WAIT
+        ra.risk_adjusted_action = self._baseline_action(item)
         return ra
 
     # ---------- 组合层：聚类 + 整体风险预算下的 sizing，回填 ----------
@@ -182,7 +192,11 @@ class RiskEngine:
             ra.risk_adjusted_action = "BUY" if ra.suggested_weight > 0 else WAIT
         for i, it in enumerate(items):
             if not self._eligible(it):
-                out[i].risk_adjusted_action = WAIT
+                # v2：OVERHEATED（负 α）→ AVOID（weight 已为 0）；其余不合格 → WAIT
+                out[i].risk_adjusted_action = self._baseline_action(it)
+            # 情绪过热 flag 透传（与信号/资格正交：只登记，不折减权重——折减系数未拍）
+            if getattr(it, "sentiment_overheat", False):
+                out[i].correlation_flags.append(SENTIMENT_OVERHEAT)
 
         return out
 
@@ -191,6 +205,18 @@ class RiskEngine:
         return _signal_str(getattr(item, "signal", None)) == OPPORTUNITY and bool(
             getattr(item, "thesis_aligned", False)
         )
+
+    def _baseline_action(self, item: AuditLike) -> str:
+        """无 sizing 上下文时的按信号基线动作（v2）：
+
+        BUY（合格 = OPPORTUNITY 且 thesis_aligned，BUY 门 `_eligible` 不变）/
+        AVOID（OVERHEATED = 负 α，不进场、weight 0）/ 其余 WAIT。
+        """
+        if self._eligible(item):
+            return "BUY"
+        if _signal_str(getattr(item, "signal", None)) == OVERHEATED:
+            return AVOID
+        return WAIT
 
     @staticmethod
     def _apply_cluster_cap(

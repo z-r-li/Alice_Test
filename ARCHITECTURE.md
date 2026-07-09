@@ -372,12 +372,14 @@ class AuditResult:
     # 信号判定
     gap: float               # 认知差 (our - implied)
     signal: AuditSignal      # OPPORTUNITY / OVERHEATED / WAIT
+    sentiment_overheat: bool # v2：情绪过热 flag（只登记、不参与信号；S6 追加 SENTIMENT_OVERHEAT）
     status: Literal["ok", "data_error", "llm_error"]
 
 class GapCalculator:
     def __init__(self, thresholds: GapThresholdConfig | None = None): ...
     def calculate_gap(self, our_growth: float, implied_growth: float) -> float: ...
-    def determine_signal(self, gap: float, sentiment_score: int) -> AuditSignal: ...
+    def determine_signal(self, gap: float) -> AuditSignal: ...       # v2：只吃 gap（α 差双向）
+    def is_sentiment_overheat(self, sentiment_score: int) -> bool: ...
     def compute_audit_result(
         self,
         ticker: str,
@@ -397,7 +399,7 @@ class GapCalculator:
 @dataclass
 class RiskConfig:      # ref_weight / soft_cap / target_positions / max_cluster_weight / total_risk_budget / sizing_mode
 @dataclass
-class RiskAssessment:  # 单标的评估：建议权重、risk_adjusted_action (BUY/TRIM/WAIT/EXIT)、证伪条件等
+class RiskAssessment:  # 单标的评估：建议权重、risk_adjusted_action (BUY/TRIM/WAIT/EXIT/AVOID)、证伪条件等
 @dataclass
 class PortfolioState:  # 组合状态（v0.1 greenfield 空仓起步）
 
@@ -408,7 +410,7 @@ class RiskEngine:
     # 资格门 _eligible = signal==OPPORTUNITY 且 thesis_aligned
 ```
 
-v0.1 语义（decision-free）：输出是**软参考**，单笔不设硬顶；「买/多大仓」仍由 S7 人工拍板。⚠ OVERHEATED 的 α/风险语义待 CDX-1 团队决策，勿抢跑实现。
+v0.1 语义（decision-free）：输出是**软参考**，单笔不设硬顶；「买/多大仓」仍由 S7 人工拍板。信号语义 v2（D-20260705-1）：OVERHEATED（负 α）→ `AVOID`（不进场、weight=0，计入 actionable）；`sentiment_overheat` flag 由 S6 以 `SENTIMENT_OVERHEAT` 登记进 `correlation_flags`（只登记，不折减权重——折减系数未拍）。SHORT 零代码路径（做空=远期规划，2026-07-08 澄清，届时另拍）。
 
 ### 3.6 持久化模块 (`persistence/`)
 
@@ -539,19 +541,25 @@ def main() -> None:
                          覆盖 WAIT 与 fail-closed)
 ```
 
-## 5. 信号判定逻辑
+## 5. 信号判定逻辑（v2：纯 α 差双向触发）
+
+拍板：**D-20260627-P0-1**（废止 v1「gap+sentiment 双条件」旧门）、**D-20260627-CDX-1**（α = our growth − market growth；sentiment 不单独产 α、不纯做 veto）、**D-20260705-1**（OVERHEATED = 相对我方 thesis 模型的负 α，计入 actionable/IC）。2026-07-08 落地。
 
 ```python
-# PRD 5.5 节定义的判定规则
-if gap > 10 and sentiment_score < 40:
-    signal = "OPPORTUNITY"   # 市场悲观但我们看好
-elif sentiment_score > 80:
-    signal = "OVERHEATED"    # 市场过热
+# 信号语义 v2（determine_signal 只吃 gap）
+if gap > opportunity_gap_min:        # 默认 10
+    signal = "OPPORTUNITY"   # 正 α：市场定价低于我方模型
+elif gap < -overheated_gap_min:      # 默认 10（与 opportunity 对称；数值未专门拍）
+    signal = "OVERHEATED"    # 负 α：市场 implied 定价高于我方模型 → 动作 AVOID（不进场）
 else:
-    signal = "WAIT"          # 观望
+    signal = "WAIT"          # 含 gap=NaN（fail-closed 行）
 ```
 
-阈值来自 `config.yaml` 的 `gap_thresholds`（代码默认 = PRD 标准值）。⚠ OVERHEATED 的信号语义（纯风险态 vs 对称负 α、是否计入 actionable/IC）= 开放决策 **CDX-1**，团队拍板后本节将更新——实现侧勿抢跑。
+- sentiment 摘出信号门：`sentiment_score > 80` 只产 `sentiment_overheat` flag（S6 登记 `SENTIMENT_OVERHEAT`，不折减权重）。
+- OVERHEATED → `AVOID`：suggested_weight=0、计入 actionable；hit(AVOID) = excess_return < 0。持仓感知 TRIM/SELL 待 position_history（v0.2）。SHORT 零代码路径（远期另拍）。
+- 决策日志新行带 `signal_semantics='v2'`；旧行 NULL 视为 v1，append-only 不回写。
+
+阈值来自 `config.yaml` 的 `gap_thresholds`（代码默认 = 上述标准值；v1 情绪字段 deprecated，兼容加载）。
 
 ## 6. 实现状态与后续优先级（2026-07-01）
 
@@ -560,5 +568,5 @@ else:
 **下一步**（权威清单见团队内部 ItemList / 决策台账）：
 
 1. daily-run 自动化（cron 化入口）—— P0-5 验证起跑的最后前置
-2. 待拍决策后接线：CDX-1 信号语义；LLM per-stage 剩余接线（S1–S4 thinking、effort=max 范围）
+2. ~~CDX-1 信号语义~~ → **已落地（信号语义 v2，D-20260705-1，见 §5）**；LLM per-stage 剩余接线（S1–S4 thinking、effort=max 范围）待拍
 3. S7 v0.2：versioned rows（内容级 point-in-time）、`position_history` / `alpha_track` 写方法、跨日改写护栏

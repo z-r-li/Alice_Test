@@ -1,10 +1,12 @@
 """
-Gap 计算器与信号判定测试
+Gap 计算器与信号判定测试（信号语义 v2：纯 α 差双向触发）
 
 测试用例：
-- test_opportunity_signal: Gap=15, Sentiment=30 → OPPORTUNITY
-- test_overheated_signal: Sentiment=85 → OVERHEATED
-- test_wait_signal: Gap=5, Sentiment=50 → WAIT
+- test_opportunity_signal: gap=15 → OPPORTUNITY（正 α）
+- test_overheated_signal: gap=-15 → OVERHEATED（负 α，D-20260705-1）
+- test_wait_signal: |gap| 不超阈值 → WAIT；gap=NaN（fail-closed）→ WAIT
+- 金丝雀（语义翻转验收锚）：gap=+30 且 sentiment=85 → v1 错判 OVERHEATED，v2 必须 OPPORTUNITY
+- sentiment 不再触发信号，只产 sentiment_overheat flag
 - test_calculate_gap: 基础 Gap 计算
 - test_compute_audit_result: 完整审计结果生成
 """
@@ -40,120 +42,106 @@ class TestGapCalculator:
 
 
 class TestSignalDetermination:
-    """信号判定测试类"""
+    """信号判定测试类（v2：只吃 gap，双向 α 差触发）"""
 
     def test_opportunity_signal(self):
-        """
-        测试机会信号判定
-
-        条件：Gap > 10 且 Sentiment < 40
-        输入：Gap=15, Sentiment=30
-        预期：OPPORTUNITY
-        """
+        """gap=15 > 10 → OPPORTUNITY（正 α），与 sentiment 无关"""
         calculator = GapCalculator()
-        signal = calculator.determine_signal(gap=15, sentiment_score=30)
+        signal = calculator.determine_signal(gap=15)
         assert signal == AuditSignal.OPPORTUNITY
 
     def test_opportunity_signal_boundary_gap(self):
-        """测试机会信号边界条件 - Gap 刚好等于 10 不触发"""
+        """边界：gap 刚好等于 +10 不触发 → WAIT"""
         calculator = GapCalculator()
-        # Gap = 10（不大于 10）应返回 WAIT
-        signal = calculator.determine_signal(gap=10, sentiment_score=30)
+        signal = calculator.determine_signal(gap=10)
         assert signal == AuditSignal.WAIT
 
-    def test_opportunity_signal_boundary_sentiment(self):
-        """测试机会信号边界条件 - Sentiment 刚好等于 40 不触发"""
+    def test_overheated_signal_negative_alpha(self):
+        """gap=-15 < -10 → OVERHEATED（负 α：市场 implied 定价高于我方，D-20260705-1）"""
         calculator = GapCalculator()
-        # Sentiment = 40（不小于 40）应返回 WAIT
-        signal = calculator.determine_signal(gap=15, sentiment_score=40)
-        assert signal == AuditSignal.WAIT
-
-    def test_overheated_signal(self):
-        """
-        测试过热信号判定
-
-        条件：Sentiment > 80
-        输入：Sentiment=85
-        预期：OVERHEATED
-        """
-        calculator = GapCalculator()
-        signal = calculator.determine_signal(gap=5, sentiment_score=85)
+        signal = calculator.determine_signal(gap=-15)
         assert signal == AuditSignal.OVERHEATED
 
     def test_overheated_signal_boundary(self):
-        """测试过热信号边界条件 - Sentiment 刚好等于 80 不触发"""
+        """边界：gap 刚好等于 -10 不触发 → WAIT"""
         calculator = GapCalculator()
-        # Sentiment = 80（不大于 80）应返回 WAIT
-        signal = calculator.determine_signal(gap=5, sentiment_score=80)
+        signal = calculator.determine_signal(gap=-10)
         assert signal == AuditSignal.WAIT
 
     def test_overheated_signal_extreme(self):
-        """测试极端过热情绪"""
+        """极端负 α"""
         calculator = GapCalculator()
-        signal = calculator.determine_signal(gap=-10, sentiment_score=95)
+        signal = calculator.determine_signal(gap=-40)
         assert signal == AuditSignal.OVERHEATED
 
     def test_wait_signal(self):
+        """|gap| 不超阈值 → WAIT"""
+        calculator = GapCalculator()
+        assert calculator.determine_signal(gap=5) == AuditSignal.WAIT
+        assert calculator.determine_signal(gap=-5) == AuditSignal.WAIT
+        assert calculator.determine_signal(gap=0) == AuditSignal.WAIT
+
+    def test_nan_gap_fail_closed_wait(self):
+        """gap=NaN（fail-closed 行）→ WAIT：所有比较为 False，不误触发双向信号"""
+        calculator = GapCalculator()
+        assert calculator.determine_signal(gap=float("nan")) == AuditSignal.WAIT
+
+
+class TestSentimentDecoupledFromSignal:
+    """v2：sentiment 摘出信号门——不再触发任何信号，只产 sentiment_overheat flag"""
+
+    def test_high_sentiment_alone_no_longer_triggers_overheated(self):
+        """v1 的「sentiment > 80 → OVERHEATED」已废：gap=5 不超阈值 → WAIT。
+
+        （v2 里 determine_signal 不吃 sentiment；本用例锁死签名与语义。）
         """
-        测试观望信号判定
+        calculator = GapCalculator()
+        assert calculator.determine_signal(gap=5) == AuditSignal.WAIT
+        # flag 仍单列登记
+        assert calculator.is_sentiment_overheat(85) is True
 
-        条件：不满足 OPPORTUNITY 和 OVERHEATED 的条件
-        输入：Gap=5, Sentiment=50
-        预期：WAIT
+    def test_canary_positive_gap_high_sentiment_is_opportunity(self):
+        """金丝雀用例（语义翻转验收锚，交接 §1）：
+
+        gap=+30、sentiment=85 → v1 输出 OVERHEATED（错：与 α 差同号矛盾），
+        v2 必须输出 OPPORTUNITY；情绪过热以 flag 单列。
         """
         calculator = GapCalculator()
-        signal = calculator.determine_signal(gap=5, sentiment_score=50)
-        assert signal == AuditSignal.WAIT
+        assert calculator.determine_signal(gap=30) == AuditSignal.OPPORTUNITY
+        assert calculator.is_sentiment_overheat(85) is True
 
-    def test_wait_signal_neutral_sentiment(self):
-        """测试中性情绪下的观望信号"""
+    def test_sentiment_overheat_flag_boundary(self):
+        """flag 阈值沿用 80：等于不触发，大于触发"""
         calculator = GapCalculator()
-        signal = calculator.determine_signal(gap=8, sentiment_score=55)
-        assert signal == AuditSignal.WAIT
-
-    def test_wait_signal_low_gap_low_sentiment(self):
-        """测试低 Gap 低情绪的情况"""
-        calculator = GapCalculator()
-        # Gap 不够大，虽然情绪悲观也应该是 WAIT
-        signal = calculator.determine_signal(gap=5, sentiment_score=25)
-        assert signal == AuditSignal.WAIT
-
-    def test_overheated_priority_over_opportunity(self):
-        """测试过热信号优先级 - 即使 Gap 满足机会条件，高情绪仍判定为过热"""
-        calculator = GapCalculator()
-        # Gap=15 满足机会条件，但 Sentiment=85 触发过热
-        signal = calculator.determine_signal(gap=15, sentiment_score=85)
-        assert signal == AuditSignal.OVERHEATED
+        assert calculator.is_sentiment_overheat(80) is False
+        assert calculator.is_sentiment_overheat(81) is True
+        assert calculator.is_sentiment_overheat(30) is False
 
 
 class TestCustomThresholds:
-    """自定义阈值测试类"""
+    """自定义阈值测试类（v2 字段）"""
 
-    def test_custom_opportunity_thresholds(self):
-        """测试自定义机会阈值"""
-        thresholds = GapThresholdConfig(
-            opportunity_gap_min=5.0,  # 降低 Gap 阈值
-            opportunity_sentiment_max=50,  # 提高情绪阈值
-            overheated_sentiment_min=80,
-        )
+    def test_custom_opportunity_threshold(self):
+        """降低正 α 阈值：默认 WAIT 的 gap=8 变 OPPORTUNITY"""
+        thresholds = GapThresholdConfig(opportunity_gap_min=5.0)
         calculator = GapCalculator(thresholds=thresholds)
+        assert calculator.determine_signal(gap=8) == AuditSignal.OPPORTUNITY
 
-        # 使用默认阈值会是 WAIT，但自定义阈值下是 OPPORTUNITY
-        signal = calculator.determine_signal(gap=8, sentiment_score=45)
-        assert signal == AuditSignal.OPPORTUNITY
-
-    def test_custom_overheated_threshold(self):
-        """测试自定义过热阈值"""
-        thresholds = GapThresholdConfig(
-            opportunity_gap_min=10.0,
-            opportunity_sentiment_max=40,
-            overheated_sentiment_min=70,  # 降低过热阈值
-        )
+    def test_custom_overheated_gap_threshold(self):
+        """降低负 α 阈值：默认 WAIT 的 gap=-8 变 OVERHEATED（阈值可不对称）"""
+        thresholds = GapThresholdConfig(overheated_gap_min=5.0)
         calculator = GapCalculator(thresholds=thresholds)
+        assert calculator.determine_signal(gap=-8) == AuditSignal.OVERHEATED
+        # 正向阈值不受影响
+        assert calculator.determine_signal(gap=8) == AuditSignal.WAIT
 
-        # 使用默认阈值会是 WAIT，但自定义阈值下是 OVERHEATED
-        signal = calculator.determine_signal(gap=5, sentiment_score=75)
-        assert signal == AuditSignal.OVERHEATED
+    def test_custom_sentiment_overheat_flag_threshold(self):
+        """overheated_sentiment_min 转任 flag 阈值后仍可自定义（显式设置带 deprecation 提示）"""
+        with pytest.warns(DeprecationWarning, match="overheated_sentiment_min"):
+            thresholds = GapThresholdConfig(overheated_sentiment_min=70)
+        calculator = GapCalculator(thresholds=thresholds)
+        assert calculator.is_sentiment_overheat(75) is True
+        assert calculator.is_sentiment_overheat(70) is False
 
 
 class TestComputeAuditResult:
@@ -198,15 +186,16 @@ class TestComputeAuditResult:
         # 验证 Gap 计算和信号判定
         assert result.gap == 15.0  # 20.0 - 5.0
         assert result.signal == AuditSignal.OPPORTUNITY
+        assert result.sentiment_overheat is False  # sentiment=35 未过热
 
     def test_compute_audit_result_overheated(self):
-        """测试生成过热信号的完整审计结果"""
+        """测试生成过热信号的完整审计结果（v2：负 α gap < -10 触发）"""
         calculator = GapCalculator()
 
         consensus = ConsensusResult(
             sentiment_score=85,
             sentiment_label="狂热",
-            implied_growth=30.0,
+            implied_growth=40.0,
             key_narrative="AI 芯片需求爆发",
             key_worry="估值过高",
             key_hope="AI 长期增长",
@@ -230,7 +219,45 @@ class TestComputeAuditResult:
         )
 
         assert result.signal == AuditSignal.OVERHEATED
-        assert result.gap == -5.0  # 25.0 - 30.0
+        assert result.gap == -15.0  # 25.0 - 40.0
+        assert result.sentiment_overheat is True  # 情绪过热单列 flag（不参与信号）
+
+    def test_compute_audit_result_canary_flip(self):
+        """金丝雀（端到端）：gap=+30 且 sentiment=85 → v2 必须 OPPORTUNITY + flag。
+
+        v1 旧门在此输入下输出 OVERHEATED（与 α 差同号矛盾）——若本用例失败，
+        说明信号门回退到了 v1 语义。
+        """
+        calculator = GapCalculator()
+
+        consensus = ConsensusResult(
+            sentiment_score=85,
+            sentiment_label="狂热",
+            implied_growth=10.0,
+            key_narrative="市场狂热但定价仍低于我方模型",
+            key_worry="情绪透支",
+            key_hope="产能落地",
+        )
+        thesis = ThesisProjectionResult(
+            thesis_aligned=True,
+            our_growth=40.0,
+            confidence="高",
+            reasoning="我方模型增长显著高于市场 implied",
+        )
+
+        result = calculator.compute_audit_result(
+            ticker="TEST.SH",
+            name="金丝雀",
+            price=10.0,
+            pe_ttm=20.0,
+            consensus=consensus,
+            thesis_projection=thesis,
+            audit_date=datetime(2026, 7, 8),
+        )
+
+        assert result.gap == 30.0
+        assert result.signal == AuditSignal.OPPORTUNITY  # v1 会错判 OVERHEATED
+        assert result.sentiment_overheat is True
 
     def test_compute_audit_result_wait(self):
         """测试生成观望信号的完整审计结果"""

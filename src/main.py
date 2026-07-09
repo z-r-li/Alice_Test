@@ -65,12 +65,18 @@ from .utils import setup_logger, AuditLogger, TextSanitizer
 # S7 决策日志：市场 → 对标基准 / 币种（按 ticker 后缀确定性派生，非编造）。
 _BENCHMARK_BY_MARKET = {"CN": "沪深300", "HK": "HSI", "US": "SPX"}
 _CURRENCY_BY_MARKET = {"CN": "CNY", "HK": "HKD", "US": "USD"}
-# RiskEngine.risk_adjusted_action（BUY/TRIM/WAIT/EXIT）→ 决策日志 action 全集
-# （BUY/ADD/HOLD/TRIM/SELL/WAIT）。EXIT 无对应枚举 → 映射到 SELL。
+# RiskEngine.risk_adjusted_action（BUY/TRIM/WAIT/EXIT/AVOID）→ 决策日志 action 全集
+# （BUY/ADD/HOLD/TRIM/SELL/WAIT/AVOID）。EXIT 无对应枚举 → 映射到 SELL。
+# AVOID = 信号语义 v2（D-20260705-1）：OVERHEATED（负 α）不进场，计入 actionable 口径。
 _RISK_ACTION_TO_DECISION = {
     "BUY": "BUY", "ADD": "ADD", "HOLD": "HOLD",
     "TRIM": "TRIM", "SELL": "SELL", "WAIT": "WAIT", "EXIT": "SELL",
+    "AVOID": "AVOID",
 }
+
+# 决策日志信号语义版本标记（D-20260705-1 落地，2026-07-08 起）：v2 = 纯 α 差双向信号门。
+# 用于切分 v1/v2 混口径样本；旧行 signal_semantics 为 NULL 视为 v1，append-only 不回写。
+_SIGNAL_SEMANTICS_VERSION = "v2"
 
 
 def _reconfigure_stdio() -> None:
@@ -408,15 +414,17 @@ class AliceTestPipeline:
             source_artifact=getattr(result, "artifact_dir", None),
             pipeline_commit=pipeline_commit,
             model_version=model_version,
+            signal_semantics=_SIGNAL_SEMANTICS_VERSION,
         )
 
     @staticmethod
     def _resolve_action(result: AuditResult) -> str:
-        """决策动作（占位）：降级 / 失败行绝不记 BUY；ok 行优先采用组合层风控裁定动作。
+        """决策动作（占位）：降级 / 失败行绝不记 BUY/AVOID；ok 行优先采用组合层风控裁定动作。
 
         - status != "ok"（data_error / pipeline_error / data_partial / llm_error）→ WAIT：
           与 _apply_portfolio_risk 中性化一致（这些行已被置零权重、不给买入），否则决策日志
-          会与审计结果自相矛盾（给一个流水线已判定「不可操作」的行记 BUY）。
+          会与审计结果自相矛盾（给一个流水线已判定「不可操作」的行记 BUY）。非 ok 行的
+          OVERHEATED 同理不记 AVOID——预测子已置 NULL，不进 actionable/IC 样本。
         - ok 行：用 risk_adjusted_action（组合层权威写者，已含预算 / 簇约束，可能把 OPPORTUNITY
           压成 WAIT/TRIM）；映射进决策动作全集；风控关闭（None）时回退信号占位映射。
         真正人拍板的 action 待 S7 人审入口接入后覆盖。
@@ -429,12 +437,14 @@ class AliceTestPipeline:
         # 风控关闭（risk_adjusted_action 为 None）→ 占位映射：BUY 须 OPPORTUNITY **且
         # thesis_aligned**（镜像 RiskEngine._eligible——系统里唯一校验信念对齐之处）；否则一个
         # 被流水线标为「未对齐」的 thesis 会在风控关闭时被记成 actionable BUY。
-        return (
-            "BUY"
-            if (result.signal == AuditSignal.OPPORTUNITY
-                and getattr(result, "thesis_aligned", False))
-            else "WAIT"
-        )
+        # v2：OVERHEATED（负 α）→ AVOID（不进场、计入 actionable，D-20260705-1），
+        # 与 RiskEngine._baseline_action 同口径，保证风控开/关两条路径动作一致。
+        if (result.signal == AuditSignal.OPPORTUNITY
+                and getattr(result, "thesis_aligned", False)):
+            return "BUY"
+        if result.signal == AuditSignal.OVERHEATED:
+            return "AVOID"
+        return "WAIT"
 
     @staticmethod
     def _market_code(ticker: str) -> str:

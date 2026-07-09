@@ -3,7 +3,13 @@ Gap 计算器与审计信号判定
 
 职责：
 - 计算认知差 Gap = Our_Growth - Market_Implied_Growth
-- 根据 Gap 和情绪评分生成审计信号
+- 根据 Gap（α 差）双向生成审计信号（信号语义 v2）
+- sentiment 不参与信号判定，仅产 sentiment_overheat 过热 flag 供 S6 风控 overlay 登记
+
+信号语义 v2（D-20260627-P0-1 / D-20260627-CDX-1 / D-20260705-1）：
+- OPPORTUNITY = 正 α（gap > opportunity_gap_min）：市场定价低于我方 thesis 模型
+- OVERHEATED  = 负 α（gap < -overheated_gap_min）：市场 implied 定价高于我方 thesis 模型
+- v1「gap+sentiment 双条件」判定式已废止（自相矛盾，见 D-20260627-P0-1）
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -53,6 +59,11 @@ class AuditResult:
     gap: float  # 认知差 (our - implied)
     signal: AuditSignal  # OPPORTUNITY / OVERHEATED / WAIT
 
+    # 信号语义 v2：情绪过热 flag（sentiment_score > overheated_sentiment_min）。
+    # 只登记、不参与信号判定，由 S6 追加 "SENTIMENT_OVERHEAT" 进 correlation_flags；
+    # 权重折减系数未拍，本期不做折减（向后兼容默认 False）。
+    sentiment_overheat: bool = False
+
     # 状态
     # PR-A fail-closed：扩充 data_partial（缺有效文本）/ pipeline_error（流水线整体回退）；
     # 非 "ok" 即「不进正常 alpha/IC 样本」。向后兼容（旧产物默认 "ok"）。
@@ -72,7 +83,7 @@ class AuditResult:
     correlation_flags: list[str] | None = None  # 同簇 / 高相关的其他 ticker
     structural_exit: list[str] | None = None  # 结构性退出触发（来自 S1 kill_criteria）
     quant_exit_target: float | None = None  # 量化退出目标价 / 估值（D3 待定，v0.1 留空）
-    risk_adjusted_action: str | None = None  # 叠加风控后动作 BUY / TRIM / WAIT / EXIT
+    risk_adjusted_action: str | None = None  # 叠加风控后动作 BUY / TRIM / WAIT / EXIT / AVOID
     risk_contribution: float | None = None  # 对组合总风险的贡献（v0.2 接相关阵后算）
 
 
@@ -105,36 +116,40 @@ class GapCalculator:
         """
         return our_growth - implied_growth
 
-    def determine_signal(
-        self,
-        gap: float,
-        sentiment_score: int,
-    ) -> AuditSignal:
+    def determine_signal(self, gap: float) -> AuditSignal:
         """
-        根据 Gap 和情绪评分判定审计信号
+        根据 Gap（α 差）判定审计信号（信号语义 v2，纯 α 差双向触发）
 
-        判定逻辑（来自 PRD 5.5）：
-        - Gap > 10 且 Sentiment < 40 → OPPORTUNITY
-        - Sentiment > 80 → OVERHEATED
-        - 其他 → WAIT
+        判定逻辑（D-20260627-P0-1 / D-20260705-1）：
+        - gap > opportunity_gap_min → OPPORTUNITY（正 α）
+        - gap < -overheated_gap_min → OVERHEATED（负 α；动作空间 = 不进场/减仓/清仓，
+          不做空——SHORT 为远期规划，2026-07-08 澄清，届时另拍）
+        - 其他 → WAIT；gap 为 NaN（fail-closed 行）时所有比较为 False → WAIT
+
+        sentiment 已摘出信号门，不参与判定（v1 判定式废止）；情绪过热单列为
+        sentiment_overheat flag（见 is_sentiment_overheat）。
 
         Args:
-            gap: 认知差
-            sentiment_score: 情绪评分
+            gap: 认知差（our_growth − implied_growth）
 
         Returns:
             AuditSignal: 审计信号
         """
-        if (
-            gap > self._thresholds.opportunity_gap_min
-            and sentiment_score < self._thresholds.opportunity_sentiment_max
-        ):
+        if gap > self._thresholds.opportunity_gap_min:
             return AuditSignal.OPPORTUNITY
 
-        if sentiment_score > self._thresholds.overheated_sentiment_min:
+        if gap < -self._thresholds.overheated_gap_min:
             return AuditSignal.OVERHEATED
 
         return AuditSignal.WAIT
+
+    def is_sentiment_overheat(self, sentiment_score: int) -> bool:
+        """情绪过热 flag 判定（sentiment_score > overheated_sentiment_min，阈值沿用 80）。
+
+        与信号判定解耦：只登记 flag 给 S6 风控 overlay（CDX-1「sentiment 不单独产 α、
+        不纯做 veto」），本期不做权重折减（折减系数未拍）。
+        """
+        return sentiment_score > self._thresholds.overheated_sentiment_min
 
     def compute_audit_result(
         self,
@@ -166,10 +181,7 @@ class GapCalculator:
             implied_growth=consensus.implied_growth,
         )
 
-        signal = self.determine_signal(
-            gap=gap,
-            sentiment_score=consensus.sentiment_score,
-        )
+        signal = self.determine_signal(gap=gap)
 
         return AuditResult(
             date=audit_date or datetime.now(),
@@ -189,4 +201,5 @@ class GapCalculator:
             reasoning=thesis_projection.reasoning,
             gap=gap,
             signal=signal,
+            sentiment_overheat=self.is_sentiment_overheat(consensus.sentiment_score),
         )

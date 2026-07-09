@@ -34,6 +34,16 @@ def _entry(**kw):
     return DecisionEntry(**base)
 
 
+# 信号语义 v2 前的 decision_log 列全集（迁移测试构造 legacy 库用；无 signal_semantics）
+_DECISION_COLS_LEGACY = [
+    "decision_id", "created_at", "asof_date", "ticker", "action", "market",
+    "benchmark", "currency", "signal", "suggested_weight", "our_growth",
+    "implied_growth", "gap", "our_alpha", "thesis_summary", "catalyst",
+    "horizon_days", "confidence_pct", "confidence_basis", "falsification",
+    "ic_outcome_def", "source_artifact", "pipeline_commit", "model_version", "notes",
+]
+
+
 class TestDecisionLogStore:
     """决策日志 v0.1（原型 10 条单测逐字迁入，import 改指仓库内 store）。"""
 
@@ -128,6 +138,85 @@ class TestDecisionLogStore:
         with SQLiteStore() as s:
             with pytest.raises(ValueError):
                 s.save_decision(_entry(action="YOLO"))
+
+    # ---- 信号语义 v2（D-20260705-1）：AVOID + signal_semantics ----
+
+    def test_avoid_is_valid_action_and_roundtrips(self):
+        """AVOID（OVERHEATED 负 α 不进场）是合法动作；signal_semantics='v2' 落库读回。"""
+        with SQLiteStore() as s:
+            s.save_decision(_entry(action="AVOID", signal="OVERHEATED",
+                                   gap=-15.0, signal_semantics="v2"))
+            r = s.get_decision("601985-2026-06-29")
+            assert r["action"] == "AVOID"
+            assert r["signal_semantics"] == "v2"
+
+    def test_signal_semantics_defaults_null(self):
+        """不传 signal_semantics → NULL（旧行/回填行视为 v1，不编造版本标记）。"""
+        with SQLiteStore() as s:
+            s.save_decision(_entry())
+            assert s.get_decision("601985-2026-06-29")["signal_semantics"] is None
+
+    def test_short_is_not_a_valid_action(self):
+        """SHORT 零代码路径（2026-07-08 澄清：做空=远期规划，届时另拍）——落库即拒。"""
+        with SQLiteStore() as s:
+            with pytest.raises(ValueError):
+                s.save_decision(_entry(action="SHORT"))
+
+    def test_avoid_counts_as_actionable_in_hit_rate(self):
+        """actionable 口径（D-20260705-1）：hit_rate 默认只剔 WAIT，AVOID 计入。
+
+        hit(AVOID) 约定 = excess_return < 0（市场跑输基准 = 负 α 判断命中），
+        由 outcome 回填方按约定给 hit；此处按约定构造。
+        """
+        with SQLiteStore() as s:
+            s.save_decision(_entry(decision_id="w", action="WAIT"))
+            s.save_decision(_entry(decision_id="b", action="BUY"))
+            s.save_decision(_entry(decision_id="av", action="AVOID", gap=-15.0))
+            # AVOID 命中：市场此后跑输基准（excess_return<0 → hit=1）
+            for did, hit, exc in [("w", 0, 0.01), ("b", 1, 0.05), ("av", 1, -0.03)]:
+                s.record_outcome(OutcomeEntry(decision_id=did, is_final=1,
+                                              hit=hit, excess_return=exc))
+            # WAIT 被剔除；BUY + AVOID 都进 actionable → 2/2
+            assert s.hit_rate() == pytest.approx(1.0)
+            assert s.hit_rate(include_wait=True) == pytest.approx(2 / 3)
+
+    def test_avoid_rows_feed_ic_symmetrically(self):
+        """OVERHEATED/AVOID 行带非 NULL gap 与 outcome 后自然进 IC 样本（机械口径不变）。"""
+        with SQLiteStore() as s:
+            data = [("av", -15.0, -0.05, "AVOID"), ("w", 2.0, 0.01, "WAIT"),
+                    ("b", 12.0, 0.06, "BUY")]
+            for did, gap, exc, action in data:
+                s.save_decision(_entry(decision_id=did, gap=gap, action=action,
+                                       signal_semantics="v2"))
+                s.record_outcome(OutcomeEntry(decision_id=did, is_final=1,
+                                              excess_return=exc))
+            # 负 α 行与正 α 行 rank 同向对齐 → IC=+1（双向信号天然对称）
+            assert s.information_coefficient("gap") == pytest.approx(1.0)
+
+    def test_migrates_legacy_decision_log_without_signal_semantics(self, tmp_path):
+        """v2 前建的 DB（decision_log 无 signal_semantics 列）：开库自动补可空列，
+        旧行保持 NULL（= v1 口径，不回填不回写），新行可写 'v2'。"""
+        import sqlite3
+        db = str(tmp_path / "legacy_v1.db")
+        conn = sqlite3.connect(db)
+        # 用 v2 前的完整 decision_log DDL（无 signal_semantics）建库并插一行 v1 决策
+        cols = [c for c in _DECISION_COLS_LEGACY]
+        conn.execute(
+            f"CREATE TABLE decision_log ({', '.join(c + ' TEXT' for c in cols)}, "
+            "PRIMARY KEY (decision_id))"
+        )
+        conn.execute(
+            "INSERT INTO decision_log (decision_id, created_at, asof_date, ticker, action) "
+            "VALUES ('old','2026-07-01T10:00:00Z','2026-07-01','601985','BUY')"
+        )
+        conn.commit()
+        conn.close()
+        with SQLiteStore(db) as s:
+            r = s.get_decision("old")
+            assert r["signal_semantics"] is None          # 旧行 NULL = v1，不回写
+            s.save_decision(_entry(decision_id="new", asof_date="2026-07-08",
+                                   action="AVOID", signal_semantics="v2"))
+            assert s.get_decision("new")["signal_semantics"] == "v2"
 
     def test_upsert_preserves_original_created_at(self):
         # 同 decision_id 重跑：created_at 是 point-in-time 锚，必须保留首次入账时刻，
@@ -444,6 +533,29 @@ class TestResolveActionThesisGate:
         assert AliceTestPipeline._resolve_action(
             self._result(status="data_error")) == "WAIT"
 
+    # ---- 信号语义 v2：OVERHEATED → AVOID（风控开/关两条路径同口径） ----
+
+    def test_fallback_overheated_maps_to_avoid(self):
+        from src.main import AliceTestPipeline
+        # 风控关闭（risk_adjusted_action=None）→ 回退门：OVERHEATED → AVOID
+        assert AliceTestPipeline._resolve_action(self._result(
+            signal=AuditSignal.OVERHEATED, gap=-15.0, thesis_aligned=False,
+        )) == "AVOID"
+
+    def test_risk_avoid_maps_through(self):
+        from src.main import AliceTestPipeline
+        # 风控启用：组合层裁定 AVOID → 决策日志 AVOID（映射表含 AVOID）
+        assert AliceTestPipeline._resolve_action(self._result(
+            signal=AuditSignal.OVERHEATED, gap=-15.0, risk_adjusted_action="AVOID",
+        )) == "AVOID"
+
+    def test_non_ok_overheated_still_wait(self):
+        from src.main import AliceTestPipeline
+        # 降级行（非 ok）即便 OVERHEATED 也不记 AVOID：预测子已置 NULL，不进 actionable/IC
+        assert AliceTestPipeline._resolve_action(self._result(
+            signal=AuditSignal.OVERHEATED, gap=-15.0, status="data_error",
+        )) == "WAIT"
+
 
 # ---- 端到端：backend=sqlite mock 流水线（待办 5） ---------------------------
 class _FakeQuotesProvider:
@@ -543,6 +655,47 @@ class TestDecisionLogPipeline:
             rows = store.get_decisions()
         assert len(rows) == 1
         assert rows[0]["action"] == "WAIT"
+
+    def test_overheated_target_logs_avoid_row(self, monkeypatch, tmp_path):
+        # 信号语义 v2：gap=8-30=-22 < -10 → OVERHEATED → AVOID（weight=0），
+        # 决策行带 signal_semantics='v2'（v1/v2 混口径样本切分锚）。
+        pipeline, _config, db_path = _make_sqlite_pipeline(
+            monkeypatch, tmp_path, our_growth=8.0, implied_growth=30.0
+        )
+        results = pipeline.run()
+        assert results[0].signal is AuditSignal.OVERHEATED
+        assert results[0].suggested_weight == 0.0
+        assert results[0].risk_adjusted_action == "AVOID"
+        with SQLiteStore(str(db_path)) as store:
+            rows = store.get_decisions()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["action"] == "AVOID"
+        assert row["signal"] == "OVERHEATED"
+        assert row["signal_semantics"] == "v2"
+        assert row["gap"] == pytest.approx(8.0 - 30.0)   # 非 NULL → 进 IC 样本
+
+    def test_overheated_avoid_when_risk_disabled(self, monkeypatch, tmp_path):
+        # 风控关闭路径（回退门）同口径：OVERHEATED → AVOID。
+        pipeline, _config, db_path = _make_sqlite_pipeline(
+            monkeypatch, tmp_path, our_growth=8.0, implied_growth=30.0,
+            risk_enabled=False,
+        )
+        results = pipeline.run()
+        assert results[0].signal is AuditSignal.OVERHEATED
+        with SQLiteStore(str(db_path)) as store:
+            rows = store.get_decisions()
+        assert rows[0]["action"] == "AVOID"
+
+    def test_decision_rows_stamped_v2_semantics(self, monkeypatch, tmp_path):
+        # 每条流水线决策行（含 WAIT）都应带 signal_semantics='v2'。
+        pipeline, _config, db_path = _make_sqlite_pipeline(
+            monkeypatch, tmp_path, our_growth=18.0, implied_growth=8.0  # WAIT
+        )
+        pipeline.run()
+        with SQLiteStore(str(db_path)) as store:
+            rows = store.get_decisions()
+        assert rows[0]["signal_semantics"] == "v2"
 
     def test_fail_closed_row_logged_with_null_growth(self, monkeypatch, tmp_path):
         # 无文本 → fail-closed WAIT 行：our_growth/implied/gap 为 NaN → 决策日志存 NULL（不编造）。

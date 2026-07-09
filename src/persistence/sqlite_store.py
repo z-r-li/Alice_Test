@@ -54,7 +54,10 @@ CONFIDENCE_BASES = ("hit_prob", "outperform_prob", "interval_conf")
 IC_OUTCOME_DEFS = ("price_excess_return", "revenue_profit_growth", "event_realized")
 DEFAULT_CONFIDENCE_BASIS = "hit_prob"           # 命中概率 (待团队拍 M4)
 DEFAULT_IC_OUTCOME_DEF = "price_excess_return"  # 股价超额 (待团队拍 M4)
-VALID_ACTIONS = ("BUY", "ADD", "HOLD", "TRIM", "SELL", "WAIT")
+# AVOID = 信号语义 v2（D-20260705-1）：OVERHEATED（负 α）→ 不进场，**计入 actionable**
+# （hit_rate 默认只剔 WAIT）。hit(AVOID) 约定 = excess_return < 0（市场跑输基准 = 负 α
+# 判断命中）——outcome 由回填方按此约定给 hit，store 不改机械口径。
+VALID_ACTIONS = ("BUY", "ADD", "HOLD", "TRIM", "SELL", "WAIT", "AVOID")
 
 
 @dataclass
@@ -67,6 +70,9 @@ class DecisionEntry:
     benchmark: Optional[str] = None    # 沪深300 / HSI / SPX ...
     currency: Optional[str] = None
     signal: Optional[str] = None       # engine OPPORTUNITY/OVERHEATED/WAIT
+    # 信号语义版本（'v2' = α 差双向信号门，2026-07-08 D-20260705-1 落地起）。
+    # 旧行 NULL 视为 v1；用于切分混口径样本，append-only 不回写既有行。
+    signal_semantics: Optional[str] = None
     suggested_weight: Optional[float] = None  # RiskEngine
     our_growth: Optional[float] = None
     implied_growth: Optional[float] = None
@@ -169,6 +175,7 @@ class SQLiteStore:
                 benchmark        TEXT,
                 currency         TEXT,
                 signal           TEXT,
+                signal_semantics TEXT,
                 suggested_weight REAL,
                 our_growth       REAL,
                 implied_growth   REAL,
@@ -233,6 +240,13 @@ class SQLiteStore:
             self.conn.execute(
                 "UPDATE decision_outcome SET created_at = observed_at WHERE created_at IS NULL"
             )
+
+        # 信号语义 v2（D-20260705-1）：decision_log 增可空列 signal_semantics。
+        # 旧库（v2 前建）缺此列 → 补可空列即可；既有行保持 NULL（= v1 口径），
+        # **不回填不回写**（append-only：v1/v2 混口径样本靠此列或生效日期切分）。
+        dcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(decision_log)")}
+        if "signal_semantics" not in dcols:
+            self.conn.execute("ALTER TABLE decision_log ADD COLUMN signal_semantics TEXT")
 
     # ---- validation (fail-closed discipline) -------------------------------
     @staticmethod
@@ -386,6 +400,11 @@ class SQLiteStore:
                  asof: Optional[str] = None) -> Optional[float]:
         """终态命中率；`since`/`until` 按决策的 ``asof_date`` 闭区间限定验证窗口
         （滚动 / 回测报告需要：否则窗口会被窗外的旧/新决策污染）。
+
+        actionable 口径（信号语义 v2，D-20260705-1）：默认只剔 ``WAIT``——``AVOID``
+        （OVERHEATED 负 α 不进场）**计入 actionable**。hit(AVOID) 约定 =
+        ``excess_return < 0``（市场跑输基准 = 负 α 判断命中），由 outcome 回填方
+        按此约定给 ``hit``；本方法机械口径不变。
 
         decision_outcome 是 append-only，同一 decision 可有多条 is_final=1（修正 / backfill）。
         故先按 ``MAX(outcome_id)``（自增、单调、无并列）取每 decision 的**最新 final**，再对那
