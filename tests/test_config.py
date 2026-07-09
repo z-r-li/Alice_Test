@@ -443,15 +443,22 @@ class TestGapThresholdConfig:
             warnings.simplefilter("error", DeprecationWarning)
             GapThresholdConfig(opportunity_gap_min=12.0, overheated_gap_min=9.0)
 
-    def test_threshold_validation_error(self):
-        """测试阈值验证错误（opportunity_sentiment_max >= overheated_sentiment_min 沿用）"""
-        with pytest.raises(ValueError) as exc_info, pytest.warns(DeprecationWarning):
+    def test_v1_cross_field_constraint_removed(self):
+        """v1 交叉约束（opportunity_sentiment_max < overheated_sentiment_min）随 v2 废止：
+
+        死字段默认 40 不得给在役 flag 阈值强加隐藏下限——overheated_sentiment_min ≤ 40
+        的合法 v2 配置必须可加载（config 注释明示可覆盖该字段作 flag 阈值）。
+        """
+        with pytest.warns(DeprecationWarning, match="overheated_sentiment_min"):
+            thresholds = GapThresholdConfig(overheated_sentiment_min=35)
+        assert thresholds.overheated_sentiment_min == 35
+
+        # 两个 deprecated 字段即便显式给出矛盾组合也只警告、不拒载（均已无信号语义）
+        with pytest.warns(DeprecationWarning):
             GapThresholdConfig(
-                opportunity_sentiment_max=80,  # 等于过热阈值
+                opportunity_sentiment_max=80,
                 overheated_sentiment_min=80,
             )
-
-        assert "应小于" in str(exc_info.value)
 
     def test_negative_overheated_gap_min_rejected(self):
         """overheated_gap_min 是幅度值（触发条件 gap < -此值），负数拒绝"""

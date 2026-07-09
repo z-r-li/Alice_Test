@@ -167,24 +167,29 @@ class TestDecisionLogStore:
 
         hit(AVOID) 约定 = excess_return < 0（市场跑输基准 = 负 α 判断命中），
         由 outcome 回填方按约定给 hit；此处按约定构造。
+        鉴别力设计：AVOID 未命中（hit=0）而 BUY 命中——若 AVOID 被错误剔出
+        actionable（回退成「视同 WAIT」），hit_rate 会从 0.5 变 1.0，断言必炸。
         """
         with SQLiteStore() as s:
             s.save_decision(_entry(decision_id="w", action="WAIT"))
             s.save_decision(_entry(decision_id="b", action="BUY"))
             s.save_decision(_entry(decision_id="av", action="AVOID", gap=-15.0))
-            # AVOID 命中：市场此后跑输基准（excess_return<0 → hit=1）
-            for did, hit, exc in [("w", 0, 0.01), ("b", 1, 0.05), ("av", 1, -0.03)]:
+            # AVOID 未命中：市场此后反而跑赢基准（excess_return>0 → 按约定 hit=0）
+            for did, hit, exc in [("w", 0, 0.01), ("b", 1, 0.05), ("av", 0, 0.02)]:
                 s.record_outcome(OutcomeEntry(decision_id=did, is_final=1,
                                               hit=hit, excess_return=exc))
-            # WAIT 被剔除；BUY + AVOID 都进 actionable → 2/2
-            assert s.hit_rate() == pytest.approx(1.0)
-            assert s.hit_rate(include_wait=True) == pytest.approx(2 / 3)
+            # AVOID 计入 actionable：{BUY:1, AVOID:0} → 0.5（若被剔则 1/1=1.0，可区分）
+            assert s.hit_rate() == pytest.approx(0.5)
+            assert s.hit_rate(include_wait=True) == pytest.approx(1 / 3)
 
     def test_avoid_rows_feed_ic_symmetrically(self):
-        """OVERHEATED/AVOID 行带非 NULL gap 与 outcome 后自然进 IC 样本（机械口径不变）。"""
+        """OVERHEATED/AVOID 行带非 NULL gap 与 outcome 后自然进 IC 样本（机械口径不变）。
+
+        鉴别力设计：样本只有 AVOID + BUY 两行——若 AVOID 行被错误剔出 IC 样本，
+        剩 1 点 < 2 → information_coefficient 返回 None，断言必炸。
+        """
         with SQLiteStore() as s:
-            data = [("av", -15.0, -0.05, "AVOID"), ("w", 2.0, 0.01, "WAIT"),
-                    ("b", 12.0, 0.06, "BUY")]
+            data = [("av", -15.0, -0.05, "AVOID"), ("b", 12.0, 0.06, "BUY")]
             for did, gap, exc, action in data:
                 s.save_decision(_entry(decision_id=did, gap=gap, action=action,
                                        signal_semantics="v2"))
@@ -584,7 +589,8 @@ class _FailingQuotesProvider:
 
 
 def _make_sqlite_pipeline(monkeypatch, tmp_path, *, our_growth=25.0,
-                          implied_growth=8.0, targets=None, risk_enabled=True):
+                          implied_growth=8.0, sentiment_score=35,
+                          targets=None, risk_enabled=True):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     from src.main import AliceTestPipeline
 
@@ -593,7 +599,8 @@ def _make_sqlite_pipeline(monkeypatch, tmp_path, *, our_growth=25.0,
         AliceTestPipeline,
         "_create_llm_client",
         lambda self: FakeLLMClient(
-            our_growth=our_growth, implied_growth=implied_growth, n_links=3,
+            our_growth=our_growth, implied_growth=implied_growth,
+            sentiment_score=sentiment_score, n_links=3,
         ),
     )
     db_path = tmp_path / "alice.db"
@@ -686,6 +693,22 @@ class TestDecisionLogPipeline:
         with SQLiteStore(str(db_path)) as store:
             rows = store.get_decisions()
         assert rows[0]["action"] == "AVOID"
+
+    def test_sentiment_overheat_flag_end_to_end(self, monkeypatch, tmp_path):
+        # 端到端：sentiment=85>80 → AuditResult.sentiment_overheat=True →
+        # S6 在 correlation_flags 登记 SENTIMENT_OVERHEAT；信号仍由 gap 单独决定
+        # （gap=25-8=17>10 → OPPORTUNITY，金丝雀语义在流水线层同样成立）。
+        pipeline, _config, _db_path = _make_sqlite_pipeline(
+            monkeypatch, tmp_path, our_growth=25.0, implied_growth=8.0,
+            sentiment_score=85,
+        )
+        results = pipeline.run()
+        r = results[0]
+        assert r.signal is AuditSignal.OPPORTUNITY   # 高情绪不再翻转信号
+        assert r.sentiment_overheat is True
+        assert "SENTIMENT_OVERHEAT" in (r.correlation_flags or [])
+        # 只登记不折减：权重仍是等权软参考
+        assert r.suggested_weight == pytest.approx(0.05)
 
     def test_decision_rows_stamped_v2_semantics(self, monkeypatch, tmp_path):
         # 每条流水线决策行（含 WAIT）都应带 signal_semantics='v2'。

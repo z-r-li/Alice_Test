@@ -150,7 +150,7 @@ class TestMainPipelineWiring:
         assert result.artifact_dir is None
 
     def test_risk_engine_backfills_opportunity_fields(self, monkeypatch, tmp_path):
-        # S6 接线：OPPORTUNITY 标的（gap=25-8=17>10、sentiment=35<40、thesis_aligned）
+        # S6 接线：OPPORTUNITY 标的（v2：gap=25-8=17>10 即触发，sentiment 不参与；thesis_aligned）
         # 经端到端 mock 流水线后，应回填 suggested_weight + structural_exit。
         pipeline, config = _make_pipeline(
             monkeypatch, tmp_path, our_growth=25.0, implied_growth=8.0

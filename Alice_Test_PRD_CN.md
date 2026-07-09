@@ -437,10 +437,10 @@ gap_thresholds:
 | `status` | STRING | ok / data_error / llm_error / data_partial / pipeline_error / unknown |
 | `needs_due_diligence` | BOOL | 是否需人工尽调；旧 CSV 缺列为未知 |
 | `suggested_weight` | FLOAT | S6 建议仓位 |
-| `correlation_flags` | JSON ARRAY | 同簇 / 高相关 ticker 列表 |
+| `correlation_flags` | JSON ARRAY | 同簇 / 高相关 ticker，另可含哨兵串 `SENTIMENT_OVERHEAT`（v2 情绪过热 flag，非 ticker） |
 | `structural_exit` | JSON ARRAY | 结构性退出条件 |
 | `quant_exit_target` | FLOAT | 量化退出目标（未定则为空） |
-| `risk_adjusted_action` | STRING | BUY / TRIM / WAIT / EXIT |
+| `risk_adjusted_action` | STRING | BUY / TRIM / WAIT / EXIT / AVOID（v2：OVERHEATED 负 α 不进场） |
 | `risk_contribution` | FLOAT | 组合风险贡献 |
 
 ### 6.2 输出示例

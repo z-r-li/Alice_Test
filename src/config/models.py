@@ -643,12 +643,14 @@ class GapThresholdConfig(ConfigModel):
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> "GapThresholdConfig":
-        """验证阈值逻辑一致性（沿用旧约束，保证存量配置行为不变）"""
-        if self.opportunity_sentiment_max >= self.overheated_sentiment_min:
-            raise ValueError(
-                f"opportunity_sentiment_max ({self.opportunity_sentiment_max}) "
-                f"应小于 overheated_sentiment_min ({self.overheated_sentiment_min})"
-            )
+        """验证阈值逻辑一致性。
+
+        v1 的 ``opportunity_sentiment_max < overheated_sentiment_min`` 交叉约束**随
+        v2 一并废止**：opportunity_sentiment_max 已不参与任何判定，若保留约束，其
+        默认值 40 会给在役的 flag 阈值强加隐藏下限（如 overheated_sentiment_min=35
+        的合法 v2 配置加载即炸，报错还引用用户未设置的废弃字段）。移除只放宽校验，
+        对既有可加载配置零影响。
+        """
         if self.overheated_gap_min < 0:
             raise ValueError(
                 f"overheated_gap_min ({self.overheated_gap_min}) 须为非负幅度值"

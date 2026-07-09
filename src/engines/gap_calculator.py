@@ -80,7 +80,7 @@ class AuditResult:
 
     # S6: 组合层风控回填字段（RiskEngine；向后兼容扩展，默认 None）
     suggested_weight: float | None = None  # 建议仓位（~ref_weight 软参考、非硬顶）
-    correlation_flags: list[str] | None = None  # 同簇 / 高相关的其他 ticker
+    correlation_flags: list[str] | None = None  # 同簇/高相关 ticker + SENTIMENT_OVERHEAT 哨兵（非 ticker）
     structural_exit: list[str] | None = None  # 结构性退出触发（来自 S1 kill_criteria）
     quant_exit_target: float | None = None  # 量化退出目标价 / 估值（D3 待定，v0.1 留空）
     risk_adjusted_action: str | None = None  # 叠加风控后动作 BUY / TRIM / WAIT / EXIT / AVOID
