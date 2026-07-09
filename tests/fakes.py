@@ -32,6 +32,7 @@ class FakeLLMClient:
         include_due_diligence: bool = True,
         our_growth: float = 18.0,
         implied_growth: float = 8.0,
+        sentiment_score: int = 35,
         fail_stage: str | None = None,
         quant_irrelevant: bool = False,
         quant_out_of_scope: bool = False,
@@ -42,6 +43,7 @@ class FakeLLMClient:
         self.include_due_diligence = include_due_diligence
         self.our_growth = our_growth
         self.implied_growth = implied_growth
+        self.sentiment_score = sentiment_score
         self.fail_stage = fail_stage
         self.quant_irrelevant = quant_irrelevant  # 模拟「指标与条件无关」的 LLM 判断
         # 模拟 S3 把越界 proxy（引擎算不出）误标 quantitative，用于测代码侧兜底降级。
@@ -73,8 +75,8 @@ class FakeLLMClient:
     ) -> ConsensusResult:
         self._mark("get_consensus")
         return ConsensusResult(
-            sentiment_score=35,
-            sentiment_label="悲观",
+            sentiment_score=self.sentiment_score,
+            sentiment_label="悲观" if self.sentiment_score < 60 else "狂热",
             implied_growth=self.implied_growth,
             key_narrative="市场担忧短期增长放缓",
             key_worry="成本压力",

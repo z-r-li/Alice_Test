@@ -42,11 +42,10 @@ def sample_target_config() -> TargetConfig:
 
 @pytest.fixture
 def sample_gap_thresholds() -> GapThresholdConfig:
-    """示例 Gap 阈值配置（默认值）"""
+    """示例 Gap 阈值配置（信号语义 v2 默认值）"""
     return GapThresholdConfig(
         opportunity_gap_min=10.0,
-        opportunity_sentiment_max=40,
-        overheated_sentiment_min=80,
+        overheated_gap_min=10.0,
     )
 
 
@@ -84,8 +83,7 @@ def sample_config_dict() -> dict:
         ],
         "gap_thresholds": {
             "opportunity_gap_min": 10.0,
-            "opportunity_sentiment_max": 40,
-            "overheated_sentiment_min": 80,
+            "overheated_gap_min": 10.0,
         },
     }
 
@@ -177,7 +175,7 @@ def sample_audit_result(
 
 @pytest.fixture
 def sample_audit_result_overheated() -> AuditResult:
-    """示例过热信号审计结果"""
+    """示例过热信号审计结果（v2：负 α gap < -10 触发，情绪过热单列 flag）"""
     return AuditResult(
         date=datetime(2024, 1, 16),
         ticker="NVDA",
@@ -186,7 +184,7 @@ def sample_audit_result_overheated() -> AuditResult:
         pe_ttm=65.0,
         sentiment_score=85,
         sentiment_label="狂热",
-        implied_growth=30.0,
+        implied_growth=40.0,
         key_narrative="AI 芯片需求爆发",
         key_worry="估值过高",
         key_hope="AI 长期增长",
@@ -194,8 +192,9 @@ def sample_audit_result_overheated() -> AuditResult:
         our_growth=25.0,
         confidence="中",
         reasoning="AI 芯片领导者但估值已反映预期",
-        gap=-5.0,
+        gap=-15.0,
         signal=AuditSignal.OVERHEATED,
+        sentiment_overheat=True,
     )
 
 
@@ -264,8 +263,7 @@ targets:
 
 gap_thresholds:
   opportunity_gap_min: 10.0
-  opportunity_sentiment_max: 40
-  overheated_sentiment_min: 80
+  overheated_gap_min: 10.0
 """
 
 

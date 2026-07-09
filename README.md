@@ -207,13 +207,15 @@ python src/main.py --verbose
 | `key_worry` | 主要担忧 |
 | `key_hope` | 主要期待 |
 
-**信号解读：**
+**信号解读（信号语义 v2，D-20260705-1）：**
 
-| 信号 | 条件 | 含义 |
+| 信号 | 条件（默认阈值，`gap_thresholds` 可配） | 含义 |
 |------|------|------|
-| `OPPORTUNITY` | gap ≥ 5% | 市场低估，可能存在买入机会 |
-| `OVERHEATED` | gap ≤ -5% | 市场高估，需谨慎 |
-| `WAIT` | -5% < gap < 5% | 定价合理，继续观察 |
+| `OPPORTUNITY` | gap > 10 | 正 α：市场定价低于我方模型，可能存在买入机会 |
+| `OVERHEATED` | gap < -10 | 负 α：市场 implied 定价高于我方模型 → 动作 `AVOID`（不进场；不做空） |
+| `WAIT` | -10 ≤ gap ≤ 10（含 gap=NaN 的 fail-closed 行） | 定价合理或数据不足，继续观察 |
+
+sentiment 不参与信号判定；`sentiment_score > 80` 只产 `sentiment_overheat` 过热 flag（S6 以 `SENTIMENT_OVERHEAT` 登记进 `correlation_flags`）。
 
 ---
 

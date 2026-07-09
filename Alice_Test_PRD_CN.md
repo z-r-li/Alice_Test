@@ -272,17 +272,24 @@ temperature: 0  # 关键：非 thinking 打分路径必须为 0（非 0 直接�
 gap = our_growth - implied_growth_rate
 ```
 
-#### 4.4.2 信号逻辑
+#### 4.4.2 信号逻辑（v2：纯 α 差双向触发）
+
+> ⚠ v1 判定式（`gap > 10 and sentiment < 40 → OPPORTUNITY；sentiment > 80 → OVERHEATED`）
+> **已废止**——自相矛盾（D-20260627-P0-1），见 **D-20260705-1**：OVERHEATED = 相对我方
+> thesis 模型的负 α，计入 actionable/IC。2026-07-08 落地。
 
 ```python
-def generate_signal(gap: float, sentiment: int) -> str:
-    if gap > 10 and sentiment < 40:
-        return "OPPORTUNITY"  # 机会
-    elif sentiment > 80:
-        return "OVERHEATED"   # 过热
+def generate_signal(gap: float) -> str:
+    if gap > 10:              # opportunity_gap_min
+        return "OPPORTUNITY"  # 正 α：市场定价低于我方模型
+    elif gap < -10:           # -overheated_gap_min（默认对称，数值未专门拍）
+        return "OVERHEATED"   # 负 α → 动作 AVOID（不进场；不做空，SHORT 远期另拍）
     else:
-        return "WAIT"         # 观望
+        return "WAIT"         # 观望（含 gap=NaN 的 fail-closed 行）
 ```
+
+sentiment 摘出信号门：`sentiment > 80` 只产 `sentiment_overheat` 过热 flag，由 S6 风控
+overlay 以 `SENTIMENT_OVERHEAT` 登记（不参与信号、不折减权重——折减系数未拍）。
 
 ---
 
@@ -390,11 +397,11 @@ scheduler:
   cron: "0 18 * * MON-FRI"  # 每个交易日 18:00 运行
   enabled: true
 
-# Gap 判定阈值配置
+# Gap 判定阈值配置（信号语义 v2，D-20260705-1；v1 情绪字段 deprecated 兼容加载）
 gap_thresholds:
-  opportunity_gap_min: 10.0
-  opportunity_sentiment_max: 40
-  overheated_sentiment_min: 80
+  opportunity_gap_min: 10.0   # gap > 10 → OPPORTUNITY（正 α）
+  overheated_gap_min: 10.0    # gap < -10 → OVERHEATED（负 α → AVOID）
+  # sentiment_overheat flag 阈值沿用代码默认 80（overheated_sentiment_min 转任，不参与信号）
 ```
 
 ### 5.2 环境变量
@@ -430,10 +437,10 @@ gap_thresholds:
 | `status` | STRING | ok / data_error / llm_error / data_partial / pipeline_error / unknown |
 | `needs_due_diligence` | BOOL | 是否需人工尽调；旧 CSV 缺列为未知 |
 | `suggested_weight` | FLOAT | S6 建议仓位 |
-| `correlation_flags` | JSON ARRAY | 同簇 / 高相关 ticker 列表 |
+| `correlation_flags` | JSON ARRAY | 同簇 / 高相关 ticker，另可含哨兵串 `SENTIMENT_OVERHEAT`（v2 情绪过热 flag，非 ticker） |
 | `structural_exit` | JSON ARRAY | 结构性退出条件 |
 | `quant_exit_target` | FLOAT | 量化退出目标（未定则为空） |
-| `risk_adjusted_action` | STRING | BUY / TRIM / WAIT / EXIT |
+| `risk_adjusted_action` | STRING | BUY / TRIM / WAIT / EXIT / AVOID（v2：OVERHEATED 负 α 不进场） |
 | `risk_contribution` | FLOAT | 组合风险贡献 |
 
 ### 6.2 输出示例

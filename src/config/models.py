@@ -577,34 +577,84 @@ class SchedulerConfig(ConfigModel):
 
 class GapThresholdConfig(ConfigModel):
     """
-    Gap 判定阈值配置
+    Gap 判定阈值配置（信号语义 v2：纯 α 差双向触发）
 
-    根据 PRD 5.5 节定义的信号判定逻辑：
-    - Gap > opportunity_gap_min 且 Sentiment < opportunity_sentiment_max → OPPORTUNITY
-    - Sentiment > overheated_sentiment_min → OVERHEATED
-    - 其他 → WAIT
+    判定逻辑（D-20260627-P0-1 / D-20260705-1，v1「gap+sentiment 双条件」判定式已废止）：
+    - gap > opportunity_gap_min → OPPORTUNITY（正 α）
+    - gap < -overheated_gap_min → OVERHEATED（负 α）
+    - 其他（含 NaN fail-closed 行）→ WAIT
+
+    sentiment 已摘出信号门：
+    - ``opportunity_sentiment_max``：**deprecated**，不再参与任何判定，仅为存量
+      config.yaml 兼容加载保留（ConfigModel extra="forbid"，直接删字段会炸旧配置）；
+    - ``overheated_sentiment_min``：语义转任 sentiment_overheat 过热 flag 阈值
+      （sentiment_score > 此值 → AuditResult.sentiment_overheat，S6 登记
+      "SENTIMENT_OVERHEAT"，不参与信号判定、本期不做权重折减）。
 
     Attributes:
-        opportunity_gap_min: 机会信号的最小 Gap 值
-        opportunity_sentiment_max: 机会信号的最大情绪值
-        overheated_sentiment_min: 过热信号的最小情绪值
+        opportunity_gap_min: 机会信号的最小 Gap（正 α 触发阈值）
+        overheated_gap_min: 过热信号的 Gap 幅度（负 α 触发阈值，gap < -此值；
+            默认 10 与 opportunity 对称——语义已拍、数值未专门拍，下次碰头可调）
+        opportunity_sentiment_max: [deprecated v2] 原机会信号情绪上限，已不参与判定
+        overheated_sentiment_min: sentiment_overheat flag 阈值（原过热信号阈值转任）
     """
 
-    opportunity_gap_min: float = Field(default=10.0, description="Gap > 此值视为潜在机会")
+    opportunity_gap_min: float = Field(
+        default=10.0, description="gap > 此值 → OPPORTUNITY（正 α）"
+    )
+    overheated_gap_min: float = Field(
+        default=10.0,
+        description="gap < -此值 → OVERHEATED（负 α；v2 新增，默认与 opportunity 对称）",
+    )
     opportunity_sentiment_max: int = Field(
-        default=40, ge=0, le=100, description="情绪 < 此值视为悲观"
+        default=40, ge=0, le=100,
+        description="[deprecated v2] 不再参与信号判定，仅兼容存量配置",
     )
     overheated_sentiment_min: int = Field(
-        default=80, ge=0, le=100, description="情绪 > 此值视为过热"
+        default=80, ge=0, le=100,
+        description="情绪 > 此值 → sentiment_overheat flag（不参与信号判定）",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def warn_deprecated_sentiment_gate_fields(cls, data: dict) -> dict:
+        """存量配置显式携带 v1 信号门情绪字段时记 deprecation warning（兼容加载，不拒绝）。"""
+        if not isinstance(data, dict):
+            return data
+
+        import warnings
+
+        if "opportunity_sentiment_max" in data:
+            warnings.warn(
+                "gap_thresholds.opportunity_sentiment_max 已废弃（信号语义 v2，"
+                "D-20260705-1）：sentiment 不再参与信号判定，该值被忽略。",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if "overheated_sentiment_min" in data:
+            warnings.warn(
+                "gap_thresholds.overheated_sentiment_min 语义已变更（信号语义 v2，"
+                "D-20260705-1）：不再触发 OVERHEATED 信号，转任 sentiment_overheat "
+                "过热 flag 阈值继续生效。",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return data
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> "GapThresholdConfig":
-        """验证阈值逻辑一致性"""
-        if self.opportunity_sentiment_max >= self.overheated_sentiment_min:
+        """验证阈值逻辑一致性。
+
+        v1 的 ``opportunity_sentiment_max < overheated_sentiment_min`` 交叉约束**随
+        v2 一并废止**：opportunity_sentiment_max 已不参与任何判定，若保留约束，其
+        默认值 40 会给在役的 flag 阈值强加隐藏下限（如 overheated_sentiment_min=35
+        的合法 v2 配置加载即炸，报错还引用用户未设置的废弃字段）。移除只放宽校验，
+        对既有可加载配置零影响。
+        """
+        if self.overheated_gap_min < 0:
             raise ValueError(
-                f"opportunity_sentiment_max ({self.opportunity_sentiment_max}) "
-                f"应小于 overheated_sentiment_min ({self.overheated_sentiment_min})"
+                f"overheated_gap_min ({self.overheated_gap_min}) 须为非负幅度值"
+                "（触发条件为 gap < -overheated_gap_min）"
             )
         return self
 
