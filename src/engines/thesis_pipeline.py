@@ -16,6 +16,7 @@ S1–S5 多阶段信念流水线 (ThesisPipeline)
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -98,7 +99,34 @@ class ThesisPipeline:
         self._proxy_library_block: str | None = None
         if proxy_library_config is not None and proxy_library_config.enabled:
             entries = load_proxy_library(proxy_library_config.path)
-            self._proxy_library_block = render_s3_library_block(entries)
+            block = render_s3_library_block(entries)
+            # 旧鸭子契约防呆（Codex #87 复审）：get_proxy_mapping 不接受 library_block
+            # 的存量客户端若直接传参会 TypeError → run() 整体回退单次投影，静默丢掉
+            # S1–S5。按签名探测：不支持则 WARNING + 不注入（回退无库 prompt），保住流水线。
+            if self._client_accepts_library_block():
+                self._proxy_library_block = block
+            else:
+                self._logger.warning(
+                    "S3 客户端 get_proxy_mapping 不接受 library_block（旧鸭子类型契约），"
+                    "proxy 备选库已加载但不注入 prompt；升级客户端签名以启用备选库。"
+                )
+
+    def _client_accepts_library_block(self) -> bool:
+        """S3 客户端 get_proxy_mapping 是否接受 library_block kwarg（显式参数或 **kwargs）。
+
+        无法内省（如 C 扩展）按不支持处理：错传 kwarg 的代价是整条流水线回退单次投影，
+        比少注入一个备选库段严重得多。
+        """
+        fn = getattr(self._llm, "get_proxy_mapping", None)
+        if fn is None:
+            return False
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            return False
+        return "library_block" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
 
     def run(
         self,

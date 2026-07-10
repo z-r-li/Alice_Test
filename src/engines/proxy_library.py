@@ -8,9 +8,11 @@ S3 proxy 备选库（100Step 借鉴 PR①）
 护栏（对应交接文档不变量）：
 - fail-closed：yaml 缺失 / malformed / 字段非法 / 空库 → 抛 ProxyLibraryError，
   不得静默降级空库跑（那会假装「已增强」）。
-- 库⇔词表一致性由测试锁定（tests/test_proxy_library.py）：engine_computable=true
-  条目的 spec_template 必须 `FinancialAnalysisEngine.is_proxy_computable(...) == True`，
-  false 条目必须 == False；本模块不 import 引擎，避免循环耦合。
+- 库⇔词表一致性在**加载期强制**（Codex #87 复审）：engine_computable=true 条目的
+  spec_template 必须 `FinancialAnalysisEngine.is_proxy_computable(...) == True`，
+  false 条目必须 == False 且 name / 整行渲染文本也判不可算（防 LLM 抄行误标
+  quantitative 绕过 enforce）——override 库不一致启动即抛，而非留给 enforce
+  事后降级、白丢定量锚；tests/test_proxy_library.py 对默认库另有锚定测试。
 - prompt 确定性：渲染按 id 排序、无时间戳 / 随机成分，同一 yaml 两次渲染字节一致。
 - 库只影响 S3 提案质量：`_enforce_proxy_capability` 仍是唯一定量裁判，越界
   quantitative 照旧被降级 due_diligence。
@@ -22,6 +24,8 @@ from importlib import resources
 from pathlib import Path
 
 import yaml
+
+from .financial_analysis import FinancialAnalysisEngine
 
 # 包内默认资源（config.proxy_library.path=null 时读取）
 _RESOURCE_PACKAGE = "src.engines"
@@ -156,19 +160,51 @@ def load_proxy_library(path: str | None = None) -> list[ProxyEntry]:
         raise ProxyLibraryError("proxy 备选库 entries 为空：不得空库运行")
 
     seen_ids: set[str] = set()
-    return [_parse_entry(raw, i, seen_ids) for i, raw in enumerate(raw_entries)]
+    entries = [_parse_entry(raw, i, seen_ids) for i, raw in enumerate(raw_entries)]
+    _validate_wordlist_consistency(entries)
+    return entries
+
+
+def _validate_wordlist_consistency(entries: list[ProxyEntry]) -> None:
+    """不变量 2 前移到加载期（fail-closed）：override 库同样受词表约束。
+
+    否则 engine_computable 与词表不符的 override 能「成功启动」并把条目渲染成
+    「·引擎可算」，S3 选中后才被 `_enforce_proxy_capability` 降级——白丢定量锚 /
+    触发 S2 重试，而不是承诺的启动即报错。false 条目还须 name 与整行渲染文本
+    判不可算：LLM 可能把菜单行原样抄进 proxy_spec 并误标 quantitative。
+    """
+    for e in entries:
+        actual = FinancialAnalysisEngine.is_proxy_computable(e.spec_template)
+        if actual != e.engine_computable:
+            raise ProxyLibraryError(
+                f"{e.id} engine_computable={e.engine_computable} 与词表判定不符"
+                f"（is_proxy_computable={actual}）: spec_template={e.spec_template!r}"
+            )
+        if not e.engine_computable:
+            if FinancialAnalysisEngine.is_proxy_computable(e.name):
+                raise ProxyLibraryError(
+                    f"{e.id} name 被词表误判引擎可算（裸白名单词且无黑名单词），"
+                    f"LLM 抄名误标 quantitative 时 enforce 兜不住，请改措辞: {e.name!r}"
+                )
+            line = render_s3_library_block([e])
+            if FinancialAnalysisEngine.is_proxy_computable(line):
+                raise ProxyLibraryError(
+                    f"{e.id} 整行渲染文本被词表误判引擎可算，请改措辞: {line!r}"
+                )
 
 
 def render_s3_library_block(entries: list[ProxyEntry]) -> str:
     """逐条渲染为单行清单，按 id 排序（确定性：同一 yaml 两次渲染字节一致）。
 
-    行格式：`- [Q01] 营收增速趋势（quantitative·引擎可算）：<spec>｜来源:<source>｜频率:<cadence>`
+    行格式：`- [Q01] 营收增速趋势（quantitative·引擎可算）：<spec>｜来源:<source>｜频率:<cadence>｜适用:<applicability>`
+    适用字段必须渲染（Codex #87 复审）：库对全部标的只渲染一次，S3 需要市场标注
+    才能避免给 A 股标的选 [HK][US] 条目（prompt 段头有「与标的市场不符勿选」指引）。
     """
     lines = []
     for e in sorted(entries, key=lambda x: x.id):
         capability = f"{e.type_hint}·引擎可算" if e.engine_computable else e.type_hint
         lines.append(
             f"- [{e.id}] {e.name}（{capability}）：{e.spec_template}"
-            f"｜来源:{e.source_hint}｜频率:{e.cadence}"
+            f"｜来源:{e.source_hint}｜频率:{e.cadence}｜适用:{e.applicability}"
         )
     return "\n".join(lines)

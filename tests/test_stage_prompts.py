@@ -187,7 +187,11 @@ class TestStagePromptFormatting:
         # 选型约定：库内条目前缀 [库:ID]、允许库外补充、类型仅是建议档
         assert "[库:ID]" in system
         assert "允许库外 proxy" in system
-        assert "Q01–Q08" in system
+        # 泛化描述（Codex #87）：按「·引擎可算」标注圈定 quantitative 建议档，
+        # 不写死 ID 区间/分组字母（否则 path 覆盖的自定义库与段头自相矛盾）
+        assert "·引擎可算" in system and "Q01–Q08" not in system
+        # 市场适用指引与渲染行的「适用」字段配套
+        assert "与标的市场不符的条目勿选" in system
         # 插入位置：越界段 < 备选库段 < 输出格式
         i_boundary = system.index("# 越界即不得标 quantitative")
         i_library = system.index("# proxy 备选库")

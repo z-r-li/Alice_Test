@@ -359,11 +359,14 @@ trailing PE、forward PE、PEG。
     # 把本段插到「# 越界即不得标 quantitative」段之后、「# 输出格式」之前。
     # <library_block> 由 engines.proxy_library.render_s3_library_block 渲染（按 id 排序，
     # 确定性）；不传 library_block = 现行为（回归锚 / 生产 kill switch）。
+    # 段头描述按「·引擎可算」标注泛化，不写死 ID 区间 / 分组字母——否则 path 覆盖的
+    # 自定义库会与段头自相矛盾（Codex #87 复审）。
     PROXY_LIBRARY_SECTION: str = """# proxy 备选库（优先选型参考；菜单而非全集）
 - 优先从下列条目为各环节选型；选用时在 proxy_spec 前缀 [库:ID]。
 - 允许库外 proxy，但须自行给出数据源/方式。
-- 条目的类型是建议档：quantitative 仍只允许落在白名单（本库仅 Q01–Q08 属此档），
-  G/D/S/C/E/H/X 组一律 qualitative 或 due_diligence。
+- 条目的类型是建议档：quantitative 仍只允许落在白名单——本库仅带「·引擎可算」
+  标注的条目属此档，未带该标注的条目一律 qualitative 或 due_diligence。
+- 行末「适用」为市场范围（ALL / [CN] / [HK] / [US] 组合）；与标的市场不符的条目勿选。
 <library_block>"""
 
     PROXY_MAPPING_USER = Template("""标的：$ticker_name ($ticker)
