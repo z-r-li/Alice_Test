@@ -93,6 +93,24 @@ class TestStagePromptFormatting:
         assert "循环论证" in system
         assert "kill_criteria" in system or "证伪条件" in system
 
+    def test_logic_chain_prompt_has_post_split_self_check(self):
+        """PR①点2：S2 拆链后追加「补漏自查」段（checklist 是补漏器，不是拆解模板）。"""
+        system, _ = PromptTemplates.format_logic_chain_prompt(
+            ticker="601985.SH", ticker_name="中国核电", proposition="命题X",
+            success_conditions=["条件A"], kill_criteria=["证伪C"], horizon="3-5年",
+        )
+        assert "# 拆解后自查（补漏，不为凑覆盖）" in system
+        # 自查类目点名（补漏清单的关键维度）
+        for kw in ("治理", "客户/供应商集中度", "外部冲击"):
+            assert kw in system
+        # 不强制覆盖：禁止为凑类目加弱相关环节 / 稀释 weight
+        assert "稀释 weight" in system
+        # 自查段位于「# 输出格式」之前（输出前检查）
+        assert system.index("# 拆解后自查") < system.index("# 输出格式")
+        # 防误删回归锚：原「强制 ≥1 条财务驱动」与白名单段一字不动地仍在
+        assert "# 强制：至少 1 条「公司级财务驱动项」环节" in system
+        assert "## 可计算指标白名单（财务驱动项的唯一合法口径）" in system
+
     def test_logic_chain_prompt_enforce_driver_appends_retry_instruction(self):
         """#8：enforce_driver=True（重试路径）在系统指令末尾追加强制驱动指令。"""
         base, _ = PromptTemplates.format_logic_chain_prompt(
@@ -149,6 +167,46 @@ class TestStagePromptFormatting:
         # 越界例子被点名为不得标 quantitative
         assert "due_diligence" in system
         assert any(k in system for k in ("行业 ROE", "分部收入", "在手订单", "回购金额"))
+
+    def test_proxy_prompt_without_library_block_is_regression_anchor(self):
+        """PR①点1 回归锚：不传 library_block（或 enabled=false）时 system 与现版本逐字一致。"""
+        system, _ = PromptTemplates.format_proxy_prompt(
+            ticker="601985.SH", ticker_name="中国核电", links=[]
+        )
+        assert system == PromptTemplates.PROXY_MAPPING_SYSTEM
+        assert "proxy 备选库" not in system
+
+    def test_proxy_prompt_inserts_library_block_before_output_section(self):
+        """PR①点1：library_block 插进「越界」段之后、「# 输出格式」之前，且段头约束齐全。"""
+        block = "- [Q01] 营收增速趋势（quantitative·引擎可算）：财务引擎：营收CAGR｜来源:东财｜频率:季"
+        system, _ = PromptTemplates.format_proxy_prompt(
+            ticker="601985.SH", ticker_name="中国核电", links=[], library_block=block
+        )
+        assert "# proxy 备选库（优先选型参考；菜单而非全集）" in system
+        assert block in system
+        # 选型约定：库内条目前缀 [库:ID]、允许库外补充、类型仅是建议档
+        assert "[库:ID]" in system
+        assert "允许库外 proxy" in system
+        assert "Q01–Q08" in system
+        # 插入位置：越界段 < 备选库段 < 输出格式
+        i_boundary = system.index("# 越界即不得标 quantitative")
+        i_library = system.index("# proxy 备选库")
+        i_output = system.index("# 输出格式")
+        assert i_boundary < i_library < i_output
+        # 原有段落不受损（前缀与白名单/越界约束原样保留）
+        assert system.startswith(PromptTemplates.PROXY_MAPPING_SYSTEM[:i_boundary])
+        assert "# 可计算指标白名单（quantitative 的唯一合法范围）" in system
+
+    def test_proxy_prompt_library_rendering_deterministic(self):
+        """不变量 3：同一 library_block 两次格式化，system 字节一致（user 含 nonce 围栏除外）。"""
+        block = "- [Q01] X（quantitative·引擎可算）：财务引擎：营收CAGR｜来源:东财｜频率:季"
+        s1, _ = PromptTemplates.format_proxy_prompt(
+            ticker="X", ticker_name="N", links=[], library_block=block
+        )
+        s2, _ = PromptTemplates.format_proxy_prompt(
+            ticker="X", ticker_name="N", links=[], library_block=block
+        )
+        assert s1 == s2
 
     def test_evidence_prompt_fences_material(self):
         system, user = PromptTemplates.format_evidence_prompt(
@@ -305,6 +363,14 @@ class TestFakeLLMClient:
         fake.get_thesis_synthesis("X", "N", "P", [], no_quantitative_anchor=True)
         assert fake.last_synthesis_no_anchor is True
 
+    def test_fake_proxy_mapping_records_library_block(self):
+        """PR①点1：FakeLLMClient.get_proxy_mapping 接受并记录 library_block（接线断言用）。"""
+        fake = FakeLLMClient()
+        fake.get_proxy_mapping("X", "N", [])
+        assert fake.last_library_block is None
+        fake.get_proxy_mapping("X", "N", [], library_block="- [Q01] ...")
+        assert fake.last_library_block == "- [Q01] ..."
+
 
 class TestClientStageMethodsExist:
     def test_deepseek_client_exposes_stage_methods(self):
@@ -317,6 +383,14 @@ class TestClientStageMethodsExist:
             "get_thesis_synthesis",
         ):
             assert hasattr(DeepSeekClient, name)
+
+    def test_get_proxy_mapping_accepts_library_block(self):
+        """PR①点1：真实客户端签名含 library_block 透传参（默认 None = 现行为）。"""
+        import inspect
+
+        params = inspect.signature(DeepSeekClient.get_proxy_mapping).parameters
+        assert "library_block" in params
+        assert params["library_block"].default is None
 
 
 @pytest.mark.integration

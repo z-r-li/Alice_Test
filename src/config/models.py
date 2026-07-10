@@ -680,6 +680,28 @@ class PipelineConfig(ConfigModel):
     )
 
 
+class ProxyLibraryConfig(ConfigModel):
+    """S3 proxy 备选库配置（100Step 借鉴 PR①）。
+
+    enabled=True（默认）时 ThesisPipeline 启动即加载备选库并渲染进 S3 系统指令；
+    库 yaml 缺失 / malformed / 字段非法 → 启动抛错（fail-closed），不得空库静默跑。
+    enabled=False 为生产 kill switch：S3 prompt 与无库版本逐字一致（回归锚）。
+
+    Attributes:
+        enabled: 是否在 S3 prompt 注入 proxy 备选库段
+        path: 备选库 yaml 覆盖路径；null（默认）= 包内 src/engines/resources/proxy_library.yaml
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="是否在 S3 prompt 注入 proxy 备选库（False = 完全回到无库现行为）",
+    )
+    path: str | None = Field(
+        default=None,
+        description="备选库 yaml 覆盖路径；null 用包内默认文件",
+    )
+
+
 class RiskControlConfig(ConfigModel):
     """S6 组合层风控配置（pydantic 版，镜像 engines.risk_engine.RiskConfig）。
 
@@ -745,6 +767,7 @@ class AppConfig(ConfigModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
+    proxy_library: ProxyLibraryConfig = Field(default_factory=ProxyLibraryConfig)
     financial_analysis: FinancialAnalysisConfig = Field(
         default_factory=FinancialAnalysisConfig
     )

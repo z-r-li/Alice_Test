@@ -600,10 +600,16 @@ class DeepSeekClient:
         ticker: str,
         ticker_name: str,
         links: list[dict],
+        library_block: str | None = None,
     ) -> ProxyMapping:
-        """S3：为每个链路环节匹配 proxy（无 proxy → due_diligence）"""
+        """S3：为每个链路环节匹配 proxy（无 proxy → due_diligence）。
+
+        library_block 为渲染好的「proxy 备选库」段（ThesisPipeline 启动时加载缓存）；
+        None = 无库现行为。
+        """
         system, user = PromptTemplates.format_proxy_prompt(
-            ticker=ticker, ticker_name=ticker_name, links=links
+            ticker=ticker, ticker_name=ticker_name, links=links,
+            library_block=library_block,
         )
         return self.chat_with_json_output(system, user, ProxyMapping)
 

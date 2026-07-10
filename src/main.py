@@ -222,6 +222,7 @@ class AliceTestPipeline:
             sanitizer=self._sanitizer,
             artifact_store=self._artifact_store,
             logger=self._py_logger,
+            proxy_library_config=self._config.proxy_library,
         )
 
     def _create_llm_client(self) -> DeepSeekClient:

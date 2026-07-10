@@ -1,0 +1,378 @@
+# proxy_library v0.1 —— S3 proxy 备选库（100Step 借鉴 PR①，起步稿 Cowork 2026-07-09）
+# 来源：凌振寰提议之《100 Step Investment Research Dashboard》(HEV) tab 27/41–70/73/98 提炼 + A 股适配。
+# 由 src/engines/proxy_library.py 加载（fail-closed），渲染进 S3 prompt 的「proxy 备选库」段。
+#
+# 字段说明：
+#   id                唯一标识（稳定排序键，prompt 组装按 id 排序保证确定性）
+#   name              proxy 名称（中文）
+#   category          需求市场 | 供给成本 | 竞争格局 | 公司执行 | 治理红旗 | 估值财务 | 组织人力
+#   type_hint         quantitative | qualitative | due_diligence（S3 的 proxy_type 建议档）
+#   engine_computable 是否落在财务引擎白名单（is_proxy_computable 可判 True）。
+#                     ⚠ 硬规则：仅 type_hint=quantitative 的条目可为 true，且 spec_template
+#                     必须通过 FinancialAnalysisEngine.is_proxy_computable（测试锁定）。
+#   spec_template     proxy_spec 写法示范（quantitative 条目须点名白名单指标）
+#   source_hint       数据来源提示（含本机可达性标注；box 侧以 CDX-6 实测为准）
+#   cadence           数据更新频率（日/周/月/季/年/事件）
+#   applicability     [CN] [HK] [US] 或 ALL
+#   note              适配/限制说明
+#
+# ⚠ 改条目措辞前先过 tests/test_proxy_library.py 的库⇔词表一致性测试（不变量 2）：
+#   已知坑——spec 里裸出现「盈利/毛利率」等白名单词而无黑名单词会被误判可算（C01/C03 已规避）。
+
+version: "0.1"
+entries:
+  # ============ 估值财务（引擎可算，quantitative 唯一合法区）============
+  - id: Q01
+    name: 营收增速趋势
+    category: 估值财务
+    type_hint: quantitative
+    engine_computable: true
+    spec_template: "财务引擎：营收同比与近3-5期营收CAGR，判定趋势方向"
+    source_hint: "A股=东财财报接口(datacenter，本机可达)；HK/US=yfinance"
+    cadence: 季
+    applicability: ALL
+    note: "tab 79-80 对应"
+  - id: Q02
+    name: 净利润/盈利增速
+    category: 估值财务
+    type_hint: quantitative
+    engine_computable: true
+    spec_template: "财务引擎：净利润增速与盈利CAGR"
+    source_hint: 同Q01
+    cadence: 季
+    applicability: ALL
+    note: "tab 82 (EPS growth) 对应；引擎口径为净利润而非EPS"
+  - id: Q03
+    name: 毛利率水平与趋势
+    category: 估值财务
+    type_hint: quantitative
+    engine_computable: true
+    spec_template: "财务引擎：毛利率最新值及逐年趋势"
+    source_hint: 同Q01
+    cadence: 季
+    applicability: ALL
+    note: "tab 76/83 对应"
+  - id: Q04
+    name: 净利率水平与趋势
+    category: 估值财务
+    type_hint: quantitative
+    engine_computable: true
+    spec_template: "财务引擎：净利率最新值及逐年趋势"
+    source_hint: 同Q01
+    cadence: 季
+    applicability: ALL
+    note: "tab 77/84 近似（原表为营业利润率）"
+  - id: Q05
+    name: 经营现金流为正/趋势
+    category: 估值财务
+    type_hint: quantitative
+    engine_computable: true
+    spec_template: "财务引擎：经营性现金流是否为正及趋势"
+    source_hint: 同Q01
+    cadence: 季
+    applicability: ALL
+    note: "tab 92 对应"
+  - id: Q06
+    name: trailing PE 对照
+    category: 估值财务
+    type_hint: quantitative
+    engine_computable: true
+    spec_template: "财务引擎：trailing PE（市盈率）水平判断"
+    source_hint: 行情源 pe_ttm + 财报
+    cadence: 日
+    applicability: ALL
+    note: "pe_ttm==0.0 是有效值不是缺失（工程约定）"
+  - id: Q07
+    name: forward PE 检验
+    category: 估值财务
+    type_hint: quantitative
+    engine_computable: true
+    spec_template: "财务引擎：forward PE（前瞻市盈率）是否低于给定阈值"
+    source_hint: 引擎由预期增速推算
+    cadence: 季
+    applicability: ALL
+    note: "tab 93 的可算子集；目标价方法论明确不借"
+  - id: Q08
+    name: PEG 检验
+    category: 估值财务
+    type_hint: quantitative
+    engine_computable: true
+    spec_template: "财务引擎：PEG 是否处于合理区间"
+    source_hint: 引擎计算
+    cadence: 季
+    applicability: ALL
+    note: ""
+
+  # ============ 治理红旗（qualitative 为主）============
+  - id: G01
+    name: 年报措辞逐年diff
+    category: 治理红旗
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "对比本期与上期定期报告『管理层讨论/风险提示』措辞变化，结构化判读新增/删除项"
+    source_hint: "定期报告全文（公告源；本机 cninfo 受限→东财公告/Serper 替代）"
+    cadence: 半年
+    applicability: ALL
+    note: "tab 27；S4 证据生成器候选（LLM 易自动化，围栏喂入）"
+  - id: G02
+    name: 审计意见与更换事务所
+    category: 治理红旗
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "核查最近年报审计意见类型及是否更换会计师事务所，异常即红旗"
+    source_hint: 年报/公告文本
+    cadence: 年
+    applicability: ALL
+    note: "tab 98"
+  - id: G03
+    name: 大股东/高管增减持与回购公告
+    category: 治理红旗
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "梳理近6-12月增减持/回购公告方向与规模，判读内部人信号"
+    source_hint: "公告类文本（东财公告可达）"
+    cadence: 事件
+    applicability: "[CN][HK]"
+    note: "tab 60 (insider buy/sell) 的 A 股化；回购金额属引擎越界口径，勿标 quantitative"
+  - id: G04
+    name: 业绩预告/快报偏差史
+    category: 治理红旗
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "对比历史业绩预告区间与最终年报实绩，判读管理层口径保守/激进"
+    source_hint: 业绩预告公告 + 财报
+    cadence: 半年
+    applicability: "[CN]"
+    note: "tab 73 (conservative or not) 的 A 股替代（A 股无 guidance 文化）"
+  - id: G05
+    name: 关联交易/对外担保
+    category: 治理红旗
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "核查大额关联交易与担保公告，判读利益输送风险"
+    source_hint: 公告文本
+    cadence: 事件
+    applicability: "[CN]"
+    note: ""
+  - id: G06
+    name: 商誉与减值风险
+    category: 治理红旗
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "从年报披露判读商誉规模与减值测试假设是否激进"
+    source_hint: 年报附注
+    cadence: 年
+    applicability: ALL
+    note: "引擎不解析资产负债表科目，保持 qualitative"
+
+  # ============ 需求市场 ============
+  - id: D01
+    name: TAM 规模与增速交叉验证
+    category: 需求市场
+    type_hint: due_diligence
+    engine_computable: false
+    spec_template: "取2-3个第三方口径（行业协会/券商/咨询）交叉验证 TAM 及增速，注明口径差异"
+    source_hint: 研报/行业协会（研报文本可作 qualitative 降档）
+    cadence: 年
+    applicability: ALL
+    note: "tab 42-43"
+  - id: D02
+    name: 市场份额及变化
+    category: 需求市场
+    type_hint: due_diligence
+    engine_computable: false
+    spec_template: "行业口径份额数据（协会/海关/第三方），验证份额升降方向"
+    source_hint: 行业数据/研报
+    cadence: 年
+    applicability: ALL
+    note: "tab 44；引擎越界（市占/份额在黑名单词表）"
+  - id: D03
+    name: 量价拆分（ASP×销量）
+    category: 需求市场
+    type_hint: due_diligence
+    engine_computable: false
+    spec_template: "拆分收入=均价×销量，分别验证价格与量的驱动（经营数据公告/行业量价）"
+    source_hint: 经营数据公告/行业协会
+    cadence: 月/季
+    applicability: ALL
+    note: "tab 49；量价属引擎越界口径"
+  - id: D04
+    name: 订单/合同负债趋势
+    category: 需求市场
+    type_hint: due_diligence
+    engine_computable: false
+    spec_template: "在手订单公告或合同负债/预收款趋势，作为需求前瞻信号"
+    source_hint: "公告/年报附注（造船等长周期行业关键；601985/600150 场景）"
+    cadence: 季
+    applicability: "[CN][HK]"
+    note: "tab 91 (deferred revenue)；在手订单在引擎黑名单，勿标 quantitative"
+  - id: D05
+    name: 用户数/DAU/MAU 里程碑
+    category: 需求市场
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "从公司披露/新闻判读用户数、活跃度、付费用户里程碑变化"
+    source_hint: 财报电话会/新闻（互联网标的）
+    cadence: 季
+    applicability: "[HK][US]"
+    note: "tab 64/69；披露不全时降 due_diligence"
+  - id: D06
+    name: 社媒/搜索热度变化
+    category: 需求市场
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "判读产品/品牌社媒关注度与搜索热度趋势（方向性证据，弱信号）"
+    source_hint: "Serper（可达）；A股场景=雪球/股吧热度（源受限，慎用）"
+    cadence: 周
+    applicability: ALL
+    note: "tab 65-68；只作佐证，权重低"
+
+  # ============ 供给成本 ============
+  - id: S01
+    name: 关键原材料成本暴露
+    category: 供给成本
+    type_hint: due_diligence
+    engine_computable: false
+    spec_template: "识别 BOM/成本大项对应商品价格（钢价/锂价/运价等），验证成本端压力方向"
+    source_hint: 商品价格数据/行业指数
+    cadence: 周/月
+    applicability: ALL
+    note: "tab 21/50；商品与指数属引擎越界"
+  - id: S02
+    name: 产能利用率/开工率
+    category: 供给成本
+    type_hint: due_diligence
+    engine_computable: false
+    spec_template: "实地/专家渠道核产能利用率（『飞工厂数货车』类经典尽调）"
+    source_hint: 实地/专家访谈
+    cadence: 事件
+    applicability: ALL
+    note: "tab 19"
+  - id: S03
+    name: 渠道/终端调研
+    category: 供给成本
+    type_hint: due_diligence
+    engine_computable: false
+    spec_template: "访谈经销商/渠道，验证出货与库存水位（与报表存货趋势对照）"
+    source_hint: 访谈
+    cadence: 事件
+    applicability: ALL
+    note: "tab 51 的落地形态；报表存货科目引擎不解析"
+
+  # ============ 竞争格局 ============
+  - id: C01
+    name: 竞对增速/毛利率对比
+    category: 竞争格局
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "从研报判读公司与同行/可比公司的相对增速与盈利能力变化（跨公司口径）"
+    source_hint: 研报文本
+    cadence: 季
+    applicability: ALL
+    note: "tab 74-78；跨公司口径在引擎黑名单（同行/可比公司），只能 qualitative"
+  - id: C02
+    name: 进入壁垒变化
+    category: 竞争格局
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "判读牌照/技术/资本/网络效应等壁垒是否被侵蚀（新进入者动向）"
+    source_hint: 研报/新闻
+    cadence: 事件
+    applicability: ALL
+    note: "tab 31"
+  - id: C03
+    name: 卖方盈利预测修正方向
+    category: 竞争格局
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "统计近3月卖方评级与一致预期调整方向（上调/下调家数）"
+    source_hint: "东财盈利预测表（stock_profit_forecast_em，可达；已是 Module A 输入）"
+    cadence: 月
+    applicability: "[CN]"
+    note: "作 link 级 proxy 合法；注意与 implied_growth 同源，勿双计"
+
+  # ============ 公司执行 ============
+  - id: E01
+    name: 资本开支/扩产计划
+    category: 公司执行
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "从公告判读 capex 方向与扩产节奏是否支持增长叙事"
+    source_hint: 公告/年报
+    cadence: 事件
+    applicability: ALL
+    note: "capex 在引擎黑名单，勿标 quantitative"
+  - id: E02
+    name: 研发投入与产出信号
+    category: 公司执行
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "判读研发方向、专利/新品节奏与 thesis 的一致性"
+    source_hint: 年报/新闻/专利库
+    cadence: 半年
+    applicability: ALL
+    note: "tab 22-23；研发费用占比引擎暂不算，保持 qualitative"
+  - id: E03
+    name: 政策/监管文件跟踪
+    category: 公司执行
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "跟踪对公司有直接约束/补贴效力的政策文件，判读方向与力度"
+    source_hint: 政府网站/新闻
+    cadence: 事件
+    applicability: "[CN]"
+    note: "tab 25/52；政策强相关行业（核电等）权重高"
+
+  # ============ 组织人力 ============
+  - id: H01
+    name: 管理层/核心团队变动
+    category: 组织人力
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "核查高管任免公告与关键岗位变动，判读治理与执行连续性"
+    source_hint: 公告/新闻
+    cadence: 事件
+    applicability: ALL
+    note: "tab 12"
+  - id: H02
+    name: 招聘岗位数与方向
+    category: 组织人力
+    type_hint: due_diligence
+    engine_computable: false
+    spec_template: "抓取招聘平台岗位数量与方向变化，作为扩张/收缩前瞻信号"
+    source_hint: 招聘网站（需爬取，环境未验证）
+    cadence: 月
+    applicability: ALL
+    note: "tab 59"
+  - id: H03
+    name: 员工规模与流失
+    category: 组织人力
+    type_hint: due_diligence
+    engine_computable: false
+    spec_template: "年报员工数变化 + 社区口碑（脉脉/Glassdoor）交叉判读组织健康度"
+    source_hint: 年报/职场社区
+    cadence: 年
+    applicability: ALL
+    note: "tab 56-58"
+
+  # ============ 通用尽调 ============
+  - id: X01
+    name: 前员工/专家访谈
+    category: 公司执行
+    type_hint: due_diligence
+    engine_computable: false
+    spec_template: "访谈前员工/行业专家，验证特定环节的一手事实（写明要验证什么）"
+    source_hint: 访谈
+    cadence: 事件
+    applicability: ALL
+    note: "尽调经典路径（与科研同构）"
+  - id: X02
+    name: 季节性基数核查
+    category: 估值财务
+    type_hint: qualitative
+    engine_computable: false
+    spec_template: "核查同比数据是否受季节性/一次性基数扭曲，修正趋势判读"
+    source_hint: 财报多期对照
+    cadence: 季
+    applicability: ALL
+    note: "tab 86；引擎不做季节调整，作 LLM 判读项"

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
-from ..config.models import TargetConfig
+from ..config.models import ProxyLibraryConfig, TargetConfig
 from ..llm.models import (
     Evidence,
     LogicChain,
@@ -32,6 +32,7 @@ from ..llm.models import (
 )
 from ..utils.sanitizer import TextSanitizer, get_sanitizer
 from .financial_analysis import FinancialAnalysisEngine
+from .proxy_library import load_proxy_library, render_s3_library_block
 
 # 加权支持分的置信系数（高/中/低）
 _CONFIDENCE_FACTOR = {"高": 1.0, "中": 0.6, "低": 0.3}
@@ -70,6 +71,7 @@ class ThesisPipeline:
         sanitizer: TextSanitizer | None = None,
         artifact_store: Any | None = None,
         logger: logging.Logger | None = None,
+        proxy_library_config: ProxyLibraryConfig | None = None,
     ):
         """
         Args:
@@ -80,6 +82,10 @@ class ThesisPipeline:
             sanitizer: 文本脱敏器（默认全局单例）
             artifact_store: ArtifactStore（为 None 时不持久化）
             logger: 日志器
+            proxy_library_config: S3 proxy 备选库配置（config 顶层 proxy_library 块）。
+                enabled=True 时在此加载库并渲染一次、随实例缓存进 S3 prompt；库不可用
+                即抛 ProxyLibraryError（fail-closed，不得空库静默跑）。None 或
+                enabled=False = 无库现行为（生产 kill switch）。
         """
         self._llm = llm_client
         self._provider_factory = financials_provider_factory
@@ -87,6 +93,12 @@ class ThesisPipeline:
         self._sanitizer = sanitizer or get_sanitizer()
         self._store = artifact_store
         self._logger = logger or logging.getLogger("alice_test")
+        # S3 备选库段：启动即加载 + 渲染（确定性，按 id 排序），run() 逐次复用。
+        # 加载失败直接抛（在 run() 的回退 try 之外），不会被静默吞成「已增强」假象。
+        self._proxy_library_block: str | None = None
+        if proxy_library_config is not None and proxy_library_config.enabled:
+            entries = load_proxy_library(proxy_library_config.path)
+            self._proxy_library_block = render_s3_library_block(entries)
 
     def run(
         self,
@@ -259,8 +271,15 @@ class ThesisPipeline:
             {"statement": l.statement, "weight": l.weight, "condition": l.condition}
             for l in chain.links
         ]
+        # 备选库启用时才传 library_block kwarg：未启用路径与旧版调用逐字一致，
+        # 也不强迫不认识该参数的鸭子类型客户端升级。
+        extra_kwargs = (
+            {"library_block": self._proxy_library_block}
+            if self._proxy_library_block is not None
+            else {}
+        )
         mapping: ProxyMapping = self._llm.get_proxy_mapping(
-            ticker=ticker, ticker_name=safe_name, links=links_payload
+            ticker=ticker, ticker_name=safe_name, links=links_payload, **extra_kwargs
         )
         for a in mapping.assignments:
             if 0 <= a.link_index < len(chain.links):

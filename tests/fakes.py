@@ -56,6 +56,7 @@ class FakeLLMClient:
         # 用于测确定性入队兜底（定性 schema 本就无 needs_due_diligence 字段）
         self.qualitative_insufficient = qualitative_insufficient
         self.calls: list[str] = []  # 记录调用顺序，供测试断言
+        self.last_library_block: str | None = None  # 最近一次 S3 收到的备选库段
         self.last_quant_kwargs: dict | None = None  # 最近一次定量判断入参
         self.last_synthesis_items: list[dict] | None = None  # 最近一次 S5 证据项
         self.logic_chain_calls: list[bool] = []  # 每次 get_logic_chain 的 enforce_driver
@@ -127,8 +128,12 @@ class FakeLLMClient:
         ]
         return LogicChain(links=links, thesis_ref=proposition)
 
-    def get_proxy_mapping(self, ticker, ticker_name, links) -> ProxyMapping:
+    def get_proxy_mapping(
+        self, ticker, ticker_name, links, library_block=None
+    ) -> ProxyMapping:
         self._mark("get_proxy_mapping")
+        # 记录 S3 收到的备选库段（None = 流水线未启用备选库），供测试断言接线
+        self.last_library_block = library_block
         # link0 是否被映射为「越界 quantitative」（经 enforce 后降级 → 不计入 n_quant）：
         # - quant_out_of_scope：恒越界（首轮 + 重试都无驱动）；
         # - driver_on_retry：首轮越界（触发重试），重试后改为白名单内可算 proxy。
