@@ -17,7 +17,9 @@
 #   note              适配/限制说明
 #
 # ⚠ 改条目措辞前先过 tests/test_proxy_library.py 的库⇔词表一致性测试（不变量 2）：
-#   已知坑——spec 里裸出现「盈利/毛利率」等白名单词而无黑名单词会被误判可算（C01/C03 已规避）。
+#   已知坑——spec/name/source_hint 里裸出现「盈利/毛利率」等白名单词而无黑名单词会被误判可算。
+#   一致性测试锁三层：spec_template 与 engine_computable 一致 + false 条目的 name 与
+#   整行渲染文本必须判不可算（LLM 抄行误标 quantitative 时 enforce 才能兜住）。
 
 version: "0.1"
 entries:
@@ -261,7 +263,8 @@ entries:
 
   # ============ 竞争格局 ============
   - id: C01
-    name: 竞对增速/毛利率对比
+    # name 带黑名单词「同行」：裸「毛利率」会让 name 被词表误判引擎可算（复审 P2）
+    name: 同行/竞对增速与盈利能力对比
     category: 竞争格局
     type_hint: qualitative
     engine_computable: false
@@ -281,12 +284,13 @@ entries:
     applicability: ALL
     note: "tab 31"
   - id: C03
-    name: 卖方盈利预测修正方向
+    # name/source_hint 避开裸「盈利」：整行渲染文本须判不可算，防 LLM 抄行误标（复审 P2）
+    name: 卖方一致预期修正方向
     category: 竞争格局
     type_hint: qualitative
     engine_computable: false
     spec_template: "统计近3月卖方评级与一致预期调整方向（上调/下调家数）"
-    source_hint: "东财盈利预测表（stock_profit_forecast_em，可达；已是 Module A 输入）"
+    source_hint: "东财一致预期接口（stock_profit_forecast_em，可达；已是 Module A 输入）"
     cadence: 月
     applicability: "[CN]"
     note: "作 link 级 proxy 合法；注意与 implied_growth 同源，勿双计"

@@ -10,6 +10,8 @@ S3 proxy 备选库测试（100Step 借鉴 PR①）
 5. ThesisPipeline 接线：enabled 时 S3 收到备选库段、disabled/None 时现行为不变、
    库不可用时启动抛错（不会被 run() 的回退吞掉）。
 """
+from pathlib import Path
+
 import pytest
 
 from src.config.models import ProxyLibraryConfig
@@ -79,6 +81,23 @@ class TestWordlistConsistency:
         """S3 prompt 备选库段写死「本库仅 Q01–Q08 属此档」——加减可算条目须同步改 prompt 文案。"""
         computable_ids = {e.id for e in entries if e.engine_computable}
         assert computable_ids == {f"Q0{i}" for i in range(1, 9)}
+
+    def test_noncomputable_names_and_rendered_lines_stay_noncomputable(self, entries):
+        """复审加固（P2）：条目名与整行渲染文本自本 PR 起进入 S3 prompt，LLM 可能把它们
+        原样抄进 proxy_spec 并误标 quantitative；enforce 以 is_proxy_computable(proxy_spec)
+        为唯一裁判，故 false 条目的 name 与整行也必须判 False，否则「抄行误标」会绕过
+        降级（P0-1 错配类）。已知坑实例：旧 C01 名「竞对增速/毛利率对比」、旧 C03 名/
+        source_hint 裸带「盈利」而无黑名单词，均被误判可算——改措辞前先过本测试。"""
+        for e in entries:
+            if e.engine_computable:
+                continue
+            assert not FinancialAnalysisEngine.is_proxy_computable(e.name), (
+                f"{e.id} name 被误判引擎可算: {e.name!r}"
+            )
+            line = render_s3_library_block([e])
+            assert not FinancialAnalysisEngine.is_proxy_computable(line), (
+                f"{e.id} 整行渲染文本被误判引擎可算: {line!r}"
+            )
 
 
 # ------------------------------------------------------- 渲染（不变量 3）----
@@ -186,9 +205,20 @@ class TestFailClosed:
         with pytest.raises(ProxyLibraryError, match="quantitative"):
             load_proxy_library(_write_lib(tmp_path, body))
 
+    def test_non_utf8_file_raises_typed_error(self, tmp_path):
+        """复审 P2：非 UTF-8 文件（Windows 编辑器常见 GBK/ANSI）不得泄漏裸 UnicodeDecodeError。"""
+        p = tmp_path / "gbk.yaml"
+        p.write_bytes(_VALID_ENTRY.encode("gbk"))
+        with pytest.raises(ProxyLibraryError, match="不可读"):
+            load_proxy_library(str(p))
+
     def test_explicit_path_loads_same_as_packaged(self):
         packaged = load_proxy_library()
-        explicit = load_proxy_library("src/engines/resources/proxy_library.yaml")
+        # 锚定到测试文件而非 cwd（复审 P2：cwd 相对路径会让非仓库根目录起跑的 pytest 假失败）
+        repo_root = Path(__file__).resolve().parents[1]
+        explicit = load_proxy_library(
+            str(repo_root / "src" / "engines" / "resources" / "proxy_library.yaml")
+        )
         assert packaged == explicit
 
 

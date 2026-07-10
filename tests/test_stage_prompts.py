@@ -401,6 +401,28 @@ class TestClientStageMethodsExist:
         assert "library_block" in params
         assert params["library_block"].default is None
 
+    def test_get_proxy_mapping_threads_library_block_into_system(self, monkeypatch):
+        """复审 P1：签名存在 ≠ 被使用。捕获真实客户端实际发出的 system，
+        断言 library_block 真进了 prompt——这是流水线缓存块到真实请求的唯一接缝，
+        丢掉该 kwarg 全套 mock 测试仍会绿、生产却静默回到无库 prompt。"""
+        client = DeepSeekClient(api_key="test-key")
+        captured = {}
+
+        def fake_chat(system, user, model_cls, **kwargs):
+            captured["system"] = system
+            return ProxyMapping(assignments=[])
+
+        monkeypatch.setattr(client, "chat_with_json_output", fake_chat)
+        block = "- [Q01] 营收增速趋势（quantitative·引擎可算）：财务引擎：营收CAGR｜来源:东财｜频率:季"
+        client.get_proxy_mapping(
+            ticker="601985.SH", ticker_name="中国核电", links=[], library_block=block
+        )
+        assert "# proxy 备选库" in captured["system"]
+        assert block in captured["system"]
+
+        client.get_proxy_mapping(ticker="601985.SH", ticker_name="中国核电", links=[])
+        assert captured["system"] == PromptTemplates.PROXY_MAPPING_SYSTEM
+
 
 @pytest.mark.integration
 class TestRealDeepSeekStage:

@@ -66,12 +66,14 @@ def _read_library_text(path: str | None) -> str:
             raise ProxyLibraryError(f"proxy 备选库文件不存在: {path}")
         try:
             return p.read_text(encoding="utf-8")
-        except OSError as e:
+        # UnicodeDecodeError：文件存在但非 UTF-8（如 Windows 编辑器存成 GBK/ANSI）；
+        # 不加则泄漏裸异常、破坏「任何问题一律 ProxyLibraryError」契约（复审 P2）
+        except (OSError, UnicodeDecodeError) as e:
             raise ProxyLibraryError(f"proxy 备选库文件不可读: {path}: {e}") from e
     try:
         res = resources.files(_RESOURCE_PACKAGE).joinpath(_RESOURCE_NAME)
         return res.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError) as e:
+    except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
         raise ProxyLibraryError(
             f"包内 proxy 备选库资源不可读 ({_RESOURCE_PACKAGE}/{_RESOURCE_NAME}): {e}"
         ) from e
