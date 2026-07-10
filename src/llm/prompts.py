@@ -284,6 +284,12 @@ trailing PE、forward PE、PEG。
 船价 / 运价指数、回购 / 重置成本 / 资本开支 / ROE / 股息、市场份额 / 渗透率 等——都**不算**
 公司级财务驱动项。这类环节可以保留（它们仍是命题的一部分），但不能作为那条强制的财务驱动环节。
 
+# 拆解后自查（补漏，不为凑覆盖）
+输出前对照下列类目检查：上游供应/成本结构、需求/市场空间、竞争格局、公司自身执行
+（研发/资本配置）、监管/政策/政经、治理/管理层/激励、客户/供应商集中度、
+外部冲击（商品价格/汇率/诉讼）。若某类目对本命题**重大**且未覆盖 → 补一条 link；
+不适用的类目直接忽略；**禁止**为覆盖类目添加弱相关环节或稀释 weight。
+
 # 输出格式
 仅返回有效 JSON：
 {
@@ -348,6 +354,20 @@ trailing PE、forward PE、PEG。
     {"link_index": 0, "proxy_type": "<...>", "proxy_spec": "<数据源/计算/尽调说明>"}
   ]
 }"""
+
+    # S3 proxy 备选库段（100Step 借鉴 PR①）：format_proxy_prompt 收到 library_block 时，
+    # 把本段插到「# 越界即不得标 quantitative」段之后、「# 输出格式」之前。
+    # <library_block> 由 engines.proxy_library.render_s3_library_block 渲染（按 id 排序，
+    # 确定性）；不传 library_block = 现行为（回归锚 / 生产 kill switch）。
+    # 段头描述按「·引擎可算」标注泛化，不写死 ID 区间 / 分组字母——否则 path 覆盖的
+    # 自定义库会与段头自相矛盾（Codex #87 复审）。
+    PROXY_LIBRARY_SECTION: str = """# proxy 备选库（优先选型参考；菜单而非全集）
+- 优先从下列条目为各环节选型；选用时在 proxy_spec 前缀 [库:ID]。
+- 允许库外 proxy，但须自行给出数据源/方式。
+- 条目的类型是建议档：quantitative 仍只允许落在白名单——本库仅带「·引擎可算」
+  标注的条目属此档，未带该标注的条目一律 qualitative 或 due_diligence。
+- 行末「适用」为市场范围（ALL / [CN] / [HK] / [US] 组合）；与标的市场不符的条目勿选。
+<library_block>"""
 
     PROXY_MAPPING_USER = Template("""标的：$ticker_name ($ticker)
 
@@ -522,8 +542,13 @@ $evidence_block
         ticker: str,
         ticker_name: str,
         links: list[dict],
+        library_block: str | None = None,
     ) -> tuple[str, str]:
-        """S3：格式化 Proxy 映射 Prompt；links 为含 statement/weight/condition 的 dict 列表"""
+        """S3：格式化 Proxy 映射 Prompt；links 为含 statement/weight/condition 的 dict 列表。
+
+        library_block 非空时把「proxy 备选库」段插进系统指令（越界段之后、输出格式之前）；
+        None / 空串 = 现行为，system 与无库版本逐字一致（proxy_library.enabled=false 的回归锚）。
+        """
         lines = []
         for i, link in enumerate(links):
             weight = link.get("weight") or 0.0
@@ -537,7 +562,13 @@ $evidence_block
             ticker_name=ticker_name,
             links_block=fence("LINKS", links_block),
         )
-        return cls.PROXY_MAPPING_SYSTEM, user
+        system = cls.PROXY_MAPPING_SYSTEM
+        if library_block:
+            section = cls.PROXY_LIBRARY_SECTION.replace(
+                "<library_block>", library_block
+            )
+            system = system.replace("# 输出格式", section + "\n\n# 输出格式", 1)
+        return system, user
 
     @classmethod
     def format_evidence_prompt(

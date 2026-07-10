@@ -187,6 +187,17 @@ persistence:
 #   enabled: true             # 关闭则不做风控叠加、不回填风控字段
 
 # ============================================
+# S3 proxy 备选库（100Step 借鉴 PR①）
+# ============================================
+# 启用后 S3 proxy 提案从「LLM 从零发明」变「从备选库选型 + 允许补充」：
+# 备选库条目渲染进 S3 系统指令，选用条目的 proxy_spec 会带 [库:ID] 前缀。
+# fail-closed：enabled=true 而库 yaml 缺失/损坏 → 启动直接报错，不会空库静默跑。
+# 全部字段可省略，省略即用下列默认值。
+# proxy_library:
+#   enabled: true   # 生产 kill switch：false = 完全回到无库的现行为
+#   path: null      # 备选库 yaml 覆盖路径；null = 包内 src/engines/resources/proxy_library.yaml
+
+# ============================================
 # 调度配置
 # ============================================
 scheduler:

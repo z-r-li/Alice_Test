@@ -54,6 +54,7 @@ def _make_pipeline(
     risk_enabled=True,
     targets=None,
     fail_stage=None,
+    proxy_library_enabled=True,
 ):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     from src.main import AliceTestPipeline
@@ -73,6 +74,7 @@ def _make_pipeline(
         "data_sources": {"crawler": {"use_mock": True}},
         "financial_analysis": {"use_mock": True},
         "pipeline": {"enabled": pipeline_enabled},
+        "proxy_library": {"enabled": proxy_library_enabled},
         "risk": {"enabled": risk_enabled},
         "output": {
             "path": str(tmp_path / "out.csv"),
@@ -107,6 +109,24 @@ class TestMainPipelineWiring:
         store = ArtifactStore(str(tmp_path / "artifacts"))
         stages = store.list_stages("601985.SH", result.date)
         assert len(stages) == 5
+
+    def test_proxy_library_block_reaches_s3_through_main(self, monkeypatch, tmp_path):
+        """复审 P2：main._build_thesis_pipeline 一行 kwarg 是 config→S3 的唯一接缝。
+        不在 e2e 断言 FakeLLMClient 真收到库段，删掉该 kwarg 全套测试仍绿、
+        生产却静默关掉备选库（默认启用路径）。"""
+        pipeline, config = _make_pipeline(monkeypatch, tmp_path)
+        pipeline._process_single_target(config.targets[0])
+        fake = pipeline._llm_client
+        assert fake.last_library_block is not None
+        assert "- [Q01]" in fake.last_library_block
+
+    def test_proxy_library_kill_switch_through_main(self, monkeypatch, tmp_path):
+        """config 级 kill switch e2e：proxy_library.enabled=false → S3 收不到库段。"""
+        pipeline, config = _make_pipeline(
+            monkeypatch, tmp_path, proxy_library_enabled=False
+        )
+        pipeline._process_single_target(config.targets[0])
+        assert pipeline._llm_client.last_library_block is None
 
     def test_csv_columns_keep_legacy_prefix_and_add_m3_fields(self, monkeypatch, tmp_path):
         pipeline, config = _make_pipeline(monkeypatch, tmp_path)
