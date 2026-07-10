@@ -590,7 +590,7 @@ class _FailingQuotesProvider:
 
 def _make_sqlite_pipeline(monkeypatch, tmp_path, *, our_growth=25.0,
                           implied_growth=8.0, sentiment_score=35,
-                          targets=None, risk_enabled=True):
+                          targets=None, risk_enabled=True, pipeline_enabled=True):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     from src.main import AliceTestPipeline
 
@@ -607,7 +607,7 @@ def _make_sqlite_pipeline(monkeypatch, tmp_path, *, our_growth=25.0,
     config = load_config_from_dict({
         "data_sources": {"crawler": {"use_mock": True}},
         "financial_analysis": {"use_mock": True},
-        "pipeline": {"enabled": True},
+        "pipeline": {"enabled": pipeline_enabled},
         "risk": {"enabled": risk_enabled},
         "output": {
             "path": str(tmp_path / "out.csv"),
@@ -915,6 +915,20 @@ class TestCoveragePipeline:
         with SQLiteStore(str(db_path)) as store:
             row = store.get_decisions()[0]
         assert all(row[c] is None for c in _COV_COLS)     # 非 ok → 落库 NULL
+
+    def test_pipeline_disabled_row_all_null(self, monkeypatch, tmp_path):
+        # pipeline.enabled=False（单次投影路径，status=ok）：没走证据链 → coverage
+        # 全 NULL（「没走到那」），但 ok 行预测子照常非 NULL——不牵连其他列。
+        pipeline, _config, db_path = _make_sqlite_pipeline(
+            monkeypatch, tmp_path, pipeline_enabled=False
+        )
+        results = pipeline.run()
+        assert results[0].status == "ok"
+        assert results[0].cov_links_total is None
+        with SQLiteStore(str(db_path)) as store:
+            row = store.get_decisions()[0]
+        assert all(row[c] is None for c in _COV_COLS)
+        assert row["gap"] is not None                     # ok 行预测子照常入库
 
     def test_pipeline_fallback_row_all_null(self, monkeypatch, tmp_path):
         # S1 失败 → 流水线整体回退（used_pipeline=False, status=pipeline_error）：

@@ -95,8 +95,11 @@ class TestBuildDailyReportHtml:
         assert "30d" in html
         assert "100.0%" in html                    # hit_rate = 1/1
         assert "n=1（样本不足）" in html            # n 过小如实标注
-        # IC 样本 <2 → store 返回 None → 显示「—」（不编数）
+        # IC 样本 <2 → store 返回 None → 单元格必须渲染「—」，绝不编成 +0.000
         assert "information_coefficient" in html
+        row = next(l for l in html.splitlines() if "全部（每决策最新 final）" in l)
+        assert "—" in row
+        assert "+0.000" not in html
 
     def test_dd_queue_lists_ticker(self, seeded_db):
         html = build_daily_report_html(str(seeded_db), ASOF)
@@ -213,3 +216,41 @@ class TestWriteAndCli:
         )
         pipeline.run()
         assert not out_dir.exists()               # 默认关：零副作用
+
+
+class TestValidationSampleCaliber:
+    """n 样本量与 store 指标同口径的鉴别力测试（复审补强）：
+    去重轴 = MAX(outcome_id) 最新 final、hit 剔 WAIT（AVOID 计入）、IC 不剔 WAIT。
+    fixture 特意构造 re-score 与 WAIT 带 final，任一口径漂移断言必炸。"""
+
+    def test_n_dedups_rescored_final_and_wait_scope(self, tmp_path):
+        db = tmp_path / "caliber.db"
+        with SQLiteStore(str(db)) as s:
+            # b-1：re-score 两条 is_final=1（hit 0→1）——n 只计 1（不去重则 2）
+            s.save_decision(DecisionEntry(decision_id="b-1", asof_date="2026-06-01",
+                                          ticker="B", action="BUY", gap=5.0))
+            s.record_outcome(OutcomeEntry(decision_id="b-1", is_final=1, hit=0,
+                                          excess_return=-0.01))
+            s.record_outcome(OutcomeEntry(decision_id="b-1", is_final=1, hit=1,
+                                          excess_return=0.03))
+            # w-1：WAIT 带 final——剔出 hit 样本（actionable 口径），但 gap 非空进 IC
+            s.save_decision(DecisionEntry(decision_id="w-1", asof_date="2026-06-01",
+                                          ticker="W", action="WAIT", gap=1.0))
+            s.record_outcome(OutcomeEntry(decision_id="w-1", is_final=1, hit=0,
+                                          excess_return=0.02))
+        html = build_daily_report_html(str(db), ASOF)
+        # hit：仅 b-1 的最新 final（hit=1）→ 100.0%、n=1（不去重→n=2；WAIT 计入→n=2）
+        assert "100.0%" in html
+        assert "n=1（样本不足）" in html
+        # IC：b-1(5.0, +0.03) 与 w-1(1.0, +0.02) 两点正序对齐 → +1.000、n=2
+        assert "n=2（样本不足）" in html
+        assert "+1.000" in html
+
+    def test_non_padded_date_normalized(self, seeded_db, tmp_path):
+        # '2026-7-9' 须归一为 '2026-07-09'：当日行可见（不误报「本日无决策记录」），
+        # 文件名同样补零——否则 CLI 手输日期会静默产出空心报表。
+        html = build_daily_report_html(str(seeded_db), "2026-7-9")
+        assert "601985.SH" in html
+        assert "本日无决策记录" not in html
+        out = write_daily_report(str(seeded_db), "2026-7-9", tmp_path / "norm")
+        assert out.name == "daily_2026-07-09.html"

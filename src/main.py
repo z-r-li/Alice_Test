@@ -379,6 +379,8 @@ class AliceTestPipeline:
 
         失败不上抛——与决策日志同纪律：日报产物问题不应污染审计报告已落盘的运行退出码。
         日报本身只读决策日志 SQLite（零 LLM、零网络），见 src/reporting/daily_report.py。
+        报告日取 results[0].date；长批跑跨零点的极端场景下日期可能分裂，届时请改用
+        CLI 显式 --date 补生成（box 推荐路径本就是 cron 链式调用 CLI）。
         """
         try:
             from .reporting.daily_report import DEFAULT_OUT_DIR, write_daily_report

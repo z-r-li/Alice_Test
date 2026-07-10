@@ -135,6 +135,15 @@ def _n_label(n: int) -> str:
     return f"n={n}"
 
 
+def _normalize_date(asof_date: str) -> str:
+    """校验并归一 YYYY-MM-DD（补零）。strptime 接受 '2026-7-9' 这类未补零输入，
+    若不归一直接拿去精确匹配 asof_date 列，会静默查空、误报「本日无决策记录」。"""
+    try:
+        return datetime.strptime(asof_date, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError as e:
+        raise ValueError(f"asof_date 必须为 YYYY-MM-DD：{asof_date!r}") from e
+
+
 # ---- 各分区渲染 --------------------------------------------------------------
 
 def _render_header(asof_date: str, day_rows: list[dict]) -> str:
@@ -182,11 +191,14 @@ def _render_day_table(day_rows: list[dict]) -> str:
 def _render_validation(store: SQLiteStore) -> str:
     """累计验证状态：hit_rate / IC 复用 store 既有方法（含 horizon 与 actionable
     口径，#81），按 horizon_label 分行 + 跨 horizon 默认口径一行，必须带样本量 n。"""
+    # 空串 horizon_label 一并排除：store.hit_rate(horizon="") 因 falsy 会退化成
+    # 跨 horizon 默认口径，渲染出一行空白标签的重复聚合，误导读者。
     horizons = [
         r["horizon_label"]
         for r in store.conn.execute(
             "SELECT DISTINCT horizon_label FROM decision_outcome "
-            "WHERE is_final = 1 AND horizon_label IS NOT NULL ORDER BY horizon_label"
+            "WHERE is_final = 1 AND horizon_label IS NOT NULL AND horizon_label != '' "
+            "ORDER BY horizon_label"
         )
     ]
     n_final = store.conn.execute(
@@ -265,15 +277,13 @@ def build_daily_report_html(db_path: str, asof_date: str) -> str:
         ValueError: asof_date 非 YYYY-MM-DD。
         FileNotFoundError: DB 文件不存在（fail-closed：不静默建空库、不产出空心报表）。
     """
-    try:
-        datetime.strptime(asof_date, "%Y-%m-%d")
-    except ValueError as e:
-        raise ValueError(f"asof_date 必须为 YYYY-MM-DD：{asof_date!r}") from e
+    asof_date = _normalize_date(asof_date)
     if db_path != ":memory:" and not Path(db_path).exists():
         raise FileNotFoundError(f"决策日志 DB 不存在: {db_path}")
 
-    # 打开即沿 _migrate 先例自动迁移旧 schema（只加可空列，不改行内容）；本模块
-    # 对**行数据**纯读，不写任何决策 / 结果行。
+    # 打开即沿 store 开库既有行为自动迁移旧 schema（补可空列；早期 pre-created_at
+    # 库另有 created_at←observed_at 回填先例，同属 _migrate 既有语义、非本模块新增）；
+    # 本模块自身不写任何决策 / 结果行。
     with SQLiteStore(db_path) as store:
         day_rows = store.get_decisions(since=asof_date, until=asof_date)
         parts = [
@@ -311,6 +321,7 @@ def write_daily_report(
     db_path: str, asof_date: str, out_dir: str | Path = DEFAULT_OUT_DIR
 ) -> Path:
     """生成日报并写盘，返回输出路径（``out_dir/daily_YYYY-MM-DD.html``）。"""
+    asof_date = _normalize_date(asof_date)   # 文件名与报表内容用同一归一化日期
     text = build_daily_report_html(db_path, asof_date)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
