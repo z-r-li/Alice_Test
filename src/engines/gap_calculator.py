@@ -86,6 +86,15 @@ class AuditResult:
     risk_adjusted_action: str | None = None  # 叠加风控后动作 BUY / TRIM / WAIT / EXIT / AVOID
     risk_contribution: float | None = None  # 对组合总风险的贡献（v0.2 接相关阵后算）
 
+    # 100Step 借鉴 PR②：证据链完成度四计数（审计指标，按 S3 enforce 之后的
+    # PipelineResult.chain.links 计；向后兼容扩展，默认 None）。None = 没走到证据链
+    # （fail-closed / 流水线回退 / pipeline 关闭），0 = 拆了链但该计数为空——语义
+    # 不同，绝不以 0 顶替 None。
+    cov_links_total: int | None = None  # links 总数
+    cov_links_quant: int | None = None  # 引擎可验证环节数（proxy_type == quantitative）
+    cov_links_evidenced: int | None = None  # 已挂证据环节数（evidence is not None）
+    cov_links_dd: int | None = None  # 尽调环节数（due_diligence 或 evidence.needs_due_diligence，去重）
+
 
 class GapCalculator:
     """Gap 计算器与信号判定"""

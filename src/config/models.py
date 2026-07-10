@@ -501,6 +501,12 @@ class OutputConfig(ConfigModel):
         default="./output/artifacts",
         description="S1–S5 阶段产物（RefinedThesis/LogicChain/Evidence/...）的 JSON 持久化目录",
     )
+    daily_report_html: bool = Field(
+        default=False,
+        description="100Step PR②（可选钩子，默认关）：true 时 run() 末尾（backend=sqlite）"
+        "顺带生成当日自包含 HTML 日报到 ./output/daily_report/。默认 false 不改变现"
+        " daily-run 行为；box 侧推荐 cron 链式调用 python -m src.reporting.daily_report",
+    )
 
 
 class PersistenceConfig(ConfigModel):

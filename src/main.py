@@ -319,6 +319,10 @@ class AliceTestPipeline:
         # 落一行可追溯决策记录，供日后回填兑现、算命中率 / IC（P0-5 验证时钟）。默认 csv 不写。
         if results and self._config.persistence.backend == "sqlite":
             self._write_decision_log(results, targets)
+            # 100Step PR②（可选钩子，默认关）：daily-run 末尾顺带产自包含 HTML 日报。
+            # 默认 false 不改变现 daily-run 行为；box 侧推荐 cron 链式调用 CLI。
+            if self._config.output.daily_report_html:
+                self._write_daily_report_html(results)
 
         # 输出统计信息
         stats = self._logger.end_run()
@@ -370,6 +374,23 @@ class AliceTestPipeline:
         except Exception as e:
             self._py_logger.error(f"写入决策日志失败: {e}")
 
+    def _write_daily_report_html(self, results: list[AuditResult]) -> None:
+        """生成当日自包含 HTML 日报（output.daily_report_html=true 时的可选钩子）。
+
+        失败不上抛——与决策日志同纪律：日报产物问题不应污染审计报告已落盘的运行退出码。
+        日报本身只读决策日志 SQLite（零 LLM、零网络），见 src/reporting/daily_report.py。
+        """
+        try:
+            from .reporting.daily_report import DEFAULT_OUT_DIR, write_daily_report
+
+            asof = results[0].date.strftime("%Y-%m-%d")
+            path = write_daily_report(
+                self._config.persistence.sqlite_path, asof, DEFAULT_OUT_DIR
+            )
+            self._py_logger.info(f"日报已生成（自包含 HTML）: {path}")
+        except Exception as e:
+            self._py_logger.error(f"生成日报失败: {e}")
+
     def _build_decision_entry(
         self,
         result: AuditResult,
@@ -415,6 +436,20 @@ class AliceTestPipeline:
             pipeline_commit=pipeline_commit,
             model_version=model_version,
             signal_semantics=_SIGNAL_SEMANTICS_VERSION,
+            # 100Step PR② coverage 四计数：非 ok 行沿预测子纪律一律置 NULL（AuditResult
+            # 上的计数仅供人工参考）；ok 行透传（无 chain 时本就是 None，不造 0）。
+            cov_links_total=(
+                getattr(result, "cov_links_total", None) if status_ok else None
+            ),
+            cov_links_quant=(
+                getattr(result, "cov_links_quant", None) if status_ok else None
+            ),
+            cov_links_evidenced=(
+                getattr(result, "cov_links_evidenced", None) if status_ok else None
+            ),
+            cov_links_dd=(
+                getattr(result, "cov_links_dd", None) if status_ok else None
+            ),
         )
 
     @staticmethod
@@ -686,6 +721,12 @@ class AliceTestPipeline:
         if pipeline_result is not None:
             result.artifact_dir = pipeline_result.artifact_dir
             result.evidence_summary = self._summarize_evidence(pipeline_result)
+            # 100Step PR②：证据链完成度四计数（enforce 后口径，审计指标）。
+            # 回退行（无 chain）由 _coverage_counts 置 None，不造 0。
+            (result.cov_links_total, result.cov_links_quant,
+             result.cov_links_evidenced, result.cov_links_dd) = (
+                self._coverage_counts(pipeline_result)
+            )
             # C2 fail-closed：流水线整体回退（单次投影）绕过了证据链守门，gap 仅作人工参考，
             # 标记不进正常 alpha/IC 样本（保留 used_pipeline=False 与计算值供人工对照）。
             if not pipeline_result.used_pipeline:
@@ -751,6 +792,32 @@ class AliceTestPipeline:
             needs_due_diligence=True,
             evidence_summary=f"fail-closed：{reason}",
         )
+
+    @staticmethod
+    def _coverage_counts(
+        pr: PipelineResult | None,
+    ) -> tuple[int | None, int | None, int | None, int | None]:
+        """证据链完成度四计数 (total, quant, evidenced, dd)——100Step master-checkbox
+        思路的**审计指标**（只记录，不影响任何决策路径）。
+
+        由 PipelineResult.logic_chain.links 计（S3 enforce 之后口径）：
+        - quant 复用 ThesisPipeline._count_quantitative（与 S3 同真源，勿另写判定）；
+        - dd = proxy_type=="due_diligence" **或** evidence.needs_due_diligence（按环节去重）。
+        fail-closed / 流水线回退（无 chain）→ 全 None，不造 0——0 是「拆了链但空」，
+        None 是「没走到那」，语义不同勿混。
+        """
+        if pr is None or not pr.used_pipeline or pr.logic_chain is None:
+            return None, None, None, None
+        links = pr.logic_chain.links
+        total = len(links)
+        quant = ThesisPipeline._count_quantitative(pr.logic_chain)
+        evidenced = sum(1 for l in links if l.evidence is not None)
+        dd = sum(
+            1 for l in links
+            if l.proxy_type == "due_diligence"
+            or (l.evidence is not None and l.evidence.needs_due_diligence)
+        )
+        return total, quant, evidenced, dd
 
     @staticmethod
     def _kill_criteria_of(pr: PipelineResult | None) -> list[str]:
