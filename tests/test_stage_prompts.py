@@ -197,6 +197,15 @@ class TestStagePromptFormatting:
         assert system.startswith(PromptTemplates.PROXY_MAPPING_SYSTEM[:i_boundary])
         assert "# 可计算指标白名单（quantitative 的唯一合法范围）" in system
 
+    def test_proxy_prompt_insertion_anchor_is_unique(self):
+        """防错位插入（复审 P2）：库段以「# 输出格式」为锚 replace(count=1)。
+
+        锚点必须在 S3 模板中唯一，且库段模板自身不得含锚——否则未来若有人调换
+        「先拼库段、后定位锚」的顺序，段落会插错位置且无测试兜底。
+        """
+        assert PromptTemplates.PROXY_MAPPING_SYSTEM.count("# 输出格式") == 1
+        assert "# 输出格式" not in PromptTemplates.PROXY_LIBRARY_SECTION
+
     def test_proxy_prompt_library_rendering_deterministic(self):
         """不变量 3：同一 library_block 两次格式化，system 字节一致（user 含 nonce 围栏除外）。"""
         block = "- [Q01] X（quantitative·引擎可算）：财务引擎：营收CAGR｜来源:东财｜频率:季"

@@ -262,5 +262,7 @@ class TestProxyLibraryConfig:
         assert cfg.proxy_library.path is None
 
     def test_rejects_unknown_keys(self):
-        with pytest.raises(Exception):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
             ProxyLibraryConfig(enabled=True, unknown_key=1)
