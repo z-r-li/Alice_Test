@@ -155,6 +155,10 @@ targets:
 output:
   format: "csv"  # 或 "sqlite"
   path: "./output/audit_report.csv"
+  # 100Step PR②（可选钩子，默认关）：true 时 daily-run 末尾（backend=sqlite）顺带生成
+  # 当日自包含 HTML 日报到 ./output/daily_report/daily_YYYY-MM-DD.html（零 LLM、只读 DB）。
+  # box 侧推荐改用 cron 链式调用 CLI：python -m src.reporting.daily_report --config config.yaml
+  daily_report_html: false
 
 # ============================================
 # 持久化配置（P2：决策日志 / 持仓 / 风控史 / alpha 同库 SQLite）

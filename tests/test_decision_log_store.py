@@ -590,7 +590,7 @@ class _FailingQuotesProvider:
 
 def _make_sqlite_pipeline(monkeypatch, tmp_path, *, our_growth=25.0,
                           implied_growth=8.0, sentiment_score=35,
-                          targets=None, risk_enabled=True):
+                          targets=None, risk_enabled=True, pipeline_enabled=True):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     from src.main import AliceTestPipeline
 
@@ -607,7 +607,7 @@ def _make_sqlite_pipeline(monkeypatch, tmp_path, *, our_growth=25.0,
     config = load_config_from_dict({
         "data_sources": {"crawler": {"use_mock": True}},
         "financial_analysis": {"use_mock": True},
-        "pipeline": {"enabled": True},
+        "pipeline": {"enabled": pipeline_enabled},
         "risk": {"enabled": risk_enabled},
         "output": {
             "path": str(tmp_path / "out.csv"),
@@ -800,3 +800,144 @@ class TestDecisionLogPipeline:
             assert rows[0]["gap"] is None
             # 决策行仍留底（可追溯），但 gap=NULL → 不进 IC 样本（未被污染）
             assert store.information_coefficient("gap") is None
+
+
+# ---- 100Step 借鉴 PR②：coverage 证据链完成度四计数 --------------------------
+_COV_COLS = ("cov_links_total", "cov_links_quant",
+             "cov_links_evidenced", "cov_links_dd")
+
+
+class TestCoverageColumns:
+    """decision_log coverage 四列（可空 INTEGER）：默认 NULL 不造 0、幂等 upsert
+    含新列、旧库开库自动迁移且旧行不回填。"""
+
+    def test_defaults_null_not_zero(self):
+        with SQLiteStore() as s:
+            s.save_decision(_entry())
+            r = s.get_decision("601985-2026-06-29")
+            assert all(r[c] is None for c in _COV_COLS)   # 未知留 NULL，绝不补 0
+
+    def test_roundtrip_including_zero(self):
+        # 0 是「拆了链但空」的真实观测，须与 NULL 区分开地写入读回
+        with SQLiteStore() as s:
+            s.save_decision(_entry(cov_links_total=3, cov_links_quant=0,
+                                   cov_links_evidenced=3, cov_links_dd=2))
+            r = s.get_decision("601985-2026-06-29")
+            assert r["cov_links_total"] == 3
+            assert r["cov_links_quant"] == 0              # 真实 0，非 NULL
+            assert r["cov_links_evidenced"] == 3
+            assert r["cov_links_dd"] == 2
+
+    def test_idempotent_upsert_takes_new_coverage(self):
+        # 同 decision_id 二次写含新列：不重复、取新值（handoff 测试清单 #3）
+        with SQLiteStore() as s:
+            s.save_decision(_entry(cov_links_total=3, cov_links_quant=1,
+                                   cov_links_evidenced=2, cov_links_dd=1))
+            s.save_decision(_entry(cov_links_total=4, cov_links_quant=2,
+                                   cov_links_evidenced=4, cov_links_dd=0))
+            rows = s.get_decisions()
+            assert len(rows) == 1
+            assert rows[0]["cov_links_total"] == 4
+            assert rows[0]["cov_links_quant"] == 2
+            assert rows[0]["cov_links_evidenced"] == 4
+            assert rows[0]["cov_links_dd"] == 0
+
+    def test_migrates_legacy_db_without_coverage_columns(self, tmp_path):
+        """coverage 前建的 DB（decision_log 无四列）：开库自动 ADD COLUMN（PRAGMA
+        断言 4 列存在），旧行保持 NULL、不回填；新行可写计数（handoff 测试清单 #1）。"""
+        import sqlite3
+        db = str(tmp_path / "legacy_pre_coverage.db")
+        conn = sqlite3.connect(db)
+        cols = _DECISION_COLS_LEGACY + ["signal_semantics"]   # v2 后、coverage 前的全集
+        conn.execute(
+            f"CREATE TABLE decision_log ({', '.join(c + ' TEXT' for c in cols)}, "
+            "PRIMARY KEY (decision_id))"
+        )
+        conn.execute(
+            "INSERT INTO decision_log (decision_id, created_at, asof_date, ticker, action) "
+            "VALUES ('old','2026-07-01T10:00:00Z','2026-07-01','601985','BUY')"
+        )
+        conn.commit()
+        conn.close()
+        with SQLiteStore(db) as s:
+            names = {r["name"] for r in s.conn.execute("PRAGMA table_info(decision_log)")}
+            assert set(_COV_COLS) <= names
+            old = s.get_decision("old")
+            assert all(old[c] is None for c in _COV_COLS)     # 旧行 NULL、不回填
+            s.save_decision(_entry(decision_id="new", asof_date="2026-07-09",
+                                   cov_links_total=3, cov_links_quant=1,
+                                   cov_links_evidenced=3, cov_links_dd=1))
+            assert s.get_decision("new")["cov_links_total"] == 3
+            # 旧行内容未被改动（append-only）
+            assert s.get_decision("old")["created_at"] == "2026-07-01T10:00:00Z"
+
+
+class TestCoveragePipeline:
+    """端到端：coverage 计数经 AuditResult → DecisionEntry 落库（含非 ok 纪律）。"""
+
+    def test_ok_row_logs_counts(self, monkeypatch, tmp_path):
+        # FakeLLMClient n_links=3：link0 quantitative、link1 qualitative、
+        # link2 due_diligence，S4 给每环节挂证据 → total=3, quant=1, evidenced=3, dd=1。
+        pipeline, _config, db_path = _make_sqlite_pipeline(monkeypatch, tmp_path)
+        results = pipeline.run()
+        r = results[0]
+        assert (r.cov_links_total, r.cov_links_quant,
+                r.cov_links_evidenced, r.cov_links_dd) == (3, 1, 3, 1)
+        with SQLiteStore(str(db_path)) as store:
+            row = store.get_decisions()[0]
+        assert row["cov_links_total"] == 3
+        assert row["cov_links_quant"] == 1
+        assert row["cov_links_evidenced"] == 3
+        assert row["cov_links_dd"] == 1
+
+    def test_fail_closed_row_all_null(self, monkeypatch, tmp_path):
+        # 无文本 fail-closed：没走到证据链 → AuditResult 与决策行 4 列全 NULL，不造 0。
+        pipeline, _config, db_path = _make_sqlite_pipeline(monkeypatch, tmp_path)
+        monkeypatch.setattr(pipeline, "_fetch_texts", lambda target: [])
+        results = pipeline.run()
+        assert results[0].status == "data_partial"
+        assert results[0].cov_links_total is None
+        with SQLiteStore(str(db_path)) as store:
+            row = store.get_decisions()[0]
+        assert all(row[c] is None for c in _COV_COLS)
+
+    def test_degraded_row_null_in_log_but_kept_on_result(self, monkeypatch, tmp_path):
+        # 行情失败 status=data_error：链本身跑过（AuditResult 保留计数供人工参考），
+        # 但决策日志按非 ok 纪律 4 列置 NULL——与预测子置 NULL 同一纪律扩展。
+        pipeline, _config, db_path = _make_sqlite_pipeline(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            pipeline, "_select_quotes_provider",
+            lambda ticker: _FailingQuotesProvider(),
+        )
+        results = pipeline.run()
+        assert results[0].status == "data_error"
+        assert results[0].cov_links_total == 3            # 结果对象保留（人工参考）
+        with SQLiteStore(str(db_path)) as store:
+            row = store.get_decisions()[0]
+        assert all(row[c] is None for c in _COV_COLS)     # 非 ok → 落库 NULL
+
+    def test_pipeline_disabled_row_all_null(self, monkeypatch, tmp_path):
+        # pipeline.enabled=False（单次投影路径，status=ok）：没走证据链 → coverage
+        # 全 NULL（「没走到那」），但 ok 行预测子照常非 NULL——不牵连其他列。
+        pipeline, _config, db_path = _make_sqlite_pipeline(
+            monkeypatch, tmp_path, pipeline_enabled=False
+        )
+        results = pipeline.run()
+        assert results[0].status == "ok"
+        assert results[0].cov_links_total is None
+        with SQLiteStore(str(db_path)) as store:
+            row = store.get_decisions()[0]
+        assert all(row[c] is None for c in _COV_COLS)
+        assert row["gap"] is not None                     # ok 行预测子照常入库
+
+    def test_pipeline_fallback_row_all_null(self, monkeypatch, tmp_path):
+        # S1 失败 → 流水线整体回退（used_pipeline=False, status=pipeline_error）：
+        # 无 chain → AuditResult 与决策行 4 列全 NULL（handoff 测试清单 #2 的无 chain 分支）。
+        pipeline, _config, db_path = _make_sqlite_pipeline(monkeypatch, tmp_path)
+        pipeline._thesis_pipeline._llm.fail_stage = "get_refined_thesis"
+        results = pipeline.run()
+        assert results[0].status == "pipeline_error"
+        assert results[0].cov_links_total is None
+        with SQLiteStore(str(db_path)) as store:
+            row = store.get_decisions()[0]
+        assert all(row[c] is None for c in _COV_COLS)

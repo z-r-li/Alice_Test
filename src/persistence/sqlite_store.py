@@ -88,6 +88,13 @@ class DecisionEntry:
     source_artifact: Optional[str] = None     # AuditResult artifact path/hash (traceable)
     pipeline_commit: Optional[str] = None
     model_version: Optional[str] = None
+    # 100Step 借鉴 PR②：证据链完成度四计数（审计指标，S3 enforce 之后口径）。
+    # fail-closed / 流水线回退（无 chain）与非 ok 行一律 NULL——0 是「拆了链但空」，
+    # None 是「没走到那」，语义不同不互替；旧行保持 NULL、不回填（append-only）。
+    cov_links_total: Optional[int] = None      # links 总数
+    cov_links_quant: Optional[int] = None      # proxy_type == quantitative（引擎可验证）
+    cov_links_evidenced: Optional[int] = None  # evidence is not None
+    cov_links_dd: Optional[int] = None         # due_diligence 或 evidence.needs_due_diligence（去重）
     notes: Optional[str] = None
     created_at: Optional[str] = None          # set on save if None
 
@@ -191,6 +198,10 @@ class SQLiteStore:
                 source_artifact  TEXT,
                 pipeline_commit  TEXT,
                 model_version    TEXT,
+                cov_links_total     INTEGER,
+                cov_links_quant     INTEGER,
+                cov_links_evidenced INTEGER,
+                cov_links_dd        INTEGER,
                 notes            TEXT
             );
             CREATE INDEX IF NOT EXISTS ix_decision_asof    ON decision_log(asof_date);
@@ -247,6 +258,13 @@ class SQLiteStore:
         dcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(decision_log)")}
         if "signal_semantics" not in dcols:
             self.conn.execute("ALTER TABLE decision_log ADD COLUMN signal_semantics TEXT")
+
+        # 100Step 借鉴 PR②：coverage 证据链完成度四计数（可空 INTEGER）。旧库缺列 →
+        # ADD COLUMN；既存行保持 NULL（「没走到那」，非 0）、**不回填**（append-only）。
+        for col in ("cov_links_total", "cov_links_quant",
+                    "cov_links_evidenced", "cov_links_dd"):
+            if col not in dcols:
+                self.conn.execute(f"ALTER TABLE decision_log ADD COLUMN {col} INTEGER")
 
     # ---- validation (fail-closed discipline) -------------------------------
     @staticmethod
