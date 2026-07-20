@@ -417,6 +417,13 @@ class AShareTextCoordinator(TextProvider):
             fetcher=fetcher, source_name=source_name, source_key=source_key,
             ticker=ticker, name=name, quota=quota, lookback_hours=lookback_hours,
         )
+        # 特征窗上界护栏：丢弃未来戳（look-ahead 泄露）。放在覆盖度统计**之前**，
+        # 使 hit_count / status 反映过滤后的真实素材——只抓到未来戳的源应记 empty 而非 ok。
+        # 也在去重/截断之前，避免未来戳挤占 max_items 配额。见 TextProvider.drop_future_items。
+        # 源时区按 ticker 推断（A 股 = 北京时）：本协调器下各 fetcher 的 naive 戳一律是
+        # 源站北京时，若按部署机本地解释，非 UTC+8 部署上最近 offset 小时内的最新素材
+        # 会被整批误判成未来戳。
+        items = self.drop_future_items(items, ticker)
         failed = self._fetch_stats[source_key]["failure"] > fail_before
         status = "failed" if failed else ("ok" if items else "empty")
         coverage_rows.append(
