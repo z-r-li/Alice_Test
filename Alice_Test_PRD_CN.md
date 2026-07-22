@@ -391,6 +391,7 @@ targets:
 output:
   format: "csv"  # 或 "sqlite"
   path: "./output/audit_report.csv"
+  daily_report_html: false  # 可选（#88）：true 时运行末尾（persistence.backend=sqlite）顺带生成当日自包含 HTML 日报
 
 # 调度配置
 scheduler:
@@ -402,6 +403,11 @@ gap_thresholds:
   opportunity_gap_min: 10.0   # gap > 10 → OPPORTUNITY（正 α）
   overheated_gap_min: 10.0    # gap < -10 → OVERHEATED（负 α → AVOID）
   # sentiment_overheat flag 阈值沿用代码默认 80（overheated_sentiment_min 转任，不参与信号）
+
+# S3 proxy 备选库（#87；整块可省略，省略即用下列默认值）
+proxy_library:
+  enabled: true   # false = 完全回到无库的现行为（生产 kill switch）
+  path: null      # 备选库 yaml 覆盖路径；null = 包内 src/engines/resources/proxy_library.yaml
 ```
 
 ### 5.2 环境变量
@@ -512,7 +518,7 @@ def parse_llm_response(response: str, retries: int = 1) -> dict:
 
 ### 第三阶段：监控与告警
 
-1. ⬜ 每日定时调度 (cron)
+1. ⬜ 每日定时调度 (cron)——日报侧已先行落地（#88：自包含 HTML 日报 CLI `python -m src.reporting.daily_report`，零 LLM、只读决策日志），cron 接线待做
 2. ⬜ 信号告警（邮件/Webhook）
 3. ⬜ 历史趋势可视化
 4. ⬜ SEC/HKEX 公告集成

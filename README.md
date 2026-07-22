@@ -29,7 +29,9 @@ Alice Test 是一个自动化 Python 数据流水线，用于监控特定投资�
 - 🌐 港美股: Serper.dev + LLM 多层浏览
 - 🤖 基于 DeepSeek-V4-Flash 的市场情绪分析
 - 📊 认知差计算与信号生成 (OPPORTUNITY / OVERHEATED / WAIT)
-- 📁 CSV 格式审计报告输出
+- 📚 S3 proxy 备选库：提案「库中选型 + 允许补充」（fail-closed，可一键回退无库行为）
+- 📁 CSV / SQLite 审计报告输出（SQLite 后端含 S7 决策日志）
+- 📄 可选自包含 HTML 日报（零 LLM / 零网络，只读决策日志 SQLite）
 
 ---
 
@@ -147,6 +149,12 @@ gap_thresholds:
 output:
   format: "csv"
   path: "audit_report.csv"
+  # daily_report_html: false  # 可选：true 时运行末尾（persistence.backend=sqlite）顺带生成当日 HTML 日报
+
+# S3 proxy 备选库（可选；默认启用、读包内库）
+# proxy_library:
+#   enabled: true   # false = 完全回到无库的现行为（生产 kill switch）
+#   path: null      # 备选库 yaml 覆盖路径；null = 包内 src/engines/resources/proxy_library.yaml
 ```
 
 ### 3. 运行程序
@@ -274,6 +282,19 @@ llm_api:
 
 **建议：** 初期使用标准模式，如发现 Module B 输出质量不佳再启用思考模式。
 
+### HTML 日报（可选）
+
+`persistence.backend=sqlite` 时可从决策日志生成当日**自包含 HTML 日报**（daily_report v0.1）：单文件、内嵌 CSS、无 JS / 无外链，浏览器直开或粘贴到 Lark 均可；零 LLM 调用、零网络，同输入同字节。内容含当日决策表（附证据链 coverage 四计数）、累计 hit_rate / IC（样本不足如实加标）、尽调队列与确定性 Bottom line；NULL 一律显示「—」，绝不显示为 0 或编数。
+
+两种触发方式：
+
+```bash
+# 方式一（推荐，cron 在 daily-run 后链式调用）：
+python -m src.reporting.daily_report --config config.yaml [--date YYYY-MM-DD] [--out DIR]
+```
+
+方式二：在 `config.yaml` 设 `output.daily_report_html: true`，运行末尾顺带生成（默认 `false`，不改变现行为）。输出至 `./output/daily_report/daily_YYYY-MM-DD.html`。
+
 ---
 
 ## 常见问题
@@ -315,7 +336,7 @@ targets:
 | LLM 服务 | DeepSeek-V4-Flash |
 | A股数据 | Tushare / AkShare |
 | 港美股数据 | yfinance |
-| 存储 | CSV |
+| 存储 | CSV / SQLite（审计报告 + S7 决策日志） |
 
 ---
 
