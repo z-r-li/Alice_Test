@@ -31,7 +31,7 @@ Alice Test 是一个自动化 Python 数据流水线，用于监控特定投资�
 - 📊 认知差计算与信号生成 (OPPORTUNITY / OVERHEATED / WAIT)
 - 📚 S3 proxy 备选库：提案「库中选型 + 允许补充」（fail-closed，可一键回退无库行为）
 - 📁 CSV 审计报告输出；可选 SQLite S7 决策日志（`persistence.backend=sqlite`）
-- 📄 可选自包含 HTML 日报（零 LLM / 零网络，只读决策日志 SQLite）
+- 📄 可选自包含 HTML 日报（零 LLM / 零网络；不写业务数据，打开旧版库会自动补列迁移 schema）
 
 ---
 
@@ -285,6 +285,8 @@ llm_api:
 ### HTML 日报（可选）
 
 `persistence.backend=sqlite` 时可从决策日志生成当日**自包含 HTML 日报**（daily_report v0.1）：单文件、内嵌 CSS、无 JS / 无外链，浏览器直开或粘贴到 Lark 均可；零 LLM 调用、零网络，同输入同字节。内容含当日决策表（附证据链 coverage 四计数）、累计 hit_rate / IC（样本不足如实加标）、尽调队列与确定性 Bottom line；NULL 一律显示「—」，绝不显示为 0 或编数。
+
+> **注意**：日报不写任何业务数据，但打开数据库经由 `SQLiteStore`，其初始化会对旧版本库自动补列迁移 schema（`ALTER TABLE ... ADD COLUMN`）。因此指向只读快照 / 只读文件系统会失败——请先用可写连接打开一次完成迁移，再对快照出报。
 
 两种触发方式：
 

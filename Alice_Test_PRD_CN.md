@@ -518,7 +518,7 @@ def parse_llm_response(response: str, retries: int = 1) -> dict:
 
 ### 第三阶段：监控与告警
 
-1. ⬜ 每日定时调度 (cron)——日报侧已先行落地（#88：自包含 HTML 日报 CLI `python -m src.reporting.daily_report`，零 LLM、只读决策日志），cron 接线待做
+1. ⬜ 每日定时调度 (cron)——日报侧已先行落地（#88：自包含 HTML 日报 CLI `python -m src.reporting.daily_report`，零 LLM、不写业务数据；打开旧库会自动补列迁移），cron 接线待做
 2. ⬜ 信号告警（邮件/Webhook）
 3. ⬜ 历史趋势可视化
 4. ⬜ SEC/HKEX 公告集成

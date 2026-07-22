@@ -49,7 +49,7 @@ alice_test/
 │   │
 │   ├── reporting/                   # 报告模块
 │   │   ├── __init__.py
-│   │   └── daily_report.py          # 自包含 HTML 日报（#88；只读决策日志、零 LLM/零网络）
+│   │   └── daily_report.py          # 自包含 HTML 日报（#88；零 LLM/零网络，不写业务数据；打开旧库自动补列迁移）
 │   │
 │   └── utils/                       # 工具模块
 │       ├── __init__.py
@@ -81,7 +81,7 @@ alice_test/
 | `llm/deepseek_client.py` | 封装 DeepSeek API 调用、重试机制、JSON 解析；per-stage thinking/effort 与非 thinking 路径 temp=0 硬锁 |
 | `llm/prompts.py` | 管理 Consensus Engine 和 Thesis Projector 的 Prompt 模板 |
 | `persistence/` | 审计结果写 CSV/SQLite（追加模式）；S7 决策日志（`SQLiteStore`）；阶段产物工件（`ArtifactStore`） |
-| `reporting/daily_report.py` | 自包含 HTML 日报（#88）：只读决策日志 SQLite 生成单文件日报（当日决策 + coverage 四计数 + 累计 hit_rate/IC + 尽调队列 + 确定性 Bottom line）；零 LLM、零网络、同输入同字节 |
+| `reporting/daily_report.py` | 自包含 HTML 日报（#88）：从决策日志 SQLite 生成单文件日报（当日决策 + coverage 四计数 + 累计 hit_rate/IC + 尽调队列 + 确定性 Bottom line）；零 LLM、零网络、同输入同字节；不写业务数据，但经 `SQLiteStore` 打开旧版库会触发补列迁移（只读快照上会失败） |
 | `utils/logger.py` | 统一日志格式，记录运行统计信息 |
 | `utils/sanitizer.py` | LLM 调用前文本脱敏，避免触发内容审核 |
 
@@ -486,7 +486,7 @@ def main() -> None:
     """命令行入口: python -m src.main --config config.yaml"""
     ...
 
-# 日报独立 CLI（#88；box cron 推荐在 daily-run 后链式调用，零 LLM、只读决策日志）：
+# 日报独立 CLI（#88；box cron 推荐在 daily-run 后链式调用，零 LLM、不写业务数据；旧库会被自动补列迁移）：
 #   python -m src.reporting.daily_report --config config.yaml [--date YYYY-MM-DD] [--out DIR]
 ```
 
