@@ -364,6 +364,62 @@ class TestCoordinatorUpperBound:
         assert rating_row.hit_count == 0
         assert rating_row.status == "empty"
 
+    def test_future_rows_do_not_crowd_out_valid_rows_within_quota(
+        self, coordinator, monkeypatch
+    ):
+        """Codex P2 回归：未来戳排在有效行之前时，不得因 fetcher 内部按 quota 截断而挤掉有效行。
+
+        fetcher 内部先按 max_items 截断（含未来戳），再由本护栏丢弃未来戳——若不给配额余量，
+        「未来戳 + 有效老行」在 quota=1 时会先被截成「只剩未来戳」，drop_future 后该源虚报 empty，
+        窗内本有的有效素材凭空消失。本 fake 忠实模拟真实 fetcher 的 `results[:max_items]` 行为。
+        """
+        now = _beijing_now()
+        # 源站按自报时间倒序：年份 typo 的未来戳排最前，两条有效老行在后
+        full_response = [
+            _item("未来戳(typo)", now + timedelta(days=365), source="机构评级"),
+            _item("有效·2h前", now - timedelta(hours=2), source="机构评级"),
+            _item("有效·5h前", now - timedelta(hours=5), source="机构评级"),
+        ]
+        # 忠实模拟 fetcher 内部截断：只返回前 max_items 条（含未来戳占位）
+        monkeypatch.setattr(
+            coordinator._rating_fetcher, "fetch_texts",
+            lambda *, max_items, **kw: full_response[:max_items],
+        )
+
+        # 单源 quota=1：修复前 fetcher 只回未来戳→drop 后 empty；修复后多取余量→回有效行
+        texts = coordinator.fetch_texts(ticker=TICKER, name="中国核电", max_items=1)
+
+        assert [t.title for t in texts] == ["有效·2h前"]
+        coverage = coordinator.get_last_coverage()
+        rating_row = next(r for r in coverage.per_source if r.source == "rating")
+        assert rating_row.hit_count == 1
+        assert rating_row.status == "ok"
+
+    def test_per_source_quota_still_capped_after_headroom(self, coordinator, monkeypatch):
+        """配额语义不被余量破坏：多取只为吸收未来戳，最终每源仍截回真实 quota。"""
+        now = _beijing_now()
+        # 标题、摘要各不相同，避开协调器去重（标题相似>0.8 或 summary 相同即视为重复）
+        specs = [
+            ("券商研报速评", "结论：装机加速，看多", 1),
+            ("重大合同公告", "中标核电主设备订单", 2),
+            ("上证e互动问答", "回应产能扩张进度", 3),
+            ("财联社电报", "签署长期供货协议", 4),
+        ]
+        full_response = [
+            TextItem(source="机构评级", type="news", title=t, summary=s,
+                     published_at=now - timedelta(hours=h), url="https://x/y")
+            for t, s, h in specs
+        ]
+        monkeypatch.setattr(
+            coordinator._rating_fetcher, "fetch_texts",
+            lambda *, max_items, **kw: full_response[:max_items],
+        )
+
+        texts = coordinator.fetch_texts(ticker=TICKER, name="中国核电", max_items=2)
+
+        # 单源 quota=2（唯一启用源，全额）：即便多取了余量，也只保留最新 2 条
+        assert [t.title for t in texts] == ["券商研报速评", "重大合同公告"]
+
 
 class TestDropFutureItemsUnit:
     """护栏本体的直接单测（与聚合口接线解耦）。
