@@ -26,10 +26,13 @@ alice_test/
 │   │   ├── __init__.py
 │   │   ├── consensus_engine.py      # Module A: 市场共识引擎
 │   │   ├── thesis_projector.py      # Module B: 信念投影器
-│   │   ├── thesis_pipeline.py       # S1–S5 多阶段命题流水线
+│   │   ├── thesis_pipeline.py       # S1–S5 多阶段命题流水线（S2 拆解后自查补漏，#87）
 │   │   ├── financial_analysis.py    # S4: 财务证据 / 估值反推
 │   │   ├── gap_calculator.py        # Gap 计算与信号判定
-│   │   └── risk_engine.py           # S6: 组合风控叠加（纯数学、无 LLM，见 §3.5）
+│   │   ├── risk_engine.py           # S6: 组合风控叠加（纯数学、无 LLM，见 §3.5）
+│   │   ├── proxy_library.py         # S3 proxy 备选库加载/校验/渲染（#87，fail-closed）
+│   │   └── resources/
+│   │       └── proxy_library.yaml   # 包内默认备选库（config.proxy_library.path 可覆盖）
 │   │
 │   ├── llm/                         # LLM 封装模块
 │   │   ├── __init__.py
@@ -43,6 +46,10 @@ alice_test/
 │   │   ├── csv_writer.py            # CSV 实现
 │   │   ├── sqlite_store.py          # SQLite：审计报告 + S7 决策日志（#81 落地，见 §3.6）
 │   │   └── artifact_store.py        # 阶段产物 JSON 存储（证据链工件）
+│   │
+│   ├── reporting/                   # 报告模块
+│   │   ├── __init__.py
+│   │   └── daily_report.py          # 自包含 HTML 日报（#88；零 LLM/零网络，不写业务数据；打开旧库自动补列迁移）
 │   │
 │   └── utils/                       # 工具模块
 │       ├── __init__.py
@@ -66,13 +73,15 @@ alice_test/
 | `data_ingestion/preprocessor.py` | 文本去噪、正则过滤、保留有观点密度的内容 |
 | `engines/consensus_engine.py` | 调用 LLM 提取市场共识、情绪评分、隐含增长率 |
 | `engines/thesis_projector.py` | 调用 LLM 基于用户宏观信念评估合理增长率 |
-| `engines/thesis_pipeline.py` | S1–S5：命题完善 → 逻辑链拆解 → proxy 映射 → 证据/估值反推 → 信念综合 |
+| `engines/thesis_pipeline.py` | S1–S5：命题完善 → 逻辑链拆解（含拆解后自查补漏，#87）→ proxy 映射 → 证据/估值反推 → 信念综合 |
 | `engines/financial_analysis.py` | S4 财务证据分析与估值反推（配合 financials/ 数据） |
 | `engines/gap_calculator.py` | 本地计算 Gap 值，生成 OPPORTUNITY/OVERHEATED/WAIT 信号 |
 | `engines/risk_engine.py` | S6 组合风控叠加：软参考 sizing + 行业聚类上限 + 总风险预算（纯数学、离线确定性可测） |
+| `engines/proxy_library.py` | S3 proxy 备选库（#87）：加载/校验备选库 yaml 并渲染进 S3 系统指令，提案从「LLM 从零发明」变「库中选型 + 允许补充」；fail-closed、库⇔词表加载期一致性、`enabled=False` 逐字回归无库 prompt |
 | `llm/deepseek_client.py` | 封装 DeepSeek API 调用、重试机制、JSON 解析；per-stage thinking/effort 与非 thinking 路径 temp=0 硬锁 |
 | `llm/prompts.py` | 管理 Consensus Engine 和 Thesis Projector 的 Prompt 模板 |
 | `persistence/` | 审计结果写 CSV/SQLite（追加模式）；S7 决策日志（`SQLiteStore`）；阶段产物工件（`ArtifactStore`） |
+| `reporting/daily_report.py` | 自包含 HTML 日报（#88）：从决策日志 SQLite 生成单文件日报（当日决策 + coverage 四计数 + 累计 hit_rate/IC + 尽调队列 + 确定性 Bottom line）；零 LLM、零网络、同输入同字节；不写业务数据，但经 `SQLiteStore` 打开旧版库会触发补列迁移（只读快照上会失败） |
 | `utils/logger.py` | 统一日志格式，记录运行统计信息 |
 | `utils/sanitizer.py` | LLM 调用前文本脱敏，避免触发内容审核 |
 
@@ -449,6 +458,8 @@ class OutcomeEntry: ...    # created_at 由 store 时钟盖戳，调用方不可
 
 class SQLiteStore:
     # 表：decision_log / decision_outcome / position_history / alpha_track（后两者写方法 = v0.2）
+    # decision_log 附加列：signal_semantics（v2 标记，#86）；cov_links_total/quant/evidenced/dd
+    #   （coverage 四计数，#88）——均可空，旧库 ADD COLUMN、旧行保持 NULL 不回填（append-only）
     def save_decision(self, entry) -> str: ...        # 幂等 upsert
     def record_outcome(self, outcome) -> int: ...     # append-only
     def get_decisions(self, asof=None, ...): ...      # point-in-time 按 created_at（存在性快照，非内容版本化）
@@ -467,11 +478,16 @@ class AliceTestPipeline:
     def _ingest_data(self, target: TargetConfig) -> TickerRawData: ...
     def _build_risk_engine(self) -> RiskEngine | None: ...   # config.risk.enabled=False → 跳过叠加
     def _build_decision_entry(self, result) -> DecisionEntry: ...
+    def _coverage_counts(pr) -> tuple[int | None, ...]: ...  # 证据链完成度四计数（#88，纯审计指标；回退/fail-closed 行全 None，不造 0）
+    def _write_daily_report_html(self, results) -> None: ... # output.daily_report_html=true 时的可选钩子（#88，默认关）
     # 决策日志覆盖所有结果（含 WAIT 与 fail-closed）；回退 BUY 门控 = OPPORTUNITY 且 thesis_aligned
 
 def main() -> None:
     """命令行入口: python -m src.main --config config.yaml"""
     ...
+
+# 日报独立 CLI（#88；box cron 推荐在 daily-run 后链式调用，零 LLM、不写业务数据；旧库会被自动补列迁移）：
+#   python -m src.reporting.daily_report --config config.yaml [--date YYYY-MM-DD] [--out DIR]
 ```
 
 ## 4. 数据流图
@@ -561,12 +577,12 @@ else:
 
 阈值来自 `config.yaml` 的 `gap_thresholds`（代码默认 = 上述标准值；v1 情绪字段 deprecated，兼容加载）。
 
-## 6. 实现状态与后续优先级（2026-07-01）
+## 6. 实现状态与后续优先级（2026-07-22）
 
-**已完成**：MVP 全链路 + S1–S5 命题流水线（P1）、S6 风控叠加（#76）、fail-closed 不造数 / 外部文本围栏 / temperature=0 硬锁（#77–#80）、S7 决策日志 SQLite（#81）、LLM per-stage 基建 + `${ENV}` 插值（#82）。
+**已完成**：MVP 全链路 + S1–S5 命题流水线（P1）、S6 风控叠加（#76）、fail-closed 不造数 / 外部文本围栏 / temperature=0 硬锁（#77–#80）、S7 决策日志 SQLite（#81）、LLM per-stage 基建 + `${ENV}` 插值（#82）、SOURCE_REACHABILITY 按 box 实测更新（#84/CDX-6）、LLM 用量统计接线（#85）、信号语义 v2（#86，D-20260705-1，见 §5）、S3 proxy 备选库 + S2 拆链补漏自查（#87）、coverage 四计数 + 自包含 HTML 日报（#88）。
 
 **下一步**（权威清单见团队内部 ItemList / 决策台账）：
 
-1. daily-run 自动化（cron 化入口）—— P0-5 验证起跑的最后前置
-2. ~~CDX-1 信号语义~~ → **已落地（信号语义 v2，D-20260705-1，见 §5）**；LLM per-stage 剩余接线（S1–S4 thinking、effort=max 范围）待拍
+1. daily-run 自动化（cron 化入口）—— P0-5 验证起跑的最后前置；#88 已落地日报侧（`output.daily_report_html` 钩子 + `python -m src.reporting.daily_report` CLI），box 侧 cron 接线待做
+2. LLM per-stage 剩余接线（S1–S4 thinking、effort=max 范围）待拍
 3. S7 v0.2：versioned rows（内容级 point-in-time）、`position_history` / `alpha_track` 写方法、跨日改写护栏
