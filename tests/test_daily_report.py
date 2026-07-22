@@ -5,7 +5,8 @@
 - 空库 / 无当日行 → 「本日无决策记录」+ 累计区照常；
 - 确定性：同输入两次生成，除页脚「生成时间」行外逐字节相同；
 - fail-closed：DB 不存在 / 日期格式错 → 明确抛错，不产空心报表；
-- CLI 冒烟（tmp 路径）与 main.py 可选钩子（output.daily_report_html=true）。
+- CLI 冒烟（tmp 路径）与 main.py 可选钩子（output.daily_report_html=true）；
+- 真只读（PR #90 复审）：零 DDL / 零写、写保护文件可用、旧库缺列明确报错指引迁移。
 """
 from pathlib import Path
 
@@ -254,3 +255,73 @@ class TestValidationSampleCaliber:
         assert "本日无决策记录" not in html
         out = write_daily_report(str(seeded_db), "2026-7-9", tmp_path / "norm")
         assert out.name == "daily_2026-07-09.html"
+
+
+class TestReadonlyReportAccess:
+    """PR #90 复审（Codex）：日报路径必须真只读——零 DDL / 零写（指向生产库不改
+    schema，只读快照 / 只读文件系统可用）；旧库缺迁移列 → 明确报错指引先用可写
+    连接完成迁移（fail-closed，不静默迁移也不深处炸 no such column）。"""
+
+    def test_report_leaves_db_bytes_untouched(self, seeded_db):
+        before = seeded_db.read_bytes()
+        html = build_daily_report_html(str(seeded_db), ASOF)
+        assert "601985.SH" in html
+        assert seeded_db.read_bytes() == before        # 零 DDL / 零写：逐字节未动
+        # mode=ro 不落 journal / wal 边车文件
+        assert [p.name for p in seeded_db.parent.iterdir()] == [seeded_db.name]
+
+    def test_report_works_on_write_protected_file(self, seeded_db):
+        # 只读快照 / 只读文件系统场景（Windows 只读属性 / POSIX 去写权限）
+        import os
+        import stat
+        os.chmod(seeded_db, stat.S_IREAD)
+        try:
+            html = build_daily_report_html(str(seeded_db), ASOF)
+            assert "601985.SH" in html
+            assert "100.0%" in html                    # 累计区照常（读路径完整可用）
+        finally:
+            os.chmod(seeded_db, stat.S_IREAD | stat.S_IWRITE)
+
+    def test_wal_db_rejected_with_conversion_guidance(self, seeded_db):
+        # WAL 库 + mode=ro 仍会落 -wal/-shm 边车（PR #91 复审实证）→ 日报路径
+        # fail-closed 拒绝并指引切回 delete，且拒绝先于任何 SQLite 打开（零边车）。
+        import sqlite3
+        conn = sqlite3.connect(str(seeded_db))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.close()
+        with pytest.raises(RuntimeError, match="journal_mode=DELETE"):
+            build_daily_report_html(str(seeded_db), ASOF)
+        assert [p.name for p in seeded_db.parent.iterdir()] == [seeded_db.name]
+
+    def test_old_schema_db_errors_with_migration_guidance(self, tmp_path):
+        # 旧库（缺 signal_semantics / cov_links_* / outcome.created_at）：明确报错
+        # 指引「先用可写连接打开一次完成迁移」，绝不静默改生产库 schema。
+        import sqlite3
+
+        from tests.test_decision_log_store import _DECISION_COLS_LEGACY
+
+        db = tmp_path / "old_schema.db"
+        conn = sqlite3.connect(str(db))
+        conn.executescript(
+            f"""
+            CREATE TABLE decision_log (
+                {', '.join(c + ' TEXT' for c in _DECISION_COLS_LEGACY)},
+                PRIMARY KEY (decision_id)
+            );
+            CREATE TABLE decision_outcome (
+                outcome_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_id TEXT NOT NULL REFERENCES decision_log(decision_id),
+                observed_at TEXT NOT NULL, horizon_label TEXT, realized_value REAL,
+                realized_direction INTEGER, hit INTEGER, excess_return REAL,
+                is_final INTEGER NOT NULL DEFAULT 0, note TEXT
+            );
+            """
+        )
+        conn.commit()
+        conn.close()
+        with pytest.raises(RuntimeError, match="可写连接"):
+            build_daily_report_html(str(db), ASOF)
+        # 指引闭环：按提示用可写连接打开一次（SQLiteStore 自动迁移）后日报即通
+        SQLiteStore(str(db)).close()
+        html = build_daily_report_html(str(db), ASOF)
+        assert "本日无决策记录" in html

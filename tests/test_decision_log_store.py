@@ -7,6 +7,9 @@
 2. ``TestSQLiteReportStore`` —— audit_reports SQLite 后端 roundtrip（替换原 NotImplementedError 桩）。
 3. ``TestDecisionLogPipeline`` —— backend=sqlite 端到端 mock 流水线：每个标的（含 WAIT /
    fail-closed）在 decision_log 留一行可追溯记录（CDX-2 / P0-5）。
+4. ``TestReadonlyOpen`` —— ``readonly=True`` 真只读开库（PR #90/#91 复审）：零 DDL /
+   零写、写路径被拒、缺文件不建库、WAL 库拒绝（mode=ro 仍落边车）、旧库缺迁移列
+   fail-closed 指引先用可写连接迁移。
 """
 from datetime import datetime
 
@@ -1026,3 +1029,101 @@ class TestCoveragePipeline:
         with SQLiteStore(str(db_path)) as store:
             row = store.get_decisions()[0]
         assert all(row[c] is None for c in _COV_COLS)
+
+
+class TestReadonlyOpen:
+    """``readonly=True`` 真只读开库（PR #90 复审，Codex）：SQLite ``mode=ro`` URI，
+    零 DDL / 零写——写路径被 OS 层拒绝；旧库缺迁移列 → 开库门禁抛明确指引
+    （fail-closed），而非静默迁移改 schema 或深处炸 no such column。"""
+
+    def _seed(self, tmp_path):
+        db = tmp_path / "ro.db"
+        with SQLiteStore(str(db)) as s:
+            s.save_decision(_entry(gap=5.0))
+            s.record_outcome(OutcomeEntry(decision_id="601985-2026-06-29",
+                                          is_final=1, hit=1, excess_return=0.03))
+        return db
+
+    def test_reads_work_and_db_bytes_untouched(self, tmp_path):
+        db = self._seed(tmp_path)
+        before = db.read_bytes()
+        with SQLiteStore(str(db), readonly=True) as s:
+            assert s.get_decisions()[0]["decision_id"] == "601985-2026-06-29"
+            assert s.hit_rate() == pytest.approx(1.0)
+            assert s.information_coefficient("gap") is None   # 单点样本 → None，不编造
+            assert s.get_open_decisions() == []
+        assert db.read_bytes() == before                      # 零写：库文件逐字节未动
+        # mode=ro 不落 journal / wal 边车文件
+        assert [p.name for p in tmp_path.iterdir()] == [db.name]
+
+    def test_writes_rejected(self, tmp_path):
+        import sqlite3
+        db = self._seed(tmp_path)
+        with SQLiteStore(str(db), readonly=True) as s:
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                s.save_decision(_entry(decision_id="new", asof_date="2026-07-01"))
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                s.record_outcome(OutcomeEntry(decision_id="601985-2026-06-29", is_final=1))
+
+    def test_missing_file_not_created(self, tmp_path):
+        import sqlite3
+        db = tmp_path / "no_such.db"
+        with pytest.raises(sqlite3.OperationalError):
+            SQLiteStore(str(db), readonly=True)
+        assert not db.exists()                                # mode=ro 绝不静默建库
+
+    def test_memory_rejected(self):
+        with pytest.raises(ValueError, match=":memory:"):
+            SQLiteStore(readonly=True)
+
+    def test_wal_db_rejected_before_any_sidecar(self, tmp_path):
+        # PR #91 复审（Codex）实证：WAL 库 + mode=ro 首次读取仍会落 -wal/-shm 边车
+        # （关闭不清理；只读目录直接打不开）→ 连接前按文件头拒绝，零边车。
+        import sqlite3
+        db = self._seed(tmp_path)
+        conn = sqlite3.connect(str(db))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.close()                                   # 干净关闭：WAL 标记留在文件头
+        with pytest.raises(RuntimeError, match="journal_mode=DELETE"):
+            SQLiteStore(str(db), readonly=True)
+        # 拒绝发生在任何 SQLite 打开之前：目录未被污染
+        assert [p.name for p in tmp_path.iterdir()] == [db.name]
+        # 指引闭环：按提示切回 delete 模式后，只读开库即通
+        conn = sqlite3.connect(str(db))
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.close()
+        with SQLiteStore(str(db), readonly=True) as s:
+            assert s.hit_rate() == pytest.approx(1.0)  # 数据经 checkpoint 完整保留
+
+    def test_legacy_db_fails_closed_with_migration_guidance(self, tmp_path):
+        # v2 前 legacy 库：decision_log 无 signal_semantics / cov_links_*，
+        # decision_outcome 无 created_at——只读打开必须点名缺列并指引先迁移。
+        import sqlite3
+        db = str(tmp_path / "legacy_ro.db")
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            f"""
+            CREATE TABLE decision_log (
+                {', '.join(c + ' TEXT' for c in _DECISION_COLS_LEGACY)},
+                PRIMARY KEY (decision_id)
+            );
+            CREATE TABLE decision_outcome (
+                outcome_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_id TEXT NOT NULL REFERENCES decision_log(decision_id),
+                observed_at TEXT NOT NULL, horizon_label TEXT, realized_value REAL,
+                realized_direction INTEGER, hit INTEGER, excess_return REAL,
+                is_final INTEGER NOT NULL DEFAULT 0, note TEXT
+            );
+            """
+        )
+        conn.commit()
+        conn.close()
+        with pytest.raises(RuntimeError) as ei:
+            SQLiteStore(db, readonly=True)
+        msg = str(ei.value)
+        assert "signal_semantics" in msg and "created_at" in msg   # 点名缺列
+        assert "可写连接" in msg                                    # 指引先迁移
+        # 指引闭环：按提示用可写连接打开一次（自动迁移）后，只读开库即通
+        SQLiteStore(db).close()
+        with SQLiteStore(db, readonly=True) as s:
+            assert s.get_decisions() == []

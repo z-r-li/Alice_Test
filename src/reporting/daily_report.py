@@ -6,6 +6,12 @@ hit_rate / information_coefficient（复用 ``SQLiteStore`` 既有口径与去�
 尽调队列 + 确定性 Bottom line。**零 LLM 调用、零网络**；同输入同字节——唯一的
 非确定性是页脚「生成时间」单行（测试断言时排除该行）。
 
+真只读（PR #90 复审落地）：以 ``SQLiteStore(db_path, readonly=True)``（SQLite
+``mode=ro`` URI）打开，**零 DDL / 零写 / 零边车**——指向生产库不会动 schema，指向
+只读快照 / 只读文件系统亦可用。两类异常库 fail-closed 不静默：旧库缺迁移列 →
+开库即抛明确指引（先用可写连接打开一次完成自动迁移）；WAL 模式库 → 拒绝并指引
+切回 delete 模式（``mode=ro`` 对 WAL 仍会落 -wal/-shm 边车，破坏上述承诺）。
+
 自包含约定：单文件 HTML、内嵌 CSS、UTF-8、无 JS、无外链 / 无外部字体——浏览器
 直开与 Lark 粘贴均可。fail-closed 风格：NULL 显示「—」、绝不显示为 0 或编数；
 无当日行 / 空库如实输出「本日无决策记录」，累计区照常。
@@ -274,17 +280,20 @@ def build_daily_report_html(db_path: str, asof_date: str) -> str:
         asof_date: 报告日 YYYY-MM-DD（按 ``decision_log.asof_date`` 精确匹配当日行）。
 
     Raises:
-        ValueError: asof_date 非 YYYY-MM-DD。
+        ValueError: asof_date 非 YYYY-MM-DD（或 db_path 为 ``:memory:``——只读打开
+            全新内存库无意义，store 直接拒绝）。
         FileNotFoundError: DB 文件不存在（fail-closed：不静默建空库、不产出空心报表）。
+        RuntimeError: 库 schema 落后于当前版本（旧库缺迁移列，按报错指引先用可写
+            连接打开一次完成自动迁移），或库为 WAL 模式（``mode=ro`` 仍会落
+            -wal/-shm 边车，按指引 ``PRAGMA journal_mode=DELETE`` 切回后再生成）。
     """
     asof_date = _normalize_date(asof_date)
     if db_path != ":memory:" and not Path(db_path).exists():
         raise FileNotFoundError(f"决策日志 DB 不存在: {db_path}")
 
-    # 打开即沿 store 开库既有行为自动迁移旧 schema（补可空列；早期 pre-created_at
-    # 库另有 created_at←observed_at 回填先例，同属 _migrate 既有语义、非本模块新增）；
-    # 本模块自身不写任何决策 / 结果行。
-    with SQLiteStore(db_path) as store:
+    # 真只读打开（mode=ro，PR #90 复审）：零 DDL / 零写——不迁移 schema、不落
+    # journal；旧库缺迁移列由 store 开库门禁抛明确指引（fail-closed，不静默）。
+    with SQLiteStore(db_path, readonly=True) as store:
         day_rows = store.get_decisions(since=asof_date, until=asof_date)
         parts = [
             "<!DOCTYPE html>",
