@@ -103,14 +103,6 @@ class AShareTextCoordinator(TextProvider):
     # 素材过薄阈值（最终条数 < 此值时覆盖度元数据标降级）
     THIN_COVERAGE_THRESHOLD: int = 3
 
-    # 未来戳护栏的配额余量：各 fetcher 内部按 max_items 截断（含未来戳），若未来戳排在
-    # 有效行之前（源站按其自报时间倒序，年份 typo/时钟前偏的行会排到最前），截断会在
-    # drop_future 之前就把窗内有效行挤出配额，使该源虚报为 empty。故按 quota + 此余量多取，
-    # drop_future 后再截回 quota，让未来戳不占配额。整份 DataFrame 本就已拉取，多转几行近乎零成本
-    # （见 news_fetcher：ak.stock_news_em 一次返回全表，max_items 只限转换条数）。余量内的
-    # 未来戳都能被吸收；某源被整体时钟前偏到超过余量属源本身不可信，退化为 thin 可接受。
-    _FUTURE_GUARD_HEADROOM: int = 20
-
     # 标题相似度阈值（超过此值视为重复）
     TITLE_SIMILARITY_THRESHOLD: float = 0.8
 
@@ -421,12 +413,12 @@ class AShareTextCoordinator(TextProvider):
             return []
 
         fail_before = self._fetch_stats[source_key]["failure"]
-        # 多取 _FUTURE_GUARD_HEADROOM 条余量：fetcher 内部按 max_items 截断（含未来戳）发生在
+        # 多取 FUTURE_GUARD_HEADROOM 条余量：fetcher 内部按 max_items 截断（含未来戳）发生在
         # 本护栏之前，若未来戳排在有效行之前会先挤掉窗内有效行。多取 → drop_future → 截回 quota，
-        # 使未来戳不占配额、也不会把「实有窗内素材」的源虚报为 empty。
+        # 使未来戳不占配额、也不会把「实有窗内素材」的源虚报为 empty。（常量释义见 TextProvider）
         items = self._fetch_with_fallback(
             fetcher=fetcher, source_name=source_name, source_key=source_key,
-            ticker=ticker, name=name, quota=quota + self._FUTURE_GUARD_HEADROOM,
+            ticker=ticker, name=name, quota=quota + self.FUTURE_GUARD_HEADROOM,
             lookback_hours=lookback_hours,
         )
         # 特征窗上界护栏：丢弃未来戳（look-ahead 泄露）。放在覆盖度统计**之前**，

@@ -30,8 +30,9 @@ from src.config.models import AShareTextSourceConfig
 from src.data_ingestion.models import TextItem
 from src.data_ingestion.text import TextProviderFactory
 from src.data_ingestion.text.a_share.coordinator import AShareTextCoordinator
+from src.data_ingestion.text.a_share.provider import AShareTextProvider
 from src.data_ingestion.text.base import CHINA_TZ, TextProvider
-from src.data_ingestion.text.models import TextSourceType
+from src.data_ingestion.text.models import FetchResult, TextSourceType
 
 TICKER = "601985.SH"       # A 股：naive 戳按北京时解释
 US_TICKER = "AAPL"         # 美股：naive 戳按部署机本地解释
@@ -419,6 +420,63 @@ class TestCoordinatorUpperBound:
 
         # 单源 quota=2（唯一启用源，全额）：即便多取了余量，也只保留最新 2 条
         assert [t.title for t in texts] == ["券商研报速评", "重大合同公告"]
+
+
+class TestFactoryAShareProviderPath:
+    """工厂 A 股分支（AShareTextProvider）：与协调器同构的逐源配额，须同样加余量。
+
+    生产上 A 股走协调器、不经工厂（main.py:940）；但 TextProviderFactory.fetch_texts 是
+    文档化的公开便捷入口（其 docstring 即以 601985.SH 为例），直接调用方会命中
+    AShareTextProvider —— 后者同样逐源分配 quota、各 fetcher 内部先截断，故同一挤占缺陷成立。
+    """
+
+    def _fake_fetch(self, full_response):
+        """忠实模拟 fetcher.fetch 内部按 max_items 截断（含未来戳占位）。"""
+        def fetch(*, max_items, **kw):
+            return FetchResult(
+                items=full_response[:max_items],
+                source_type=TextSourceType.NEWS,
+                success=True,
+            )
+        return fetch
+
+    def test_future_rows_do_not_crowd_out_on_factory_a_share_path(self, monkeypatch):
+        """回归（Codex 二次指出）：工厂 A 股路径同样不得因逐源截断挤掉窗内有效行。"""
+        provider = TextProviderFactory.get_provider(TICKER)   # 真实 AShareTextProvider
+        assert isinstance(provider, AShareTextProvider)
+        now = _beijing_now()
+        full_response = [
+            _item("未来戳(typo)", now + timedelta(days=365)),
+            _item("有效·2h前", now - timedelta(hours=2)),
+            _item("有效·5h前", now - timedelta(hours=5)),
+        ]
+        monkeypatch.setattr(
+            provider._news_fetcher, "fetch", self._fake_fetch(full_response)
+        )
+
+        # 只启用 news → quota=max_items=1；未来戳排最前，修复前该源被截成「只剩未来戳」→空
+        texts = TextProviderFactory.fetch_texts(
+            ticker=TICKER, name="中国核电", max_items=1,
+            source_types=[TextSourceType.NEWS],
+        )
+
+        assert [t.title for t in texts] == ["有效·2h前"]
+
+    def test_fresh_item_survives_on_factory_a_share_path(self, monkeypatch):
+        """回归：工厂 A 股路径上北京时刚发布的条目不得被误杀。"""
+        provider = TextProviderFactory.get_provider(TICKER)
+        now = _beijing_now()
+        monkeypatch.setattr(
+            provider._news_fetcher, "fetch",
+            self._fake_fetch([_item("刚发布·北京时", now - timedelta(minutes=5))]),
+        )
+
+        texts = TextProviderFactory.fetch_texts(
+            ticker=TICKER, name="中国核电", max_items=1,
+            source_types=[TextSourceType.NEWS],
+        )
+
+        assert [t.title for t in texts] == ["刚发布·北京时"]
 
 
 class TestDropFutureItemsUnit:

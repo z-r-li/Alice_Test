@@ -22,6 +22,14 @@ _INFER_FROM_TICKER: Any = object()
 class TextProvider(ABC):
     """文本数据提供者抽象基类"""
 
+    # 未来戳护栏的 per-source 配额余量。做**逐源配额分配**的聚合器（AShareTextCoordinator /
+    # AShareTextProvider）里，各 fetcher 内部按 max_items 截断（含未来戳）发生在
+    # drop_future_items 之前——未来戳排在有效行之前会先占满配额、把窗内有效行挤掉。故按
+    # `quota + 此余量` 多取、drop_future 后再截回 quota。整份 DataFrame 本就已一次拉取
+    # （max_items 只限转换条数），多转几行近乎零成本；余量内的未来戳都能吸收，某源被整体
+    # 时钟前偏到超过余量属源本身不可信、退化为 thin 可接受。
+    FUTURE_GUARD_HEADROOM: int = 20
+
     @abstractmethod
     def fetch_texts(
         self,
