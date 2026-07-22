@@ -22,7 +22,7 @@ from datetime import date, datetime
 import pandas as pd
 
 from ...models import TextItem
-from ..base import TextProvider
+from ..base import CHINA_TZ, TextProvider
 from ..models import TextSourceType
 
 logger = logging.getLogger("alice_test")
@@ -139,9 +139,13 @@ class ProfitForecastFetcher(TextProvider):
             analyst = _first(row, "研究员", "分析师")
             rating = _first(row, "评级", "投资评级", "最新评级", "东财评级")
             report_count = _first(row, "研报数", "机构数")
+            # 兜底用**北京时**的墙上时间，而非本地 datetime.now()：本包对 naive
+            # published_at 的契约是「源站（北京）墙上时间」（见 TextProvider.source_tz_for_market），
+            # 上界护栏据此归一。若这里留本地时钟，在 UTC+8 以东的部署上该兜底戳会被
+            # 判成未来戳误杀。
             published = _parse_dt(
                 _first(row, "报告日期", "日期", "发布日期", "评级日期") or None
-            ) or datetime.now()
+            ) or datetime.now(CHINA_TZ).replace(tzinfo=None)
 
             bits = []
             if report_count:

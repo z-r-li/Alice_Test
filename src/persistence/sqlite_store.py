@@ -435,12 +435,18 @@ class SQLiteStore:
         final（取决于哪档后写）。要按单一 horizon 稳定打分请显式传 horizon（如 ``"30d"``）——仅在
         该 horizon 的 final 内取最新，使其**不被更晚 horizon（90d/final）的 final 覆盖或改变**。
 
-        ``asof``：复现「截至 asof 的命中率」，按结果**入账时刻** ``o.created_at`` ≤ asof 取样
-        （倒填 observed_at 的 backfill 不影响）。与 get_open_decisions(asof) 同源。注意 decision
-        侧字段（action 等）取最新内容（内容版本化 = v0.2），故 asof 是**结果时序意义上**的快照。"""
+        ``asof``：复现「截至 asof 的命中率」，**双侧约束**——同时要求结果的入账时刻
+        ``o.created_at`` ≤ asof（倒填 observed_at 的 backfill 不影响）**与决策行 ``d.created_at``
+        ≤ asof**（与 get_open_decisions 一致：asof 当时尚未入账的决策不进该快照的样本；
+        ``save_decision`` 尊重显式 created_at 的历史回填语义使未来戳决策行可能存在）。注意
+        decision 侧字段（action 等）取最新内容（内容版本化 = v0.2），故 asof 是**时序意义上**的快照。"""
         hz_outer = " AND o.horizon_label = ?" if horizon else ""
         hz_sub = " AND o2.horizon_label = ?" if horizon else ""
-        asof_outer = " AND o.created_at <= ?" if asof else ""
+        # 决策侧 d.created_at 只加在**外层**：decision_id 是 decision_log 主键，子查询按
+        # o2.decision_id=d.decision_id 相关联，故 d.created_at 在子查询内是行常量，改变不了
+        # 「哪一条 o2 是 MAX」——镜像进子查询是语义空操作，只会多一个绑定位、徒增错位风险。
+        # 反之 o.created_at **必须**镜像为 asof_sub：它筛掉 o2 候选集，直接决定 MAX 落在哪行。
+        asof_outer = " AND o.created_at <= ? AND d.created_at <= ?" if asof else ""
         asof_sub = " AND o2.created_at <= ?" if asof else ""
         q = ("SELECT d.action, o.hit FROM decision_log d "
              "JOIN decision_outcome o ON o.decision_id=d.decision_id "
@@ -449,11 +455,12 @@ class SQLiteStore:
              "  SELECT MAX(o2.outcome_id) FROM decision_outcome o2 "
              "  WHERE o2.decision_id=d.decision_id AND o2.is_final=1" + hz_sub + asof_sub + ")")
         p: list[Any] = []
-        # 绑定顺序须与 SQL 文本一致：hz_outer, asof_outer, hz_sub, asof_sub, since, until
+        # 绑定顺序须与 SQL 文本一致：hz_outer, asof_outer(o, d), hz_sub, asof_sub, since, until
         if horizon:
             p.append(horizon)
         if asof:
-            p.append(_eod(asof))
+            p.append(_eod(asof))     # asof_outer 第 1 个 ?：o.created_at（结果侧）
+            p.append(_eod(asof))     # asof_outer 第 2 个 ?：d.created_at（决策侧）
         if horizon:
             p.append(horizon)
         if asof:
@@ -476,8 +483,9 @@ class SQLiteStore:
         and realized excess_return over FINAL outcomes. IR = IC * sqrt(breadth).
 
         去重 / NULL / ``horizon`` / ``asof`` / ``since`` / ``until`` 语义同 hit_rate()：按
-        MAX(outcome_id) 取每 decision 的最新 final（``horizon`` 限定档位、``asof`` 限定结果入账
-        时刻 ``o.created_at`` ≤ asof），再套 ``o.excess_return IS NOT NULL``；``since`` / ``until``
+        MAX(outcome_id) 取每 decision 的最新 final（``horizon`` 限定档位、``asof`` **双侧**限定
+        结果入账时刻 ``o.created_at`` ≤ asof **与决策行 ``d.created_at`` ≤ asof**，与
+        get_open_decisions 一致），再套 ``o.excess_return IS NOT NULL``；``since`` / ``until``
         按决策 ``asof_date`` 闭区间限定窗口，使 IC 与 hit_rate 能一致地按验证窗口取样。"""
         if predictor not in ("gap", "confidence_pct", "our_alpha"):
             raise ValueError("predictor must be gap|confidence_pct|our_alpha")
@@ -485,7 +493,8 @@ class SQLiteStore:
         # 套 o.excess_return IS NOT NULL（最新 final 无收益值则该 decision 不进样本，不回退旧 final）。
         hz_outer = " AND o.horizon_label = ?" if horizon else ""
         hz_sub = " AND o2.horizon_label = ?" if horizon else ""
-        asof_outer = " AND o.created_at <= ?" if asof else ""
+        # 决策侧只加外层、不镜像进子查询，理由同 hit_rate（d.created_at 在子查询内是行常量）。
+        asof_outer = " AND o.created_at <= ? AND d.created_at <= ?" if asof else ""
         asof_sub = " AND o2.created_at <= ?" if asof else ""
         q = (f"SELECT d.{predictor} AS x, o.excess_return AS y FROM decision_log d "
              "JOIN decision_outcome o ON o.decision_id=d.decision_id "
@@ -494,12 +503,13 @@ class SQLiteStore:
              " AND o.outcome_id = ("
              "  SELECT MAX(o2.outcome_id) FROM decision_outcome o2 "
              "  WHERE o2.decision_id=d.decision_id AND o2.is_final=1" + hz_sub + asof_sub + ")")
-        # 绑定顺序须与 SQL 文本一致：hz_outer, asof_outer, hz_sub, asof_sub, since, until
+        # 绑定顺序须与 SQL 文本一致：hz_outer, asof_outer(o, d), hz_sub, asof_sub, since, until
         params: list[Any] = []
         if horizon:
             params.append(horizon)
         if asof:
-            params.append(_eod(asof))
+            params.append(_eod(asof))    # asof_outer 第 1 个 ?：o.created_at（结果侧）
+            params.append(_eod(asof))    # asof_outer 第 2 个 ?：d.created_at（决策侧）
         if horizon:
             params.append(horizon)
         if asof:

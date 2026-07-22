@@ -413,10 +413,20 @@ class AShareTextCoordinator(TextProvider):
             return []
 
         fail_before = self._fetch_stats[source_key]["failure"]
+        # 多取 FUTURE_GUARD_HEADROOM 条余量：fetcher 内部按 max_items 截断（含未来戳）发生在
+        # 本护栏之前，若未来戳排在有效行之前会先挤掉窗内有效行。多取 → drop_future → 截回 quota，
+        # 使未来戳不占配额、也不会把「实有窗内素材」的源虚报为 empty。（常量释义见 TextProvider）
         items = self._fetch_with_fallback(
             fetcher=fetcher, source_name=source_name, source_key=source_key,
-            ticker=ticker, name=name, quota=quota, lookback_hours=lookback_hours,
+            ticker=ticker, name=name, quota=quota + self.FUTURE_GUARD_HEADROOM,
+            lookback_hours=lookback_hours,
         )
+        # 特征窗上界护栏：丢弃未来戳（look-ahead 泄露）。放在覆盖度统计**之前**，
+        # 使 hit_count / status 反映过滤后的真实素材——只抓到未来戳的源应记 empty 而非 ok。
+        # 源时区按 ticker 推断（A 股 = 北京时）：本协调器下各 fetcher 的 naive 戳一律是
+        # 源站北京时，若按部署机本地解释，非 UTC+8 部署上最近 offset 小时内的最新素材
+        # 会被整批误判成未来戳。
+        items = self.drop_future_items(items, ticker)[:quota]   # 截回本源真实配额
         failed = self._fetch_stats[source_key]["failure"] > fail_before
         status = "failed" if failed else ("ok" if items else "empty")
         coverage_rows.append(

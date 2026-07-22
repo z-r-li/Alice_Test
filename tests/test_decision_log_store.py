@@ -433,6 +433,91 @@ class TestDecisionLogStore:
                 "gap", horizon="30d", asof="2026-06-25", since="2026-06-01", until="2026-06-30")
             assert ic == pytest.approx(1.0)   # 仅窗内 a,b 的 30d final（入账 6/22 ≤ asof）→ 正序
 
+    # ---- asof 决策侧双侧约束（CogAlpha 借鉴①·L2）----------------------------
+    # 背景：save_decision 尊重显式 created_at（历史回填语义，#81），故台账里可能存在一条
+    # created_at 位于**未来**的决策行。修复前 hit_rate/IC 的 asof 只约束结果侧
+    # （o.created_at），该行会出现在它「尚不存在」的 asof 快照指标里 —— look-ahead 泄露。
+    # 修复后两方法与 get_open_decisions 一致：同时约束 d.created_at ≤ eod(asof)。
+
+    def test_hit_rate_asof_excludes_future_created_decision(self):
+        # 时钟=7/10：outcome 入账 7/10；决策 A 显式 created_at=7/20（未来回填）。
+        # asof=7/15 时该决策「尚未入账」，故无样本 → None（修前会算出 1.0）。
+        with SQLiteStore(clock=lambda: "2026-07-10T10:00:00Z") as s:
+            s.save_decision(_entry(decision_id="future", action="BUY",
+                                   created_at="2026-07-20T10:00:00Z"))
+            s.record_outcome(OutcomeEntry(decision_id="future", is_final=1, hit=1))
+            assert s.hit_rate() == pytest.approx(1.0)         # 不给 asof：仍计入
+            assert s.hit_rate(asof="2026-07-15") is None      # 决策侧未入账 → 无样本
+
+    def test_hit_rate_asof_keeps_decision_logged_before_asof(self):
+        # 反向对照（鉴别力）：决策 created_at 在 asof 之前时不得被新约束误杀。
+        with SQLiteStore(clock=lambda: "2026-07-10T10:00:00Z") as s:
+            s.save_decision(_entry(decision_id="past", action="BUY",
+                                   created_at="2026-07-01T10:00:00Z"))
+            s.record_outcome(OutcomeEntry(decision_id="past", is_final=1, hit=1))
+            assert s.hit_rate(asof="2026-07-15") == pytest.approx(1.0)
+
+    def test_hit_rate_asof_mixed_only_counts_already_logged_decisions(self):
+        # 混合：一条正常（hit=0）、一条未来戳（hit=1）。asof 快照只应看见前者 → 0.0，
+        # 而非把未来决策的命中混进来（修前 = 0.5）。
+        with SQLiteStore(clock=lambda: "2026-07-10T10:00:00Z") as s:
+            s.save_decision(_entry(decision_id="past", action="BUY",
+                                   created_at="2026-07-01T10:00:00Z"))
+            s.save_decision(_entry(decision_id="future", action="BUY",
+                                   created_at="2026-07-20T10:00:00Z"))
+            s.record_outcome(OutcomeEntry(decision_id="past", is_final=1, hit=0))
+            s.record_outcome(OutcomeEntry(decision_id="future", is_final=1, hit=1))
+            assert s.hit_rate() == pytest.approx(0.5)              # 全样本
+            assert s.hit_rate(asof="2026-07-15") == pytest.approx(0.0)
+
+    def test_ic_asof_excludes_future_created_decision(self):
+        # 两决策：一条正常、一条未来戳。asof=7/15 下入样仅 1 条 → 样本 <2 → None
+        # （修前两条都入样，IC=1.0）。
+        with SQLiteStore(clock=lambda: "2026-07-10T10:00:00Z") as s:
+            s.save_decision(_entry(decision_id="past", gap=-2.0,
+                                   created_at="2026-07-01T10:00:00Z"))
+            s.save_decision(_entry(decision_id="future", gap=5.0,
+                                   created_at="2026-07-20T10:00:00Z"))
+            s.record_outcome(OutcomeEntry(decision_id="past", is_final=1, excess_return=0.01))
+            s.record_outcome(OutcomeEntry(decision_id="future", is_final=1, excess_return=0.09))
+            assert s.information_coefficient("gap") == pytest.approx(1.0)       # 全样本
+            assert s.information_coefficient("gap", asof="2026-07-15") is None  # 样本<2
+
+    def test_hit_rate_all_filters_combined(self):
+        # test_ic_all_filters_combined 的 hit_rate 孪生：horizon + asof + since + until 全开。
+        # 专为锁死绑定顺序 —— asof_outer 现绑 2 个 ?（o.created_at, d.created_at），
+        # 错位不会报错、只会静默算错（拿 horizon_label 比时间戳），故须断言精确值。
+        with SQLiteStore(clock=lambda: "2026-06-22T00:00:00Z") as s:
+            s.save_decision(_entry(decision_id="a", action="BUY", asof_date="2026-06-21"))
+            s.save_decision(_entry(decision_id="b", action="BUY", asof_date="2026-06-21"))
+            # 窗外旧决策（since 排除）：若绑定错位把它放进来，命中率会从 1.0 掉到 2/3
+            s.save_decision(_entry(decision_id="old", action="BUY", asof_date="2026-05-01"))
+            # asof 排除：决策侧未来戳（新约束的靶子）
+            s.save_decision(_entry(decision_id="future", action="BUY", asof_date="2026-06-21",
+                                   created_at="2026-06-30T10:00:00Z"))
+            # horizon 排除：同一决策更晚写入的 90d final（不得覆盖 30d 档）
+            for did, hit in [("a", 1), ("b", 1), ("old", 0), ("future", 0)]:
+                s.record_outcome(OutcomeEntry(decision_id=did, is_final=1, hit=hit,
+                                              horizon_label="30d"))
+            s.record_outcome(OutcomeEntry(decision_id="a", is_final=1, hit=0,
+                                          horizon_label="90d"))
+            rate = s.hit_rate(horizon="30d", asof="2026-06-25",
+                              since="2026-06-01", until="2026-06-30")
+            assert rate == pytest.approx(1.0)   # 仅 a,b 的 30d final；old/future 各被一门挡掉
+
+    def test_asof_decision_side_matches_get_open_decisions(self):
+        # 口径一致性：同一条未来戳决策，get_open_decisions 与 hit_rate/IC 必须给出
+        # 同样的「asof 时尚不存在」判定（修前二者不一致 —— 这正是 L2 的本质）。
+        with SQLiteStore(clock=lambda: "2026-07-10T10:00:00Z") as s:
+            s.save_decision(_entry(decision_id="future", action="BUY", gap=1.0,
+                                   created_at="2026-07-20T10:00:00Z"))
+            s.record_outcome(OutcomeEntry(decision_id="future", is_final=1, hit=1,
+                                          excess_return=0.05))
+            assert [r["decision_id"] for r in s.get_open_decisions(asof="2026-07-15")] == []
+            assert [r["decision_id"] for r in s.get_decisions(asof="2026-07-15")] == []
+            assert s.hit_rate(asof="2026-07-15") is None
+            assert s.information_coefficient("gap", asof="2026-07-15") is None
+
 
 class TestSQLiteReportStore:
     """audit_reports SQLite 后端（原 NotImplementedError 桩 → 可用实现）。"""

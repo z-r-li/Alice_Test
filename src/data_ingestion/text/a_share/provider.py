@@ -130,19 +130,23 @@ class AShareTextProvider(TextProvider):
             if fetcher is None:
                 continue
 
+            # 多取 FUTURE_GUARD_HEADROOM 条余量：fetcher 内部按 max_items 截断（含未来戳）
+            # 发生在上界护栏之前，未来戳排在有效行前会先挤掉窗内有效行。多取 → drop_future
+            # → 截回 quota，与 AShareTextCoordinator._collect 同一处理（常量释义见 TextProvider）。
             result = fetcher.fetch(
                 ticker=ticker,
                 symbol=symbol,
                 name=name,
                 lookback_hours=lookback_hours,
-                max_items=quota,
+                max_items=quota + self.FUTURE_GUARD_HEADROOM,
             )
             fetch_results.append(result)
 
             if result.success and result.items:
-                all_items.extend(result.items)
+                kept = self.drop_future_items(result.items, ticker)[:quota]
+                all_items.extend(kept)
                 logger.debug(
-                    f"[{ticker}] {source_type.value}: 获取 {len(result.items)}/{quota} 条"
+                    f"[{ticker}] {source_type.value}: 获取 {len(kept)}/{quota} 条"
                 )
             elif not result.success:
                 logger.warning(

@@ -221,6 +221,17 @@ class TextProviderFactory:
             max_items: 最大返回条数，默认 10 条
             source_types: 可选的数据源类型过滤列表，为 None 时返回所有类型
 
+        统一上界过滤：provider 返回后一律走 ``TextProvider.drop_future_items``——
+        ``published_at > now`` 的条目丢弃并告警（不 fail 整跑），堵住各 fetcher「只有下界、
+        零上界」留下的 look-ahead 泄露口。一处覆盖本工厂下的所有 provider（A股/HK/US/mock）。
+
+        naive ``published_at`` 的时区按**来源**判定而非部署机：真实 A 股 fetcher 盖的是北京
+        墙上时间（``source_tz_for_market``），而 ``use_mock`` 下 MockTextProvider 用本地
+        ``datetime.now()``，故 mock 路径按本地解释（``source_tz=None``）。
+
+        注意：A 股**生产**路径不经过本工厂（``main.py`` 直接调 ``AShareTextCoordinator``），
+        故同一护栏在 coordinator._collect 内另有一处；二者是并列的聚合口，不是重复。
+
         Returns:
             list[TextItem]: 文本数据列表，按相关性/时间排序
 
@@ -234,17 +245,19 @@ class TextProviderFactory:
             >>> len(texts)
             5
         """
-        # 延迟导入避免循环依赖
-        from ..models import TextItem
-
         provider = cls.get_provider(ticker, use_mock=use_mock, config=config)
-        return provider.fetch_texts(
+        items = provider.fetch_texts(
             ticker=ticker,
             name=name,
             lookback_hours=lookback_hours,
             max_items=max_items,
             source_types=source_types,
         )
+        if use_mock:
+            # MockTextProvider 用本地 datetime.now() 盖戳，须显式按本地解释；
+            # 非 mock 时走默认（按 ticker 推断源时区，A 股 = 北京时）。
+            return TextProvider.drop_future_items(items, ticker, source_tz=None)
+        return TextProvider.drop_future_items(items, ticker)
 
     @classmethod
     def reset(cls) -> None:
