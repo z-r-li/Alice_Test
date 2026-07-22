@@ -55,6 +55,31 @@ def _readonly_uri(path: str) -> str:
     return Path(path).resolve().as_uri() + "?mode=ro"
 
 
+def _assert_not_wal(path: str) -> None:
+    """readonly 开库前拒 WAL 库（fail-closed，PR #91 复审实证）。
+
+    ``mode=ro`` 对 ``journal_mode=WAL`` 的库**仍会**在旁边创建 ``-wal`` / ``-shm``
+    边车（写端干净关闭后 WAL 标记留在文件头，首次只读读取即落边车、关闭不清理；
+    只读目录则直接打不开），破坏「零写 / 零边车 / 只读快照可用」承诺。本仓决策
+    日志库由 ``SQLiteStore`` 建库，journal_mode 恒为默认 delete——WAL 只可能来自
+    外部改动，如实拒绝并指引切回。检测直接读文件头第 18/19 字节（format
+    version，2 = WAL），不经 SQLite、零副作用；文件打不开 / 过短交给后续
+    ``sqlite3.connect`` 报既有错误。"""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(20)
+    except OSError:
+        return
+    if len(header) >= 20 and (header[18] == 2 or header[19] == 2):
+        raise RuntimeError(
+            f"决策日志库为 WAL 模式（{path}）：mode=ro 只读打开仍会创建 -wal/-shm "
+            "边车文件，只读目录 / 只读快照直接失败。请先用可写连接执行 "
+            "`PRAGMA journal_mode=DELETE`（自动 checkpoint 合并 WAL）切回默认 "
+            "delete 模式再以 readonly=True 只读使用；快照在只读介质上时，先复制"
+            "到可写位置完成上述切换。"
+        )
+
+
 # Enumerated labels for the two M4 open semantic questions (recommended default first).
 CONFIDENCE_BASES = ("hit_prob", "outperform_prob", "interval_conf")
 IC_OUTCOME_DEFS = ("price_excess_return", "revenue_profit_growth", "event_realized")
@@ -163,7 +188,8 @@ class SQLiteStore:
 
         ``readonly``：真只读打开（SQLite ``mode=ro`` URI，OS 层拒写）——零 DDL /
         零写，不建表不迁移，供纯读用途（如日报）安全指向生产库或只读快照。开库即做
-        schema 门禁：旧库缺迁移列 → 抛错指引先用可写连接完成迁移（fail-closed），
+        两道 fail-closed 门禁：WAL 库拒绝（``mode=ro`` 对 WAL 仍会落 -wal/-shm 边车，
+        见 ``_assert_not_wal``）；旧库缺迁移列 → 抛错指引先用可写连接完成迁移，
         而非静默让后续查询炸出难定位的 ``no such column``。``:memory:`` 与 readonly
         互斥（全新内存库必为空，只读打开永无可读数据）。"""
         self.path = path
@@ -172,6 +198,8 @@ class SQLiteStore:
         if readonly:
             if path == ":memory:":
                 raise ValueError("readonly=True 不支持 :memory:（全新内存库必为空，只读打开无意义）")
+            # 连接前拒 WAL：否则 mode=ro 首次读取即落 -wal/-shm 边车（零边车承诺破功）
+            _assert_not_wal(path)
             # mode=ro：文件不存在直接 unable to open（不建库）；存在也绝不落 journal。
             self.conn = sqlite3.connect(_readonly_uri(path), uri=True)
         else:

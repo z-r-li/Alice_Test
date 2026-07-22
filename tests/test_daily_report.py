@@ -282,6 +282,17 @@ class TestReadonlyReportAccess:
         finally:
             os.chmod(seeded_db, stat.S_IREAD | stat.S_IWRITE)
 
+    def test_wal_db_rejected_with_conversion_guidance(self, seeded_db):
+        # WAL 库 + mode=ro 仍会落 -wal/-shm 边车（PR #91 复审实证）→ 日报路径
+        # fail-closed 拒绝并指引切回 delete，且拒绝先于任何 SQLite 打开（零边车）。
+        import sqlite3
+        conn = sqlite3.connect(str(seeded_db))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.close()
+        with pytest.raises(RuntimeError, match="journal_mode=DELETE"):
+            build_daily_report_html(str(seeded_db), ASOF)
+        assert [p.name for p in seeded_db.parent.iterdir()] == [seeded_db.name]
+
     def test_old_schema_db_errors_with_migration_guidance(self, tmp_path):
         # 旧库（缺 signal_semantics / cov_links_* / outcome.created_at）：明确报错
         # 指引「先用可写连接打开一次完成迁移」，绝不静默改生产库 schema。

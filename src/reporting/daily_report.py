@@ -7,9 +7,10 @@ hit_rate / information_coefficient（复用 ``SQLiteStore`` 既有口径与去�
 非确定性是页脚「生成时间」单行（测试断言时排除该行）。
 
 真只读（PR #90 复审落地）：以 ``SQLiteStore(db_path, readonly=True)``（SQLite
-``mode=ro`` URI）打开，**零 DDL / 零写**——指向生产库不会动 schema，指向只读快照 /
-只读文件系统亦可用。旧库缺迁移列时开库即抛明确指引（先用可写连接打开一次完成
-自动迁移，再生成日报），fail-closed 不静默。
+``mode=ro`` URI）打开，**零 DDL / 零写 / 零边车**——指向生产库不会动 schema，指向
+只读快照 / 只读文件系统亦可用。两类异常库 fail-closed 不静默：旧库缺迁移列 →
+开库即抛明确指引（先用可写连接打开一次完成自动迁移）；WAL 模式库 → 拒绝并指引
+切回 delete 模式（``mode=ro`` 对 WAL 仍会落 -wal/-shm 边车，破坏上述承诺）。
 
 自包含约定：单文件 HTML、内嵌 CSS、UTF-8、无 JS、无外链 / 无外部字体——浏览器
 直开与 Lark 粘贴均可。fail-closed 风格：NULL 显示「—」、绝不显示为 0 或编数；
@@ -282,8 +283,9 @@ def build_daily_report_html(db_path: str, asof_date: str) -> str:
         ValueError: asof_date 非 YYYY-MM-DD（或 db_path 为 ``:memory:``——只读打开
             全新内存库无意义，store 直接拒绝）。
         FileNotFoundError: DB 文件不存在（fail-closed：不静默建空库、不产出空心报表）。
-        RuntimeError: 库 schema 落后于当前版本（旧库缺迁移列）——按报错指引先用
-            可写连接打开一次完成自动迁移（如 ``SQLiteStore(path)``），再生成日报。
+        RuntimeError: 库 schema 落后于当前版本（旧库缺迁移列，按报错指引先用可写
+            连接打开一次完成自动迁移），或库为 WAL 模式（``mode=ro`` 仍会落
+            -wal/-shm 边车，按指引 ``PRAGMA journal_mode=DELETE`` 切回后再生成）。
     """
     asof_date = _normalize_date(asof_date)
     if db_path != ":memory:" and not Path(db_path).exists():
