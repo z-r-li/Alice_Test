@@ -30,7 +30,7 @@ Alice Test 是一个自动化 Python 数据流水线，用于监控特定投资�
 - 🤖 基于 DeepSeek-V4-Flash 的市场情绪分析
 - 📊 认知差计算与信号生成 (OPPORTUNITY / OVERHEATED / WAIT)
 - 📚 S3 proxy 备选库：提案「库中选型 + 允许补充」（fail-closed，可一键回退无库行为）
-- 📁 CSV / SQLite 审计报告输出（SQLite 后端含 S7 决策日志）
+- 📁 CSV 审计报告输出；可选 SQLite S7 决策日志（`persistence.backend=sqlite`）
 - 📄 可选自包含 HTML 日报（零 LLM / 零网络，只读决策日志 SQLite）
 
 ---
@@ -336,7 +336,7 @@ targets:
 | LLM 服务 | DeepSeek-V4-Flash |
 | A股数据 | Tushare / AkShare |
 | 港美股数据 | yfinance |
-| 存储 | CSV / SQLite（审计报告 + S7 决策日志） |
+| 存储 | CSV（审计报告）+ SQLite（S7 决策日志，可选） |
 
 ---
 
