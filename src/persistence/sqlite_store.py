@@ -49,6 +49,12 @@ def _eod(date_str: str) -> str:
     return date_str if "T" in date_str else date_str + "T23:59:59Z"
 
 
+def _readonly_uri(path: str) -> str:
+    """SQLite 只读 URI（``mode=ro``）。走 ``Path.as_uri()``：绝对化 + 百分号转义，
+    含空格 / 非 ASCII 的 Windows 路径也能安全进 URI（SQLite 会做 %XX 解码）。"""
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
 # Enumerated labels for the two M4 open semantic questions (recommended default first).
 CONFIDENCE_BASES = ("hit_prob", "outperform_prob", "interval_conf")
 IC_OUTCOME_DEFS = ("price_excess_return", "revenue_profit_growth", "event_realized")
@@ -150,15 +156,32 @@ def _pearson(xs: list[float], ys: list[float]) -> Optional[float]:
 class SQLiteStore:
     """One DB file for P2 persistence. v0.1 = decision log fully usable."""
 
-    def __init__(self, path: str = ":memory:", clock: Optional[Callable[[], str]] = None):
+    def __init__(self, path: str = ":memory:", clock: Optional[Callable[[], str]] = None,
+                 readonly: bool = False):
         """``clock``：可注入的「现在」时钟（返回 ISO8601 UTC 串），默认真实墙钟。
-        仅供测试注入确定性入账时刻；生产路径绝不由调用方提供入账时间。"""
+        仅供测试注入确定性入账时刻；生产路径绝不由调用方提供入账时间。
+
+        ``readonly``：真只读打开（SQLite ``mode=ro`` URI，OS 层拒写）——零 DDL /
+        零写，不建表不迁移，供纯读用途（如日报）安全指向生产库或只读快照。开库即做
+        schema 门禁：旧库缺迁移列 → 抛错指引先用可写连接完成迁移（fail-closed），
+        而非静默让后续查询炸出难定位的 ``no such column``。``:memory:`` 与 readonly
+        互斥（全新内存库必为空，只读打开永无可读数据）。"""
         self.path = path
         self._clock = clock or _utcnow
-        self.conn = sqlite3.connect(path)
+        self.readonly = readonly
+        if readonly:
+            if path == ":memory:":
+                raise ValueError("readonly=True 不支持 :memory:（全新内存库必为空，只读打开无意义）")
+            # mode=ro：文件不存在直接 unable to open（不建库）；存在也绝不落 journal。
+            self.conn = sqlite3.connect(_readonly_uri(path), uri=True)
+        else:
+            self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
-        self._create_tables()
+        if readonly:
+            self._assert_schema_current()
+        else:
+            self._create_tables()
 
     def __enter__(self) -> "SQLiteStore":
         return self
@@ -265,6 +288,34 @@ class SQLiteStore:
                     "cov_links_evidenced", "cov_links_dd"):
             if col not in dcols:
                 self.conn.execute(f"ALTER TABLE decision_log ADD COLUMN {col} INTEGER")
+
+    def _assert_schema_current(self) -> None:
+        """只读开库的 schema 门禁（fail-closed，readonly=True 专用）。
+
+        ``mode=ro`` 下无法执行 ``_create_tables`` / ``_migrate`` 的前向迁移 DDL；若
+        指向旧库（缺迁移补的列：``signal_semantics`` / ``cov_links_*`` /
+        ``decision_outcome.created_at``），后续查询会在深处炸 ``no such column``。
+        期望列集合取自 dataclass 字段（``decision_log`` 列 = DecisionEntry 字段；
+        ``decision_outcome`` = OutcomeEntry 字段 + store 盖戳的 ``created_at``），与
+        DDL/迁移终态同源——未来加列自动纳入门禁，无需另行维护清单。"""
+        expected = {
+            "decision_log": set(_DECISION_COLS),
+            "decision_outcome": set(_OUTCOME_COLS) | {"created_at"},
+        }
+        problems: list[str] = []
+        for table, want in expected.items():
+            have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if not have:
+                problems.append(f"{table} 表不存在")
+            elif want - have:
+                problems.append(f"{table} 缺列 {sorted(want - have)}")
+        if problems:
+            self.conn.close()   # 及早释放句柄（Windows 上残留句柄会卡住临时目录清理）
+            raise RuntimeError(
+                "只读打开的决策日志库 schema 落后于当前版本：" + "；".join(problems)
+                + "。请先用可写连接打开一次完成自动迁移（如 `SQLiteStore(path)` "
+                  "正常打开即迁移），再以 readonly=True 只读使用。"
+            )
 
     # ---- validation (fail-closed discipline) -------------------------------
     @staticmethod
